@@ -35,6 +35,10 @@ namespace doris {
 using namespace ErrorCode;
 
 bvar::Adder<uint64_t> base_output_size("base_compaction", "output_size");
+bvar::Adder<uint64_t> base_input_cached_size("base_compaction", "input_cached_size");
+bvar::Adder<uint64_t> base_input_size("base_compaction", "input_size");
+bvar::LatencyRecorder g_base_compaction_hold_delete_bitmap_lock_time_ms(
+        "base_compaction_hold_delete_bitmap_lock_time_ms");
 
 CloudBaseCompaction::CloudBaseCompaction(CloudStorageEngine& engine, CloudTabletSPtr tablet)
         : CloudCompactionMixin(engine, tablet,
@@ -80,6 +84,8 @@ Status CloudBaseCompaction::prepare_compact() {
         _input_rowsets_data_size += rs->data_disk_size();
         _input_rowsets_index_size += rs->index_disk_size();
         _input_rowsets_total_size += rs->total_disk_size();
+        _input_rowsets_cached_data_size += rs->approximate_cached_data_size();
+        _input_rowsets_cached_index_size += rs->approximate_cache_index_size();
     }
     LOG_INFO("start CloudBaseCompaction, tablet_id={}, range=[{}-{}]", _tablet->tablet_id(),
              _input_rowsets.front()->start_version(), _input_rowsets.back()->end_version())
@@ -89,7 +95,11 @@ Status CloudBaseCompaction::prepare_compact() {
             .tag("input_segments", _input_segments)
             .tag("input_rowsets_data_size", _input_rowsets_data_size)
             .tag("input_rowsets_index_size", _input_rowsets_index_size)
-            .tag("input_rowsets_total_size", _input_rowsets_total_size);
+            .tag("input_rowsets_total_size", _input_rowsets_total_size)
+            .tag("input_rowsets_cached_data_size", _input_rowsets_cached_data_size)
+            .tag("input_rowsets_cached_index_size", _input_rowsets_cached_index_size);
+    base_input_cached_size << (_input_rowsets_cached_data_size + _input_rowsets_cached_index_size);
+    base_input_size << _input_rowsets_total_size;
     return Status::OK();
 }
 
@@ -342,7 +352,7 @@ Status CloudBaseCompaction::modify_rowsets() {
     compaction_job->set_size_output_rowsets(_output_rowset->total_disk_size());
     compaction_job->set_num_input_segments(_input_segments);
     compaction_job->set_num_output_segments(_output_rowset->num_segments());
-    compaction_job->set_num_input_rowsets(_input_rowsets.size());
+    compaction_job->set_num_input_rowsets(num_input_rowsets());
     compaction_job->set_num_output_rowsets(1);
     compaction_job->add_input_versions(_input_rowsets.front()->start_version());
     compaction_job->add_input_versions(_input_rowsets.back()->end_version());
@@ -355,13 +365,14 @@ Status CloudBaseCompaction::modify_rowsets() {
     compaction_job->set_segment_size_output_rowsets(_output_rowset->data_disk_size());
 
     DeleteBitmapPtr output_rowset_delete_bitmap = nullptr;
+    int64_t get_delete_bitmap_lock_start_time = 0;
     if (_tablet->keys_type() == KeysType::UNIQUE_KEYS &&
         _tablet->enable_unique_key_merge_on_write()) {
         int64_t initiator = this->initiator();
         RETURN_IF_ERROR(cloud_tablet()->calc_delete_bitmap_for_compaction(
                 _input_rowsets, _output_rowset, *_rowid_conversion, compaction_type(),
                 _stats.merged_rows, initiator, output_rowset_delete_bitmap,
-                _allow_delete_in_cumu_compaction));
+                _allow_delete_in_cumu_compaction, get_delete_bitmap_lock_start_time));
         LOG_INFO("update delete bitmap in CloudBaseCompaction, tablet_id={}, range=[{}-{}]",
                  _tablet->tablet_id(), _input_rowsets.front()->start_version(),
                  _input_rowsets.back()->end_version())
@@ -376,6 +387,12 @@ Status CloudBaseCompaction::modify_rowsets() {
 
     cloud::FinishTabletJobResponse resp;
     auto st = _engine.meta_mgr().commit_tablet_job(job, &resp);
+    if (_tablet->keys_type() == KeysType::UNIQUE_KEYS &&
+        _tablet->enable_unique_key_merge_on_write()) {
+        int64_t hold_delete_bitmap_lock_time_ms =
+                (MonotonicMicros() - get_delete_bitmap_lock_start_time) / 1000;
+        g_base_compaction_hold_delete_bitmap_lock_time_ms << hold_delete_bitmap_lock_time_ms;
+    }
     if (!st.ok()) {
         if (resp.status().code() == cloud::TABLET_NOT_FOUND) {
             cloud_tablet()->clear_cache();
@@ -426,6 +443,7 @@ Status CloudBaseCompaction::modify_rowsets() {
                                                     stats.num_rows(), stats.data_size());
         }
     }
+    _tablet->prefill_dbm_agg_cache_after_compaction(_output_rowset);
     return Status::OK();
 }
 

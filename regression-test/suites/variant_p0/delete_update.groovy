@@ -22,10 +22,11 @@ suite("regression_test_variant_delete_and_update", "variant_type"){
     def table_name = "var_delete_update"
     sql "DROP TABLE IF EXISTS ${table_name}"
     sql """ set enable_variant_flatten_nested = true """
+    def max_subcolumns_count = new Random().nextInt(10) + 1
     sql """
         CREATE TABLE IF NOT EXISTS ${table_name} (
             k bigint,
-            v variant
+            v variant<'a' : int, 'b' : array<int>, 'c' : double, properties("variant_max_subcolumns_count" = "${max_subcolumns_count}")>
         )
         UNIQUE KEY(`k`)
         DISTRIBUTED BY HASH(k) BUCKETS 3
@@ -33,11 +34,11 @@ suite("regression_test_variant_delete_and_update", "variant_type"){
     """
     // test mor table
 
-    sql """insert into ${table_name} values (1, '{"a":1,"b":[1],"c":1.0, "d" : [{"x" : 1}]}')"""
-    sql """insert into ${table_name} values (2, '{"a":2,"b":[1],"c":2.0, "d" : [{"y" : 1}]}')"""
-    sql """insert into ${table_name} values (3, '{"a":3,"b":[3],"c":3.0, "d" : [{"o" : 1}]}')"""
-    sql """insert into ${table_name} values (4, '{"a":4,"b":[4],"c":4.0, "d" : [{"p" : 1}]}')"""
-    sql """insert into ${table_name} values (5, '{"a":5,"b":[5],"c":5.0, "d" : [{"q" : 1}]}')"""
+    sql """insert into ${table_name} values (1, '{"a":1,"b":[1],"c":1.1, "d" : [{"x" : 1}]}')"""
+    sql """insert into ${table_name} values (2, '{"a":2,"b":[1],"c":2.1, "d" : [{"y" : 1}]}')"""
+    sql """insert into ${table_name} values (3, '{"a":3,"b":[3],"c":3.1, "d" : [{"o" : 1}]}')"""
+    sql """insert into ${table_name} values (4, '{"a":4,"b":[4],"c":4.1, "d" : [{"p" : 1}]}')"""
+    sql """insert into ${table_name} values (5, '{"a":5,"b":[5],"c":5.1, "d" : [{"q" : 1}]}')"""
 
     sql "delete from ${table_name} where k = 1"
     sql """update ${table_name} set v = '{"updated_value":123}' where k = 2"""
@@ -51,7 +52,7 @@ suite("regression_test_variant_delete_and_update", "variant_type"){
     sql """
         CREATE TABLE IF NOT EXISTS ${table_name} (
             k bigint,
-            v  variant,
+            v  variant<'a' : int, 'b' : array<int>, 'c' : double, properties("variant_max_subcolumns_count" = "${max_subcolumns_count}")>,
             vs string 
         )
         UNIQUE KEY(`k`)

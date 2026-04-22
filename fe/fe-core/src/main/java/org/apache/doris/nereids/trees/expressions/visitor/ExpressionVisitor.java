@@ -40,6 +40,7 @@ import org.apache.doris.nereids.trees.expressions.Cast;
 import org.apache.doris.nereids.trees.expressions.ComparisonPredicate;
 import org.apache.doris.nereids.trees.expressions.CompoundPredicate;
 import org.apache.doris.nereids.trees.expressions.DefaultValueSlot;
+import org.apache.doris.nereids.trees.expressions.DereferenceExpression;
 import org.apache.doris.nereids.trees.expressions.Divide;
 import org.apache.doris.nereids.trees.expressions.EqualTo;
 import org.apache.doris.nereids.trees.expressions.Exists;
@@ -52,7 +53,6 @@ import org.apache.doris.nereids.trees.expressions.IntegralDivide;
 import org.apache.doris.nereids.trees.expressions.IsNull;
 import org.apache.doris.nereids.trees.expressions.LessThan;
 import org.apache.doris.nereids.trees.expressions.LessThanEqual;
-import org.apache.doris.nereids.trees.expressions.ListQuery;
 import org.apache.doris.nereids.trees.expressions.MarkJoinSlotReference;
 import org.apache.doris.nereids.trees.expressions.Match;
 import org.apache.doris.nereids.trees.expressions.MatchAll;
@@ -334,7 +334,7 @@ public abstract class ExpressionVisitor<R, C>
     }
 
     public R visitCompoundPredicate(CompoundPredicate compoundPredicate, C context) {
-        return visitBinaryOperator(compoundPredicate, context);
+        return visit(compoundPredicate, context);
     }
 
     public R visitAnd(And and, C context) {
@@ -427,10 +427,6 @@ public abstract class ExpressionVisitor<R, C>
 
     public R visitScalarSubquery(ScalarSubquery scalar, C context) {
         return visitSubqueryExpr(scalar, context);
-    }
-
-    public R visitListQuery(ListQuery listQuery, C context) {
-        return visitSubqueryExpr(listQuery, context);
     }
 
     public R visitGroupingScalarFunction(GroupingScalarFunction groupingScalarFunction, C context) {
@@ -535,5 +531,9 @@ public abstract class ExpressionVisitor<R, C>
 
     public R visitUnboundVariable(UnboundVariable unboundVariable, C context) {
         return visit(unboundVariable, context);
+    }
+
+    public R visitDereferenceExpression(DereferenceExpression dereferenceExpression, C context) {
+        return visit(dereferenceExpression, context);
     }
 }

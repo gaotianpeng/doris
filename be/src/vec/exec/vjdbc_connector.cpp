@@ -36,6 +36,7 @@
 #include "runtime/types.h"
 #include "runtime/user_function_cache.h"
 #include "util/jni-util.h"
+#include "util/path_util.h"
 #include "util/runtime_profile.h"
 #include "vec/columns/column_nullable.h"
 #include "vec/core/block.h"
@@ -67,23 +68,51 @@ JdbcConnector::~JdbcConnector() {
 
 Status JdbcConnector::close(Status /*unused*/) {
     SCOPED_RAW_TIMER(&_jdbc_statistic._connector_close_timer);
-    _closed = true;
-    if (!_is_open) {
+    if (_closed) {
         return Status::OK();
     }
-    if (_is_in_transaction) {
-        RETURN_IF_ERROR(abort_trans());
+    if (!_is_open) {
+        _closed = true;
+        return Status::OK();
     }
+
     JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
+    Status status = JniUtil::GetJNIEnv(&env);
+    if (!status.ok() || env == nullptr) {
+        LOG(WARNING) << "Failed to get JNIEnv in close(): " << status.to_string();
+        _closed = true;
+        return status;
+    }
+
+    // Try to abort transaction and call Java close(), but don't block cleanup
+    if (_is_in_transaction) {
+        Status abort_status = abort_trans();
+        if (!abort_status.ok()) {
+            LOG(WARNING) << "Failed to abort transaction: " << abort_status.to_string();
+        }
+    }
+
     env->CallNonvirtualVoidMethod(_executor_obj, _executor_clazz, _executor_close_id);
-    RETURN_ERROR_IF_EXC(env);
-    env->DeleteGlobalRef(_executor_factory_clazz);
-    RETURN_ERROR_IF_EXC(env);
-    env->DeleteGlobalRef(_executor_clazz);
-    RETURN_IF_ERROR(JniUtil::GetJniExceptionMsg(env));
-    env->DeleteGlobalRef(_executor_obj);
-    RETURN_ERROR_IF_EXC(env);
+    if (env->ExceptionCheck()) {
+        LOG(WARNING) << "Java close() failed: " << JniUtil::GetJniExceptionMsg(env).to_string();
+        env->ExceptionClear();
+    }
+
+    // Always delete Global References to allow Java GC
+    if (_executor_factory_clazz != nullptr) {
+        env->DeleteGlobalRef(_executor_factory_clazz);
+        _executor_factory_clazz = nullptr;
+    }
+    if (_executor_clazz != nullptr) {
+        env->DeleteGlobalRef(_executor_clazz);
+        _executor_clazz = nullptr;
+    }
+    if (_executor_obj != nullptr) {
+        env->DeleteGlobalRef(_executor_obj);
+        _executor_obj = nullptr;
+    }
+
+    _closed = true;
     return Status::OK();
 }
 
@@ -126,7 +155,8 @@ Status JdbcConnector::open(RuntimeState* state, bool read) {
     // Add a scoped cleanup jni reference object. This cleans up local refs made below.
     JniLocalFrame jni_frame;
     {
-        std::string driver_path = _get_real_url(_conn_param.driver_path);
+        std::string driver_path = doris::path_util::get_real_plugin_url(
+                _conn_param.driver_path, doris::config::jdbc_drivers_dir, "jdbc_drivers", "");
 
         TJdbcExecutorCtorParams ctor_params;
         ctor_params.__set_statement(_sql_str);
@@ -631,13 +661,6 @@ Status JdbcConnector::_get_java_table_type(JNIEnv* env, TOdbcTableType::type tab
     RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, java_enum_local_obj, java_enum_obj));
     env->DeleteLocalRef(java_enum_local_obj);
     return Status::OK();
-}
-
-std::string JdbcConnector::_get_real_url(const std::string& url) {
-    if (url.find(":/") == std::string::npos) {
-        return "file://" + config::jdbc_drivers_dir + "/" + url;
-    }
-    return url;
 }
 
 } // namespace doris::vectorized

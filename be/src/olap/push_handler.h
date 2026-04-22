@@ -20,8 +20,8 @@
 #include <butil/macros.h>
 #include <gen_cpp/AgentService_types.h>
 #include <gen_cpp/Exprs_types.h>
-#include <stdint.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,6 +35,7 @@
 #include "olap/rowset/rowset_fwd.h"
 #include "olap/tablet_fwd.h"
 #include "runtime/runtime_state.h"
+#include "vec/core/block.h"
 #include "vec/exec/format/generic_reader.h"
 
 namespace doris {
@@ -48,7 +49,6 @@ class TTabletInfo;
 class StorageEngine;
 
 namespace vectorized {
-class Block;
 class GenericReader;
 class VExprContext;
 } // namespace vectorized
@@ -136,6 +136,7 @@ private:
     std::vector<TFileRangeDesc> _file_ranges;
 
     std::unique_ptr<io::FileCacheStatistics> _file_cache_statistics;
+    std::unique_ptr<io::FileReaderStats> _file_reader_stats;
     std::unique_ptr<io::IOContext> _io_ctx;
 
     // col names from _slot_descs

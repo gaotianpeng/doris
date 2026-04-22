@@ -16,14 +16,19 @@
 // under the License.
 
 suite("test_s3tables_write_partitions", "p0,external,iceberg,external_docker,external_docker_iceberg") {
+    // disable this test by default, glue + s3table is recommended
+    def run_test = false;
+    if (!run_test) {
+        return;
+    }
     def format_compressions = ["parquet_snappy", "orc_zlib"]
 
     def test_s3_columns_out_of_order = {  String format_compression, String catalog_name ->
         def parts = format_compression.split("_")
         def format = parts[0]
         def compression = parts[1]
-        def source_tbl = "s3_columns_out_of_order_source_tbl_${format_compression}_branch30"
-        def target_tbl = "s3_columns_out_of_order_target_tbl_${format_compression}_branch30"
+        def source_tbl = "s3_columns_out_of_order_source_tbl_${format_compression}_branch31"
+        def target_tbl = "s3_columns_out_of_order_target_tbl_${format_compression}_branch31"
         sql """ drop table if exists ${source_tbl} """
         sql """
             CREATE TABLE ${source_tbl} (

@@ -18,7 +18,6 @@
 package org.apache.doris.datasource.maxcompute.source;
 
 import org.apache.doris.analysis.BinaryPredicate;
-import org.apache.doris.analysis.CastExpr;
 import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.CompoundPredicate.Operator;
 import org.apache.doris.analysis.DateLiteral;
@@ -54,7 +53,6 @@ import org.apache.doris.thrift.TTableFormatFileDesc;
 
 import com.aliyun.odps.OdpsType;
 import com.aliyun.odps.PartitionSpec;
-import com.aliyun.odps.table.TableIdentifier;
 import com.aliyun.odps.table.configuration.ArrowOptions;
 import com.aliyun.odps.table.configuration.ArrowOptions.TimestampUnit;
 import com.aliyun.odps.table.optimizer.predicate.Predicate;
@@ -62,9 +60,10 @@ import com.aliyun.odps.table.read.TableBatchReadSession;
 import com.aliyun.odps.table.read.TableReadSessionBuilder;
 import com.aliyun.odps.table.read.split.InputSplitAssigner;
 import com.aliyun.odps.table.read.split.impl.IndexedInputSplit;
-import com.google.common.collect.Maps;
 import jline.internal.Log;
 import lombok.Setter;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -91,6 +90,8 @@ public class MaxComputeScanNode extends FileQueryScanNode {
     static final DateTimeFormatter dateTime3Formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
     static final DateTimeFormatter dateTime6Formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
 
+    private static final Logger LOG = LogManager.getLogger(MaxComputeScanNode.class);
+
     private final MaxComputeExternalTable table;
     private Predicate filterPredicate;
     List<String> requiredPartitionColumns = new ArrayList<>();
@@ -103,8 +104,8 @@ public class MaxComputeScanNode extends FileQueryScanNode {
     @Setter
     private SelectedPartitions selectedPartitions = null;
 
-    private static final LocationPath ROW_OFFSET_PATH = new LocationPath("/row_offset", Maps.newHashMap());
-    private static final LocationPath BYTE_SIZE_PATH = new LocationPath("/byte_size", Maps.newHashMap());
+    private static final LocationPath ROW_OFFSET_PATH = LocationPath.of("/row_offset");
+    private static final LocationPath BYTE_SIZE_PATH = LocationPath.of("/byte_size");
 
 
     // For new planner
@@ -192,7 +193,8 @@ public class MaxComputeScanNode extends FileQueryScanNode {
         retryTimes = mcCatalog.getRetryTimes();
 
         TableReadSessionBuilder scanBuilder = new TableReadSessionBuilder();
-        return scanBuilder.identifier(TableIdentifier.of(table.getDbName(), table.getName()))
+
+        return scanBuilder.identifier(table.getTableIdentifier())
                         .withSettings(mcCatalog.getSettings())
                         .withSplitOptions(mcCatalog.getSplitOption())
                         .requiredPartitionColumns(requiredPartitionColumns)
@@ -267,8 +269,10 @@ public class MaxComputeScanNode extends FileQueryScanNode {
                                     createTableBatchReadSession(requiredBatchPartitionSpecs);
                             List<Split> batchSplit = getSplitByTableSession(tableBatchReadSession);
 
-                            splitAssignment.addToQueue(batchSplit);
-                        } catch (IOException e) {
+                            if (splitAssignment.needMoreSplit()) {
+                                splitAssignment.addToQueue(batchSplit);
+                            }
+                        } catch (Exception e) {
                             batchException.set(new UserException(e.getMessage(), e));
                         } finally {
                             if (batchException.get() != null) {
@@ -288,7 +292,7 @@ public class MaxComputeScanNode extends FileQueryScanNode {
                     splitAssignment.setException(batchException.get());
                 }
             }
-        });
+        }, scheduleExecutor);
     }
 
     @Override
@@ -301,7 +305,7 @@ public class MaxComputeScanNode extends FileQueryScanNode {
         for (Expr dorisPredicate : conjuncts) {
             try {
                 odpsPredicates.add(convertExprToOdpsPredicate(dorisPredicate));
-            } catch (AnalysisException e) {
+            } catch (Exception e) {
                 Log.warn("Failed to convert predicate " + dorisPredicate.toString() + "Reason: "
                         + e.getMessage());
             }
@@ -361,11 +365,16 @@ public class MaxComputeScanNode extends FileQueryScanNode {
                             : com.aliyun.odps.table.optimizer.predicate.InPredicate.Operator.NOT_IN;
 
             String columnName = convertSlotRefToColumnName(expr.getChild(0));
+            if (!table.getColumnNameToOdpsColumn().containsKey(columnName)) {
+                Map<String, com.aliyun.odps.Column> columnMap = table.getColumnNameToOdpsColumn();
+                LOG.warn("ColumnNameToOdpsColumn size=" + columnMap.size()
+                        + ", keys=[" + String.join(", ", columnMap.keySet()) + "]");
+                throw new AnalysisException("Column " + columnName + " not found in table, can not push "
+                        + "down predicate to MaxCompute " + table.getName());
+            }
             com.aliyun.odps.OdpsType odpsType  =  table.getColumnNameToOdpsColumn().get(columnName).getType();
 
             StringBuilder stringBuilder = new StringBuilder();
-
-
             stringBuilder.append(columnName);
             stringBuilder.append(" ");
             stringBuilder.append(odpsOp.getDescription());
@@ -419,6 +428,13 @@ public class MaxComputeScanNode extends FileQueryScanNode {
 
             if (odpsOp != null) {
                 String columnName = convertSlotRefToColumnName(expr.getChild(0));
+                if (!table.getColumnNameToOdpsColumn().containsKey(columnName)) {
+                    Map<String, com.aliyun.odps.Column> columnMap = table.getColumnNameToOdpsColumn();
+                    LOG.warn("ColumnNameToOdpsColumn size=" + columnMap.size()
+                            + ", keys=[" + String.join(", ", columnMap.keySet()) + "]");
+                    throw new AnalysisException("Column " + columnName + " not found in table, can not push "
+                            + "down predicate to MaxCompute " + table.getName());
+                }
                 com.aliyun.odps.OdpsType odpsType  =  table.getColumnNameToOdpsColumn().get(columnName).getType();
                 StringBuilder stringBuilder = new StringBuilder();
                 stringBuilder.append(columnName);
@@ -454,10 +470,6 @@ public class MaxComputeScanNode extends FileQueryScanNode {
     private String convertSlotRefToColumnName(Expr expr) throws AnalysisException {
         if (expr instanceof SlotRef) {
             return ((SlotRef) expr).getColumnName();
-        } else if (expr instanceof CastExpr) {
-            if (expr.getChild(0) instanceof SlotRef) {
-                return ((SlotRef) expr.getChild(0)).getColumnName();
-            }
         }
 
         throw new AnalysisException("Do not support convert ["

@@ -969,6 +969,7 @@ void commit_txn_immediately(
             stats.put_counter += txn->num_put_keys();
             stats.del_counter += txn->num_del_keys();
         };
+
         // Get txn info with db_id and txn_id
         std::string info_val; // Will be reused when saving updated txn
         const std::string info_key = txn_info_key({instance_id, db_id, txn_id});
@@ -1086,6 +1087,8 @@ void commit_txn_immediately(
 
         // {table/partition} -> version
         std::unordered_map<std::string, uint64_t> new_versions;
+        // partition_id
+        std::unordered_set<int64_t> partition_ids;
         std::vector<std::string> version_keys;
         for (auto& [_, i] : tmp_rowsets_meta) {
             int64_t tablet_id = i.tablet_id();
@@ -1097,6 +1100,7 @@ void commit_txn_immediately(
                 new_versions.insert({ver_key, 0});
                 version_keys.push_back(std::move(ver_key));
             }
+            partition_ids.insert(partition_id);
         }
         std::vector<std::optional<std::string>> version_values;
         err = txn->batch_get(&version_values, version_keys);
@@ -1155,8 +1159,13 @@ void commit_txn_immediately(
         }
 
         std::vector<std::pair<std::string, std::string>> rowsets;
+
         std::unordered_map<int64_t, TabletStats> tablet_stats; // tablet_id -> stats
         rowsets.reserve(tmp_rowsets_meta.size());
+
+        int64_t rowsets_visible_ts_ms =
+                duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+
         for (auto& [_, i] : tmp_rowsets_meta) {
             int64_t tablet_id = i.tablet_id();
             int64_t table_id = tablet_ids[tablet_id].table_id();
@@ -1178,6 +1187,7 @@ void commit_txn_immediately(
             int64_t new_version = new_versions[ver_key];
             i.set_start_version(new_version);
             i.set_end_version(new_version);
+            i.set_visible_ts_ms(rowsets_visible_ts_ms);
 
             std::string key = meta_rowset_key({instance_id, tablet_id, i.end_version()});
             std::string val;
@@ -1395,6 +1405,9 @@ void commit_txn_immediately(
         // Finally we are done...
         err = txn->commit();
         if (err != TxnErrorCode::TXN_OK) {
+            if (err == TxnErrorCode::TXN_CONFLICT) {
+                g_bvar_delete_bitmap_lock_txn_remove_conflict_by_load_counter << 1;
+            }
             code = cast_as<ErrCategory::COMMIT>(err);
             ss << "failed to commit kv txn, txn_id=" << txn_id << " err=" << err;
             msg = ss.str();
@@ -1635,6 +1648,8 @@ void commit_txn_eventually(
 
         // <partition_version_key, version>
         std::unordered_map<std::string, uint64_t> new_versions;
+        // partition_id
+        std::unordered_set<int64_t> partition_ids;
         std::vector<std::string> version_keys;
         for (auto& [_, i] : tmp_rowsets_meta) {
             int64_t tablet_id = i.tablet_id();
@@ -1646,6 +1661,7 @@ void commit_txn_eventually(
                 new_versions.insert({ver_key, 0});
                 version_keys.push_back(std::move(ver_key));
             }
+            partition_ids.insert(partition_id);
         }
 
         std::vector<std::optional<std::string>> version_values;
@@ -1706,6 +1722,9 @@ void commit_txn_eventually(
             // partition versionPB has no txn_id
             continue;
         }
+
+        record_txn_commit_stats(txn.get(), instance_id, partition_ids.size(), tablet_ids.size(),
+                                txn_id);
 
         std::string info_val;
         const std::string info_key = txn_info_key({instance_id, db_id, txn_id});
@@ -1923,6 +1942,9 @@ void commit_txn_eventually(
 
         err = txn->commit();
         if (err != TxnErrorCode::TXN_OK) {
+            if (err == TxnErrorCode::TXN_CONFLICT) {
+                g_bvar_delete_bitmap_lock_txn_remove_conflict_by_load_counter << 1;
+            }
             code = cast_as<ErrCategory::COMMIT>(err);
             ss << "failed to commit kv txn, txn_id=" << txn_id << " err=" << err;
             msg = ss.str();
@@ -2320,7 +2342,13 @@ void commit_txn_with_sub_txn(const CommitTxnRequest* request, CommitTxnResponse*
             continue;
         }
 
+        int64_t rowsets_visible_ts_ms =
+                duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+
         std::vector<std::pair<std::string, std::string>> rowsets;
+        record_txn_commit_stats(txn.get(), instance_id, partition_ids.size(), tablet_ids.size(),
+                                txn_id);
+
         std::unordered_map<int64_t, TabletStats> tablet_stats; // tablet_id -> stats
         for (const auto& sub_txn_info : sub_txn_infos) {
             auto sub_txn_id = sub_txn_info.sub_txn_id();
@@ -2353,6 +2381,7 @@ void commit_txn_with_sub_txn(const CommitTxnRequest* request, CommitTxnResponse*
                 }
                 i.set_start_version(new_version);
                 i.set_end_version(new_version);
+                i.set_visible_ts_ms(rowsets_visible_ts_ms);
                 LOG(INFO) << "xxx update rowset version, txn_id=" << txn_id
                           << ", sub_txn_id=" << sub_txn_id << ", table_id=" << table_id
                           << ", partition_id=" << partition_id << ", tablet_id=" << tablet_id
@@ -3116,6 +3145,7 @@ void MetaServiceImpl::get_current_max_txn_id(::google::protobuf::RpcController* 
         return;
     }
     RPC_RATE_LIMIT(get_current_max_txn_id)
+
     TxnErrorCode err = txn_kv_->create_txn(&txn);
     if (err != TxnErrorCode::TXN_OK) {
         msg = "failed to create txn";
@@ -3983,6 +4013,7 @@ void MetaServiceImpl::get_txn_id(::google::protobuf::RpcController* controller,
     const int64_t db_id = request->db_id();
     std::string label = request->label();
     const std::string label_key = txn_label_key({instance_id, db_id, label});
+
     TxnErrorCode err = txn_kv_->create_txn(&txn);
     if (err != TxnErrorCode::TXN_OK) {
         LOG(WARNING) << "failed to create txn. err=" << err << " db_id=" << db_id
@@ -4072,6 +4103,19 @@ void MetaServiceImpl::get_txn_id(::google::protobuf::RpcController* controller,
     ss << "transaction not found, label=" << label;
     msg = ss.str();
     return;
+}
+
+void record_txn_commit_stats(doris::cloud::Transaction* txn, const std::string& instance_id,
+                             int64_t partition_count, int64_t tablet_count, int64_t txn_id) {
+    int64_t kv_count = txn->num_put_keys() + txn->num_del_keys() + txn->num_get_keys();
+    int64_t kv_bytes = txn->get_bytes();
+    LOG(INFO) << "txn commit stats, instance_id: " << instance_id << ", txn_id: " << txn_id
+              << ", kv_count: " << kv_count << ", kv_bytes: " << kv_bytes
+              << ", partition_count: " << partition_count << ", tablet_count: " << tablet_count;
+    g_bvar_ms_txn_commit_with_partition_count << partition_count;
+    g_bvar_ms_txn_commit_with_tablet_count << tablet_count;
+    g_bvar_instance_txn_commit_with_partition_count.put({instance_id}, partition_count);
+    g_bvar_instance_txn_commit_with_tablet_count.put({instance_id}, tablet_count);
 }
 
 } // namespace doris::cloud

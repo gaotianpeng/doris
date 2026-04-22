@@ -34,16 +34,18 @@
 #include <new>
 #include <queue>
 #include <shared_mutex>
+#include <type_traits>
 
 #include "common/compiler_util.h" // IWYU pragma: keep
 #include "common/config.h"
 #include "common/logging.h"
 #include "common/status.h"
+#include "io/fs/file_meta_cache.h"
+#include "io/hdfs_builder.h"
 #include "olap/cumulative_compaction_time_series_policy.h"
 #include "olap/delete_handler.h"
 #include "olap/olap_define.h"
 #include "olap/rowset/pending_rowset_helper.h"
-#include "olap/rowset/rowset_meta.h"
 #include "olap/rowset/rowset_writer.h"
 #include "olap/rowset/rowset_writer_context.h"
 #include "olap/schema.h"
@@ -54,10 +56,11 @@
 #include "olap/txn_manager.h"
 #include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
-#include "util/runtime_profile.h"
 #include "util/time.h"
 #include "vec/core/block.h"
+#include "vec/core/column_with_type_and_name.h"
 #include "vec/data_types/data_type_factory.hpp"
+#include "vec/data_types/data_type_nullable.h"
 #include "vec/exec/format/parquet/vparquet_reader.h"
 #include "vec/exprs/vexpr_context.h"
 #include "vec/functions/simple_function_factory.h"
@@ -119,12 +122,10 @@ Status PushHandler::_do_streaming_ingestion(TabletSharedPtr tablet, const TPushR
 
     std::shared_lock base_migration_rlock(tablet->get_migration_lock(), std::try_to_lock);
     DBUG_EXECUTE_IF("PushHandler::_do_streaming_ingestion.try_lock_fail", {
-        return Status::Error<TRY_LOCK_FAILED>(
-                "PushHandler::_do_streaming_ingestion get lock failed");
+        return Status::ObtainLockFailed("PushHandler::_do_streaming_ingestion get lock failed");
     })
     if (!base_migration_rlock.owns_lock()) {
-        return Status::Error<TRY_LOCK_FAILED>(
-                "PushHandler::_do_streaming_ingestion get lock failed");
+        return Status::ObtainLockFailed("PushHandler::_do_streaming_ingestion get lock failed");
     }
     PUniqueId load_id;
     load_id.set_hi(0);
@@ -355,8 +356,12 @@ PushBrokerReader::PushBrokerReader(const Schema* schema, const TBrokerScanRange&
     _file_params.expr_of_dest_slot = _params.expr_of_dest_slot;
     _file_params.dest_sid_to_src_sid_without_trans = _params.dest_sid_to_src_sid_without_trans;
     _file_params.strict_mode = _params.strict_mode;
-    _file_params.__isset.broker_addresses = true;
-    _file_params.broker_addresses = t_scan_range.broker_addresses;
+    if (_ranges[0].file_type == TFileType::FILE_HDFS) {
+        _file_params.hdfs_params = parse_properties(_params.properties);
+    } else {
+        _file_params.__isset.broker_addresses = true;
+        _file_params.broker_addresses = t_scan_range.broker_addresses;
+    }
 
     for (const auto& range : _ranges) {
         TFileRangeDesc file_range;
@@ -405,8 +410,10 @@ Status PushBrokerReader::init() {
     _runtime_profile->set_name("PushBrokerReader");
 
     _file_cache_statistics.reset(new io::FileCacheStatistics());
+    _file_reader_stats.reset(new io::FileReaderStats());
     _io_ctx.reset(new io::IOContext());
     _io_ctx->file_cache_stats = _file_cache_statistics.get();
+    _io_ctx->file_reader_stats = _file_reader_stats.get();
     _io_ctx->query_id = &_runtime_state->query_id();
 
     auto slot_descs = desc_tbl->get_tuple_descriptor(0)->slots();
@@ -485,17 +492,36 @@ Status PushBrokerReader::_cast_to_input_block() {
         auto& arg = _src_block_ptr->get_by_name(slot_desc->col_name());
         // remove nullable here, let the get_function decide whether nullable
         auto return_type = slot_desc->get_data_type_ptr();
-        vectorized::ColumnsWithTypeAndName arguments {
-                arg,
-                {vectorized::DataTypeString().create_column_const(
-                         arg.column->size(), remove_nullable(return_type)->get_family_name()),
-                 std::make_shared<vectorized::DataTypeString>(), ""}};
-        auto func_cast = vectorized::SimpleFunctionFactory::instance().get_function(
-                "CAST", arguments, return_type);
         idx = _src_block_name_to_idx[slot_desc->col_name()];
-        RETURN_IF_ERROR(
-                func_cast->execute(nullptr, *_src_block_ptr, {idx}, idx, arg.column->size()));
-        _src_block_ptr->get_by_position(idx).type = std::move(return_type);
+        // bitmap convert：src -> to_base64 -> bitmap_from_base64
+        if (slot_desc->type().is_bitmap_type()) {
+            auto base64_return_type = vectorized::DataTypeFactory::instance().create_data_type(
+                    vectorized::DataTypeString().get_type_as_type_descriptor(),
+                    slot_desc->is_nullable());
+            auto func_to_base64 = vectorized::SimpleFunctionFactory::instance().get_function(
+                    "to_base64", {arg}, base64_return_type);
+            RETURN_IF_ERROR(func_to_base64->execute(nullptr, *_src_block_ptr, {idx}, idx,
+                                                    arg.column->size()));
+            _src_block_ptr->get_by_position(idx).type = std::move(base64_return_type);
+            auto& arg_base64 = _src_block_ptr->get_by_name(slot_desc->col_name());
+            auto func_bitmap_from_base64 =
+                    vectorized::SimpleFunctionFactory::instance().get_function(
+                            "bitmap_from_base64", {arg_base64}, return_type);
+            RETURN_IF_ERROR(func_bitmap_from_base64->execute(nullptr, *_src_block_ptr, {idx}, idx,
+                                                             arg_base64.column->size()));
+            _src_block_ptr->get_by_position(idx).type = std::move(return_type);
+        } else {
+            vectorized::ColumnsWithTypeAndName arguments {
+                    arg,
+                    {vectorized::DataTypeString().create_column_const(
+                             arg.column->size(), remove_nullable(return_type)->get_family_name()),
+                     std::make_shared<vectorized::DataTypeString>(), ""}};
+            auto func_cast = vectorized::SimpleFunctionFactory::instance().get_function(
+                    "CAST", arguments, return_type);
+            RETURN_IF_ERROR(
+                    func_cast->execute(nullptr, *_src_block_ptr, {idx}, idx, arg.column->size()));
+            _src_block_ptr->get_by_position(idx).type = std::move(return_type);
+        }
     }
     return Status::OK();
 }
@@ -643,12 +669,11 @@ Status PushBrokerReader::_get_next_reader() {
                         const_cast<cctz::time_zone*>(&_runtime_state->timezone_obj()),
                         _io_ctx.get(), _runtime_state.get());
 
-        RETURN_IF_ERROR(parquet_reader->open());
-        std::vector<std::string> place_holder;
         init_status = parquet_reader->init_reader(
-                _all_col_names, place_holder, _colname_to_value_range, _push_down_exprs,
-                _real_tuple_desc, _default_val_row_desc.get(), _col_name_to_slot_id,
-                &_not_single_slot_filter_conjuncts, &_slot_id_to_filter_conjuncts, false);
+                _all_col_names, _colname_to_value_range, _push_down_exprs, _real_tuple_desc,
+                _default_val_row_desc.get(), _col_name_to_slot_id,
+                &_not_single_slot_filter_conjuncts, &_slot_id_to_filter_conjuncts,
+                vectorized::TableSchemaChangeHelper::ConstNode::get_instance(), false);
         _cur_reader = std::move(parquet_reader);
         if (!init_status.ok()) {
             return Status::InternalError("failed to init reader for file {}, err: {}", range.path,

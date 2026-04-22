@@ -26,6 +26,7 @@
 #include "common/status.h"
 #include "olap/iterators.h"
 #include "olap/olap_common.h"
+#include "olap/partial_update_info.h"
 #include "olap/rowset/segment_v2/segment.h"
 #include "olap/tablet_fwd.h"
 #include "olap/tablet_meta.h"
@@ -45,6 +46,7 @@ class PartialUpdateReadPlan;
 struct CaptureRowsetOps;
 struct CaptureRowsetResult;
 struct TabletReadSource;
+class FixedReadPlan;
 
 struct TabletWithVersion {
     BaseTabletSPtr tablet;
@@ -54,7 +56,7 @@ struct TabletWithVersion {
 enum class CompactionStage { NOT_SCHEDULED, PENDING, EXECUTING };
 
 // Base class for all tablet classes
-class BaseTablet {
+class BaseTablet : public std::enable_shared_from_this<BaseTablet> {
 public:
     explicit BaseTablet(TabletMetaSharedPtr tablet_meta);
     virtual ~BaseTablet();
@@ -112,7 +114,7 @@ public:
 
     virtual Status capture_rs_readers(const Version& spec_version,
                                       std::vector<RowSetSplits>* rs_splits,
-                                      bool skip_missing_version) = 0;
+                                      const CaptureRowsetOps& opts) = 0;
 
     virtual size_t tablet_footprint() = 0;
 
@@ -145,6 +147,9 @@ public:
     static TabletSchemaSPtr tablet_schema_with_merged_max_schema_version(
             const std::vector<RowsetMetaSharedPtr>& rowset_metas);
 
+    Status get_compaction_schema(const std::vector<RowsetMetaSharedPtr>& rowset_metas,
+                                 TabletSchemaSPtr& target_schema);
+
     ////////////////////////////////////////////////////////////////////////////
     // begin MoW functions
     ////////////////////////////////////////////////////////////////////////////
@@ -164,6 +169,7 @@ public:
                           RowLocation* row_location, uint32_t version,
                           std::vector<std::unique_ptr<SegmentCacheHandle>>& segment_caches,
                           RowsetSharedPtr* rowset = nullptr, bool with_rowid = true,
+                          std::string* encoded_seq_value = nullptr,
                           OlapReaderStatistics* stats = nullptr);
 
     // calc delete bitmap when flush memtable, use a fake version to calc
@@ -203,7 +209,7 @@ public:
                                            int64_t txn_id, const RowsetIdUnorderedSet& rowset_ids,
                                            std::vector<RowsetSharedPtr>* rowsets = nullptr);
 
-    static const signed char* get_delete_sign_column_data(vectorized::Block& block,
+    static const signed char* get_delete_sign_column_data(const vectorized::Block& block,
                                                           size_t rows_at_least = 0);
 
     static Status generate_default_value_block(const TabletSchema& schema,
@@ -214,8 +220,14 @@ public:
 
     static Status generate_new_block_for_partial_update(
             TabletSchemaSPtr rowset_schema, const PartialUpdateInfo* partial_update_info,
-            const PartialUpdateReadPlan& read_plan_ori,
-            const PartialUpdateReadPlan& read_plan_update,
+            const FixedReadPlan& read_plan_ori, const FixedReadPlan& read_plan_update,
+            const std::map<RowsetId, RowsetSharedPtr>& rsid_to_rowset,
+            vectorized::Block* output_block);
+
+    static Status generate_new_block_for_flexible_partial_update(
+            TabletSchemaSPtr rowset_schema, const PartialUpdateInfo* partial_update_info,
+            std::set<uint32_t>& rids_be_overwritten, const FixedReadPlan& read_plan_ori,
+            const FixedReadPlan& read_plan_update,
             const std::map<RowsetId, RowsetSharedPtr>& rsid_to_rowset,
             vectorized::Block* output_block);
 
@@ -261,6 +273,12 @@ public:
             const BaseTabletSPtr& self, const RowsetSharedPtr& rowset,
             const std::vector<RowsetSharedPtr>* specified_base_rowsets = nullptr);
 
+    using DeleteBitmapKeyRanges =
+            std::vector<std::tuple<DeleteBitmap::BitmapKey, DeleteBitmap::BitmapKey>>;
+    void agg_delete_bitmap_for_stale_rowsets(
+            Version version, DeleteBitmapKeyRanges& remove_delete_bitmap_key_ranges);
+    void check_agg_delete_bitmap_for_stale_rowsets(int64_t& useless_rowset_count,
+                                                   int64_t& useless_rowset_version_count);
     ////////////////////////////////////////////////////////////////////////////
     // end MoW functions
     ////////////////////////////////////////////////////////////////////////////
@@ -282,14 +300,21 @@ public:
         return _max_version_schema;
     }
 
+    TabletSchemaSPtr calculate_variant_extended_schema() const;
+
     void traverse_rowsets(std::function<void(const RowsetSharedPtr&)> visitor,
                           bool include_stale = false) {
         std::shared_lock rlock(_meta_lock);
-        for (auto& [v, rs] : _rs_version_map) {
+        traverse_rowsets_unlocked(visitor, include_stale);
+    }
+
+    void traverse_rowsets_unlocked(std::function<void(const RowsetSharedPtr&)> visitor,
+                                   bool include_stale = false) const {
+        for (const auto& [v, rs] : _rs_version_map) {
             visitor(rs);
         }
         if (!include_stale) return;
-        for (auto& [v, rs] : _stale_rs_version_map) {
+        for (const auto& [v, rs] : _stale_rs_version_map) {
             visitor(rs);
         }
     }
@@ -313,7 +338,7 @@ public:
     [[nodiscard]] Result<CaptureRowsetResult> capture_consistent_rowsets_unlocked(
             const Version& version_range, const CaptureRowsetOps& options) const;
 
-    [[nodiscard]] Result<std::vector<Version>> capture_consistent_versions_unlocked(
+    [[nodiscard]] virtual Result<std::vector<Version>> capture_consistent_versions_unlocked(
             const Version& version_range, const CaptureRowsetOps& options) const;
 
     [[nodiscard]] Result<std::vector<RowSetSplits>> capture_rs_readers_unlocked(
@@ -323,6 +348,9 @@ public:
                                                                const CaptureRowsetOps& options);
 
     Result<CaptureRowsetResult> _remote_capture_rowsets(const Version& version_range) const;
+
+    void prefill_dbm_agg_cache(const RowsetSharedPtr& rowset, int64_t version);
+    void prefill_dbm_agg_cache_after_compaction(const RowsetSharedPtr& output_rowset);
 
 protected:
     // Find the missed versions until the spec_version.
@@ -386,6 +414,21 @@ struct CaptureRowsetOps {
     bool quiet = false;
     bool include_stale_rowsets = true;
     bool enable_fetch_rowsets_from_peers = false;
+
+    // ======== only take effect in cloud mode ========
+
+    // Enable preference for cached/warmed-up rowsets when building version paths.
+    // When enabled, the capture process will prioritize already cached rowsets
+    // to avoid cold data reads and improve query performance.
+    bool enable_prefer_cached_rowset {false};
+
+    // Query freshness tolerance in milliseconds.
+    // Defines the time window for considering data as "fresh enough".
+    // Rowsets that became visible within this time range can be skipped if not warmed up,
+    // but older rowsets (before current_time - query_freshness_tolerance_ms) that are
+    // not warmed up will trigger fallback to normal capture.
+    // Set to -1 to disable freshness tolerance checking.
+    int64_t query_freshness_tolerance_ms {-1};
 };
 
 struct CaptureRowsetResult {

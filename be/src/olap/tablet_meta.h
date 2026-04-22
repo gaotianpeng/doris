@@ -18,6 +18,7 @@
 #pragma once
 
 #include <gen_cpp/AgentService_types.h>
+#include <gen_cpp/FrontendService_types.h>
 #include <gen_cpp/olap_file.pb.h>
 #include <stdint.h>
 
@@ -116,7 +117,8 @@ public:
                int64_t time_series_compaction_empty_rowsets_threshold = 5,
                int64_t time_series_compaction_level_threshold = 1,
                TInvertedIndexFileStorageFormat::type inverted_index_file_storage_format =
-                       TInvertedIndexFileStorageFormat::V2);
+                       TInvertedIndexFileStorageFormat::V2,
+               TEncryptionAlgorithm::type tde_algorithm = TEncryptionAlgorithm::PLAINTEXT);
     // If need add a filed in TableMeta, filed init copy in copy construct function
     TabletMeta(const TabletMeta& tablet_meta);
     TabletMeta(TabletMeta&& tablet_meta) = delete;
@@ -129,6 +131,8 @@ public:
     // Function create_from_file is used to be compatible with previous tablet_meta.
     // Previous tablet_meta is a physical file in tablet dir, which is not stored in rocksdb.
     Status create_from_file(const std::string& file_path);
+    // Used to create tablet meta from memory buffer.
+    Status create_from_buffer(const uint8_t* buffer, size_t buffer_size);
     static Status load_from_file(const std::string& file_path, TabletMetaPB* tablet_meta_pb);
     Status save(const std::string& file_path);
     Status save_as_json(const string& file_path);
@@ -245,7 +249,11 @@ public:
     void remove_rowset_delete_bitmap(const RowsetId& rowset_id, const Version& version);
 
     bool enable_unique_key_merge_on_write() const { return _enable_unique_key_merge_on_write; }
-
+#ifdef BE_TEST
+    void set_enable_unique_key_merge_on_write(bool value) {
+        _enable_unique_key_merge_on_write = value;
+    }
+#endif
     // TODO(Drogon): thread safety
     const BinlogConfig& binlog_config() const { return _binlog_config; }
     void set_binlog_config(BinlogConfig binlog_config) {
@@ -298,6 +306,8 @@ public:
     }
 
     int64_t avg_rs_meta_serialize_size() const { return _avg_rs_meta_serialize_size; }
+
+    EncryptionAlgorithmPB encryption_algorithm() const { return _encryption_algorithm; }
 
 private:
     Status _save_meta(DataDir* data_dir);
@@ -361,6 +371,8 @@ private:
     // cloud
     int64_t _ttl_seconds = 0;
 
+    EncryptionAlgorithmPB _encryption_algorithm = PLAINTEXT;
+
     mutable std::shared_mutex _meta_lock;
 };
 
@@ -371,6 +383,8 @@ public:
     static DeleteBitmapAggCache* instance();
 
     static DeleteBitmapAggCache* create_instance(size_t capacity);
+
+    DeleteBitmap snapshot(int64_t tablet_id);
 
     class Value : public LRUCacheValueBase {
     public:
@@ -399,7 +413,6 @@ public:
 class DeleteBitmap {
 public:
     mutable std::shared_mutex lock;
-    mutable std::shared_mutex stale_delete_bitmap_lock;
     using SegmentId = uint32_t;
     using Version = uint64_t;
     using BitmapKey = std::tuple<RowsetId, SegmentId, Version>;
@@ -463,6 +476,7 @@ public:
      * Clears bitmaps in range [lower_key, upper_key)
      */
     void remove(const BitmapKey& lower_key, const BitmapKey& upper_key);
+    void remove(const std::vector<std::tuple<BitmapKey, BitmapKey>>& key_ranges);
 
     /**
      * Checks if the given row is marked deleted
@@ -556,7 +570,7 @@ public:
      */
     bool contains_agg(const BitmapKey& bitmap, uint32_t row_id) const;
 
-    bool contains_agg_without_cache(const BitmapKey& bmk, uint32_t row_id) const;
+    bool contains_agg_with_cache_if_eligible(const BitmapKey& bmk, uint32_t row_id) const;
     /**
      * Gets aggregated delete_bitmap on rowset_id and version, the same effect:
      * `select sum(roaring::Roaring) where RowsetId=rowset_id and SegmentId=seg_id and Version <= version`
@@ -564,16 +578,15 @@ public:
      * @return shared_ptr to a bitmap, which may be empty
      */
     std::shared_ptr<roaring::Roaring> get_agg(const BitmapKey& bmk) const;
-    std::shared_ptr<roaring::Roaring> get_agg_without_cache(const BitmapKey& bmk) const;
+    std::shared_ptr<roaring::Roaring> get_agg_without_cache(const BitmapKey& bmk,
+                                                            const int64_t start_version = 0) const;
 
     void remove_sentinel_marks();
 
-    void add_to_remove_queue(const std::string& version_str,
-                             const std::vector<std::tuple<int64_t, DeleteBitmap::BitmapKey,
-                                                          DeleteBitmap::BitmapKey>>& vector);
-    void remove_stale_delete_bitmap_from_queue(const std::vector<std::string>& vector);
-
     uint64_t get_delete_bitmap_count();
+
+    void traverse_rowset_and_version(
+            const std::function<int(const RowsetId& rowsetId, int64_t version)>& func) const;
 
     bool has_calculated_for_multi_segments(const RowsetId& rowset_id) const;
 
@@ -582,7 +595,7 @@ public:
 
     void clear_rowset_cache_version();
 
-    std::set<RowsetId> get_rowset_cache_version();
+    std::set<std::string> get_rowset_cache_version();
 
     /**
      * Calculate diffset with given `key_set`. All entries with keys contained in this delete bitmap but not
@@ -592,19 +605,17 @@ public:
     */
     DeleteBitmap diffset(const std::set<BitmapKey>& key_set) const;
 
+    DeleteBitmap agg_cache_snapshot();
+
+    void set_tablet_id(int64_t tablet_id);
+
 private:
     DeleteBitmap::Version _get_rowset_cache_version(const BitmapKey& bmk) const;
 
     int64_t _tablet_id;
     mutable std::shared_mutex _rowset_cache_version_lock;
     mutable std::map<RowsetId, std::map<SegmentId, Version>> _rowset_cache_version;
-    // <version, <tablet_id, BitmapKeyStart, BitmapKeyEnd>>
-    std::map<std::string,
-             std::vector<std::tuple<int64_t, DeleteBitmap::BitmapKey, DeleteBitmap::BitmapKey>>>
-            _stale_delete_bitmap;
 };
-
-static const std::string SEQUENCE_COL = "__DORIS_SEQUENCE_COL__";
 
 inline TabletUid TabletMeta::tablet_uid() const {
     return _tablet_uid;

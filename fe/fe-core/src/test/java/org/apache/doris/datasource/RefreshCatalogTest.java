@@ -102,7 +102,7 @@ public class RefreshCatalogTest extends TestWithFeService {
         Thread.sleep(5000);
         // there are test1.db1 , test1.db2 , test1.db3, information_schema, mysql
         List<String> dbNames2 = test1.getDbNames();
-        Assertions.assertEquals(4, dbNames2.size());
+        Assertions.assertEquals(5, dbNames2.size());
         ExternalInfoSchemaDatabase infoDb = (ExternalInfoSchemaDatabase) test1.getDb(InfoSchemaDb.DATABASE_NAME).get();
         Assertions.assertEquals(SchemaTable.TABLE_MAP.size(), infoDb.getTables().size());
         TestExternalDatabase testDb = (TestExternalDatabase) test1.getDb("db1").get();
@@ -125,16 +125,18 @@ public class RefreshCatalogTest extends TestWithFeService {
     @Test
     public void testRefreshCatalogLastUpdateTime() throws Exception {
         CatalogIf test2 = env.getCatalogMgr().getCatalog("test2");
-        // init is 0
+        // lastUpdateTime is set when catalog is created (via resetToUninitialized -> onRefreshCache)
         long l1 = test2.getLastUpdateTime();
-        Assertions.assertTrue(l1 == 0);
+        Assertions.assertTrue(l1 > 0);
         TestExternalTable table = (TestExternalTable) test2.getDbNullable("db1").getTable("tbl11").get();
-        // getDb() triggered init method
+        // getDb() triggered init method, but lastUpdateTime was already set
         long l2 = test2.getLastUpdateTime();
-        Assertions.assertTrue(l2 > l1);
+        Assertions.assertTrue(l2 >= l1);
         Assertions.assertFalse(table.isObjectCreated());
         table.makeSureInitialized();
         Assertions.assertTrue(table.isObjectCreated());
+
+        Thread.sleep(100); // wait a bit to ensure time difference
         RefreshCatalogStmt refreshCatalogStmt = new RefreshCatalogStmt("test2", null);
         Assertions.assertTrue(refreshCatalogStmt.isInvalidCache());
         try {
@@ -142,12 +144,13 @@ public class RefreshCatalogTest extends TestWithFeService {
         } catch (Exception e) {
             // Do nothing
         }
-        // not triggered init method
+        // refresh should update lastUpdateTime
         long l3 = test2.getLastUpdateTime();
-        Assertions.assertTrue(l3 == l2);
-        // when use_meta_cache is true, the table will be recreated after refresh.
+        Assertions.assertTrue(l3 > l2);
+        // the table will be recreated after refresh.
         // so we need to get table again
         table = (TestExternalTable) test2.getDbNullable("db1").getTable("tbl11").get();
+        Assertions.assertTrue(((ExternalCatalog) test2).isInitialized());
         Assertions.assertFalse(table.isObjectCreated());
         test2.getDbNullable("db1").getTables();
         Assertions.assertFalse(table.isObjectCreated());
@@ -156,6 +159,10 @@ public class RefreshCatalogTest extends TestWithFeService {
         } catch (Exception e) {
             // Do nothing
         }
+        // after refresh, the catalog will NOT be set to uninitialized
+        Assertions.assertTrue(((ExternalCatalog) test2).isInitialized());
+        // call get table to trigger catalog initialization
+        table = (TestExternalTable) test2.getDbNullable("db1").getTable("tbl11").get();
         Assertions.assertTrue(((ExternalCatalog) test2).isInitialized());
     }
 
@@ -231,3 +238,4 @@ public class RefreshCatalogTest extends TestWithFeService {
         }
     }
 }
+

@@ -31,10 +31,12 @@ import org.apache.doris.catalog.StructType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
+import org.apache.doris.common.EnvUtils;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.plugin.CloudPluginDownloader;
 import org.apache.doris.common.util.URI;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.privilege.PrivPredicate;
@@ -119,6 +121,7 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
 
     // needed item set after analyzed
     private String userFile;
+    private String originalUserFile; // Keep original jar name for BE
     private Function function;
     private String checksum = "";
     private boolean isStaticLoad = false;
@@ -268,9 +271,11 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
         }
 
         userFile = properties.getOrDefault(FILE_KEY, properties.get(OBJECT_FILE_KEY));
-        //        if (Strings.isNullOrEmpty(userFile)) {
-        //            throw new AnalysisException("No 'file' or 'object_file' in properties");
-        //        }
+        originalUserFile = userFile; // Keep original jar name for BE
+        // Convert userFile to realUrl only for FE checksum calculation
+        if (!Strings.isNullOrEmpty(userFile) && binaryType != TFunctionBinaryType.RPC) {
+            userFile = getRealUrl(userFile);
+        }
         if (!Strings.isNullOrEmpty(userFile) && binaryType != TFunctionBinaryType.RPC) {
             try {
                 computeObjectChecksum();
@@ -339,6 +344,33 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
         }
     }
 
+    private String getRealUrl(String url) {
+        if (!url.contains(":/")) {
+            return checkAndReturnDefaultJavaUdfUrl(url);
+        }
+        return url;
+    }
+
+    private String checkAndReturnDefaultJavaUdfUrl(String url) {
+        String defaultUrl = EnvUtils.getDorisHome() + "/plugins/java_udf";
+        // In cloud mode, try cloud download first
+        if (Config.isCloudMode()) {
+            String targetPath = defaultUrl + "/" + url;
+            try {
+                String downloadedPath = CloudPluginDownloader.downloadFromCloud(
+                        CloudPluginDownloader.PluginType.JAVA_UDF, url, targetPath);
+                if (!downloadedPath.isEmpty()) {
+                    return "file://" + downloadedPath;
+                }
+            } catch (Exception e) {
+                throw new RuntimeException("Cannot download UDF from cloud: " + url
+                        + ". Please retry later or check your UDF has been uploaded to cloud.");
+            }
+        }
+        // Return the file path (original UDF behavior)
+        return "file://" + defaultUrl + "/" + url;
+    }
+
     private void analyzeTableFunction() throws AnalysisException {
         String symbol = properties.get(SYMBOL_KEY);
         if (Strings.isNullOrEmpty(symbol)) {
@@ -349,8 +381,8 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
         }
         analyzeJavaUdf(symbol);
         URI location;
-        if (!Strings.isNullOrEmpty(userFile)) {
-            location = URI.create(userFile);
+        if (!Strings.isNullOrEmpty(originalUserFile)) {
+            location = URI.create(originalUserFile);
         } else {
             location = null;
         }
@@ -369,8 +401,8 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
         AggregateFunction.AggregateFunctionBuilder builder
                 = AggregateFunction.AggregateFunctionBuilder.createUdfBuilder();
         URI location;
-        if (!Strings.isNullOrEmpty(userFile)) {
-            location = URI.create(userFile);
+        if (!Strings.isNullOrEmpty(originalUserFile)) {
+            location = URI.create(originalUserFile);
         } else {
             location = null;
         }
@@ -446,8 +478,8 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
             analyzeJavaUdf(symbol);
         }
         URI location;
-        if (!Strings.isNullOrEmpty(userFile)) {
-            location = URI.create(userFile);
+        if (!Strings.isNullOrEmpty(originalUserFile)) {
+            location = URI.create(originalUserFile);
         } else {
             location = null;
         }
@@ -660,8 +692,10 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
                 m -> m.getParameters().length == argsDef.getArgTypes().length).collect(Collectors.toList());
         if (evalArgLengthMatchList.size() == 0) {
             throw new AnalysisException(
-                String.format("The number of parameters for method '%s' in class '%s' should be %d",
-                    EVAL_METHOD_KEY, udfClass.getCanonicalName(), argsDef.getArgTypes().length));
+                    String.format(
+                            "The arguments number udf provided and create function command is not equal,"
+                                    + " the parameters of '%s' method in class '%s' maybe should %d.",
+                            EVAL_METHOD_KEY, udfClass.getCanonicalName(), argsDef.getArgTypes().length));
         } else if (evalArgLengthMatchList.size() == 1) {
             Method method = evalArgLengthMatchList.get(0);
             checkUdfType(udfClass, method, returnType.getType(), method.getReturnType(), "return");
@@ -711,19 +745,21 @@ public class CreateFunctionStmt extends DdlStmt implements NotFallbackInParser {
             javaTypes = Type.PrimitiveTypeToJavaClassType.get(structType.getPrimitiveType());
         } else {
             throw new AnalysisException(
-                    String.format("Method '%s' in class '%s' does not support type '%s'",
+                    String.format("Method '%s' in class '%s' does not support type '%s'.",
                             method.getName(), clazz.getCanonicalName(), expType));
         }
 
         if (javaTypes == null) {
             throw new AnalysisException(
-                    String.format("Method '%s' in class '%s' does not support type '%s'",
-                            method.getName(), clazz.getCanonicalName(), expType.toString()));
+                    String.format("Method '%s' in class '%s' does not support type '%s'.",
+                            method.getName(), clazz.getCanonicalName(), expType.getPrimitiveType().toString()));
         }
         if (!javaTypes.contains(pType)) {
             throw new AnalysisException(
-                    String.format("UDF class '%s' method '%s' %s[%s] type is not supported!",
-                            clazz.getCanonicalName(), method.getName(), pname, pType.getCanonicalName()));
+                    String.format(
+                            "UDF class '%s' of method '%s' %s is [%s] type, but create function command type is %s.",
+                            clazz.getCanonicalName(), method.getName(), pname, pType.getCanonicalName(),
+                            expType.getPrimitiveType().toString()));
         }
     }
 

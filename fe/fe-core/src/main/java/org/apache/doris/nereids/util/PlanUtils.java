@@ -18,6 +18,7 @@
 package org.apache.doris.nereids.util;
 
 import org.apache.doris.catalog.TableIf;
+import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.trees.expressions.ComparisonPredicate;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.NamedExpression;
@@ -120,10 +121,26 @@ public class PlanUtils {
     }
 
     /**
-     * merge childProjects with parentProjects
+     * try merge childProjects with parentProjects. if merged expression exceeds limit, return empty.
      */
-    public static List<NamedExpression> mergeProjections(List<NamedExpression> childProjects,
-            List<NamedExpression> parentProjects) {
+    public static Optional<List<NamedExpression>> tryMergeProjections(List<? extends NamedExpression> childProjects,
+            List<? extends NamedExpression> parentProjects) {
+        try {
+            return Optional.of(mergeProjections(childProjects, parentProjects));
+        } catch (AnalysisException e) {
+            if (e.getErrorCode() == AnalysisException.ErrorCode.EXPRESSION_EXCEEDS_LIMIT) {
+                return Optional.empty();
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * merge childProjects with parentProjects. if merged expression exceeds limit, will throw AnalysisException.
+     */
+    public static List<NamedExpression> mergeProjections(List<? extends NamedExpression> childProjects,
+            List<? extends NamedExpression> parentProjects) {
         Map<Slot, Expression> replaceMap = ExpressionUtils.generateReplaceMap(childProjects);
         return ExpressionUtils.replaceNamedExpressions(parentProjects, replaceMap);
     }
@@ -137,24 +154,24 @@ public class PlanUtils {
     /**
      * replace targetExpressions with project.
      * if the target expression contains a slot which is an alias and its origin expression contains
-     * non-foldable expression and the slot exits multiple times, then can not replace.
+     * unique function and the slot exits multiple times, then can not replace.
      * for example, target expressions: [a, a + 10],  child project: [ t + random() as a ],
      * if replace with the projects, then result expressions: [ t + random(),  t + random() + 10 ],
      * it will calculate random two times, this is error.
      */
     public static boolean canReplaceWithProjections(List<NamedExpression> childProjects,
             List<? extends Expression> targetExpressions) {
-        Set<Slot> nonfoldableSlots = ExpressionUtils.generateReplaceMap(childProjects).entrySet().stream()
-                .filter(entry -> entry.getValue().containsNonfoldable())
+        Set<Slot> uniqueFunctionSlots = ExpressionUtils.generateReplaceMap(childProjects).entrySet().stream()
+                .filter(entry -> entry.getValue().containsUniqueFunction())
                 .map(Entry::getKey)
                 .collect(Collectors.toSet());
-        if (nonfoldableSlots.isEmpty()) {
+        if (uniqueFunctionSlots.isEmpty()) {
             return true;
         }
 
         Set<Slot> counterSet = Sets.newHashSet();
         return targetExpressions.stream().noneMatch(target -> target.anyMatch(
-                e -> (e instanceof Slot) && nonfoldableSlots.contains(e) && !counterSet.add((Slot) e)));
+                e -> (e instanceof Slot) && uniqueFunctionSlots.contains(e) && !counterSet.add((Slot) e)));
     }
 
     public static Plan skipProjectFilterLimit(Plan plan) {
@@ -245,8 +262,8 @@ public class PlanUtils {
      */
     public static boolean isColumnRef(Expression expr) {
         return expr instanceof SlotReference
-                && ((SlotReference) expr).getColumn().isPresent()
-                && ((SlotReference) expr).getTable().isPresent();
+                && ((SlotReference) expr).getOriginalColumn().isPresent()
+                && ((SlotReference) expr).getOriginalTable().isPresent();
     }
 
     /**

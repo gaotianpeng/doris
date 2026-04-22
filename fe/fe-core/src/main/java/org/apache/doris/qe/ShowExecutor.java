@@ -69,6 +69,7 @@ import org.apache.doris.analysis.ShowExportStmt;
 import org.apache.doris.analysis.ShowFrontendsStmt;
 import org.apache.doris.analysis.ShowFunctionsStmt;
 import org.apache.doris.analysis.ShowGrantsStmt;
+import org.apache.doris.analysis.ShowIndexPolicyStmt;
 import org.apache.doris.analysis.ShowIndexStmt;
 import org.apache.doris.analysis.ShowLastInsertStmt;
 import org.apache.doris.analysis.ShowLoadProfileStmt;
@@ -100,7 +101,6 @@ import org.apache.doris.analysis.ShowStmt;
 import org.apache.doris.analysis.ShowStoragePolicyUsingStmt;
 import org.apache.doris.analysis.ShowStorageVaultStmt;
 import org.apache.doris.analysis.ShowStreamLoadStmt;
-import org.apache.doris.analysis.ShowSyncJobStmt;
 import org.apache.doris.analysis.ShowTableCreationStmt;
 import org.apache.doris.analysis.ShowTableIdStmt;
 import org.apache.doris.analysis.ShowTableStatsStmt;
@@ -140,6 +140,8 @@ import org.apache.doris.catalog.MaterializedIndexMeta;
 import org.apache.doris.catalog.MetadataViewer;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PartitionItem;
+import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.ReplicaAllocation;
@@ -205,14 +207,17 @@ import org.apache.doris.datasource.hive.HMSExternalTable;
 import org.apache.doris.datasource.hive.HiveMetaStoreClientHelper;
 import org.apache.doris.datasource.iceberg.IcebergExternalCatalog;
 import org.apache.doris.datasource.iceberg.IcebergExternalDatabase;
+import org.apache.doris.datasource.iceberg.IcebergExternalTable;
+import org.apache.doris.datasource.iceberg.IcebergUtils;
 import org.apache.doris.datasource.maxcompute.MaxComputeExternalCatalog;
+import org.apache.doris.datasource.paimon.PaimonExternalCatalog;
+import org.apache.doris.datasource.paimon.PaimonExternalDatabase;
+import org.apache.doris.datasource.paimon.PaimonExternalTable;
 import org.apache.doris.job.manager.JobManager;
 import org.apache.doris.load.DeleteHandler;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.ExportJobState;
 import org.apache.doris.load.ExportMgr;
-import org.apache.doris.load.Load;
-import org.apache.doris.load.LoadJob;
 import org.apache.doris.load.LoadJob.JobState;
 import org.apache.doris.load.loadv2.LoadManager;
 import org.apache.doris.load.routineload.RoutineLoadJob;
@@ -258,9 +263,10 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
 import com.google.gson.GsonBuilder;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -286,6 +292,7 @@ import java.util.Date;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -452,8 +459,6 @@ public class ShowExecutor {
             handleShowLoadProfile();
         } else if (stmt instanceof ShowDataSkewStmt) {
             handleShowDataSkew();
-        } else if (stmt instanceof ShowSyncJobStmt) {
-            handleShowSyncJobs();
         } else if (stmt instanceof ShowSqlBlockRuleStmt) {
             handleShowSqlBlockRule();
         } else if (stmt instanceof ShowTableStatsStmt) {
@@ -474,6 +479,8 @@ public class ShowExecutor {
             handleShowCreateMaterializedView();
         } else if (stmt instanceof ShowPolicyStmt) {
             handleShowPolicy();
+        } else if (stmt instanceof ShowIndexPolicyStmt) {
+            handleShowIndexPolicy();
         } else if (stmt instanceof ShowStoragePolicyUsingStmt) {
             handleShowStoragePolicyUsing();
         } else if (stmt instanceof ShowCatalogStmt) {
@@ -531,7 +538,7 @@ public class ShowExecutor {
                 .listConnection(ctx.getQualifiedUser(), isShowFullSql);
         long nowMs = System.currentTimeMillis();
         for (ConnectContext.ThreadInfo info : threadInfos) {
-            rowSet.add(info.toRow(ctx.getConnectionId(), nowMs));
+            rowSet.add(info.toRow(ctx.getConnectionId(), nowMs, Optional.empty()));
         }
 
         if (isShowAllFe) {
@@ -816,8 +823,12 @@ public class ShowExecutor {
         clusterNameSet.addAll(clusterNames);
 
         for (String clusterName : clusterNameSet) {
-            ArrayList<String> row = Lists.newArrayList(clusterName);
             // current_used, users
+            ComputeGroup cg = cloudSys.getComputeGroupByName(clusterName);
+            if (cg == null) {
+                continue;
+            }
+            ArrayList<String> row = Lists.newArrayList(clusterName);
             if (!Env.getCurrentEnv().getAccessManager()
                     .checkCloudPriv(ConnectContext.get().getCurrentUserIdentity(), clusterName,
                             PrivPredicate.USAGE, ResourceTypeEnum.CLUSTER)) {
@@ -854,16 +865,13 @@ public class ShowExecutor {
                 rows.add(row);
                 row.add(subClusterNames);
                 row.add(policy);
+                row.add(cg.getProperties().toString());
                 continue;
             }
             // virtual compute group
             // virtual cg backends eq 0
             row.add(String.valueOf(0));
             rows.add(row);
-            ComputeGroup cg = cloudSys.getComputeGroupByName(clusterName);
-            if (cg == null) {
-                continue;
-            }
             String activeCluster = cg.getPolicy().getActiveComputeGroup();
             String standbyCluster = cg.getPolicy().getStandbyComputeGroup();
             // first active, second standby
@@ -872,6 +880,7 @@ public class ShowExecutor {
 
             // Policy
             row.add(cg.getPolicy().toString());
+            row.add(cg.getProperties().toString());
         }
 
         resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
@@ -907,7 +916,14 @@ public class ShowExecutor {
             if (table != null) {
                 List<String> row = new ArrayList<>();
                 row.add(database.getFullName());
-                row.add(table.getName());
+                if (table.isTemporary()) {
+                    if (!Util.isTempTableInCurrentSession(table.getName())) {
+                        continue;
+                    }
+                    row.add(Util.getTempTableDisplayName(table.getName()));
+                } else {
+                    row.add(table.getName());
+                }
                 row.add(String.valueOf(database.getId()));
                 rows.add(row);
                 break;
@@ -937,7 +953,12 @@ public class ShowExecutor {
                         if (partition != null) {
                             List<String> row = new ArrayList<>();
                             row.add(database.getFullName());
-                            row.add(tbl.getName());
+                            if (tbl.isTemporary()) {
+                                if (!Util.isTempTableInCurrentSession(tbl.getName())) {
+                                    continue;
+                                }
+                            }
+                            row.add(tbl.getDisplayName());
                             row.add(partition.getName());
                             row.add(String.valueOf(database.getId()));
                             row.add(String.valueOf(tbl.getId()));
@@ -1009,7 +1030,13 @@ public class ShowExecutor {
             if (showTableStmt.getType() != null && tbl.getType() != showTableStmt.getType()) {
                 continue;
             }
+            if (tbl.isTemporary()) {
+                continue;
+            }
             if (matcher != null && !matcher.match(tbl.getName())) {
+                continue;
+            }
+            if (tbl.isTemporary()) {
                 continue;
             }
             // check tbl privs
@@ -1071,7 +1098,14 @@ public class ShowExecutor {
                 }
                 List<String> row = Lists.newArrayList();
                 // Name
-                row.add(table.getName());
+                if (table.isTemporary()) {
+                    if (!Util.isTempTableInCurrentSession(table.getName())) {
+                        continue;
+                    }
+                    row.add(Util.getTempTableDisplayName(table.getName()));
+                } else {
+                    row.add(table.getName());
+                }
                 // Engine
                 row.add(table.getEngine());
                 // version
@@ -1192,6 +1226,13 @@ public class ShowExecutor {
                 resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
                 return;
             }
+            if ((table.getType() == TableType.ICEBERG_EXTERNAL_TABLE)
+                    && ((IcebergExternalTable) table).isView()) {
+                rows.add(Arrays.asList(table.getName(),
+                        IcebergUtils.showCreateView(((IcebergExternalTable) table))));
+                resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
+                return;
+            }
             List<String> createTableStmt = Lists.newArrayList();
             Env.getDdlStmt(null, null, table, createTableStmt, null, null, false,
                     true /* hide password */, false, -1L, showStmt.isNeedBriefDdl(), false);
@@ -1208,7 +1249,7 @@ public class ShowExecutor {
                     ErrorReport.reportAnalysisException(ErrorCode.ERR_WRONG_OBJECT, showStmt.getDb(),
                             showStmt.getTable(), "VIEW", "Use 'SHOW CREATE TABLE '" + table.getName());
                 }
-                rows.add(Lists.newArrayList(table.getName(), createTableStmt.get(0)));
+                rows.add(Lists.newArrayList(Util.getTempTableDisplayName(table.getName()), createTableStmt.get(0)));
                 resultSet = table.getType() != TableType.MATERIALIZED_VIEW
                         ? new ShowResultSet(showStmt.getMetaData(), rows)
                         : new ShowResultSet(ShowCreateTableStmt.getMaterializedViewMetaData(), rows);
@@ -1415,11 +1456,7 @@ public class ShowExecutor {
         Env env = ctx.getEnv();
         DatabaseIf db = ctx.getCurrentCatalog().getDbOrAnalysisException(showStmt.getDbName());
         long dbId = db.getId();
-        List<List<Comparable>> loadInfos;
-        // combine the List<LoadInfo> of load(v1) and loadManager(v2)
-        Load load = env.getLoadInstance();
-        loadInfos = load.getLoadJobInfosByDb(dbId, db.getFullName(), showStmt.getLabelValue(),
-                showStmt.isAccurateMatch(), showStmt.getStates());
+        List<List<Comparable>> loadInfos = Lists.newArrayList();
         Set<String> statesValue = showStmt.getStates() == null ? null : showStmt.getStates().stream()
                 .map(entity -> entity.name())
                 .collect(Collectors.toSet());
@@ -1434,7 +1471,7 @@ public class ShowExecutor {
                         showStmt.isTableNameAccurateMatch(),
                         showStmt.getFileValue(), showStmt.isFileAccurateMatch()));
         }
-        // add the nerieds load info
+        // add the nereids load info
         JobManager loadMgr = env.getJobManager();
         loadInfos.addAll(loadMgr.getLoadJobInfosByDb(dbId, db.getFullName(), showStmt.getLabelValue(),
                 showStmt.isAccurateMatch(), showStmt.getStateV2(), db.getCatalog().getName()));
@@ -1560,64 +1597,8 @@ public class ShowExecutor {
         }
 
         Database db = env.getInternalCatalog().getDbOrAnalysisException(showWarningsStmt.getDbName());
-        ShowResultSet showResultSet = handleShowLoadWarningV2(showWarningsStmt, db);
-        if (showResultSet != null) {
-            resultSet = showResultSet;
-            return;
-        }
-
-        long dbId = db.getId();
-        Load load = env.getLoadInstance();
-        long jobId = 0;
-        LoadJob job = null;
-        String label = null;
-        if (showWarningsStmt.isFindByLabel()) {
-            jobId = load.getLatestJobIdByLabel(dbId, showWarningsStmt.getLabel());
-            job = load.getLoadJob(jobId);
-            if (job == null) {
-                throw new AnalysisException("job is not exist.");
-            }
-        } else {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("load_job_id={}", jobId);
-            }
-            jobId = showWarningsStmt.getJobId();
-            job = load.getLoadJob(jobId);
-            if (job == null) {
-                throw new AnalysisException("job is not exist.");
-            }
-            label = job.getLabel();
-            LOG.info("label={}", label);
-        }
-
-        // check auth
-        Set<String> tableNames = job.getTableNames();
-        if (tableNames.isEmpty()) {
-            // forward compatibility
-            if (!Env.getCurrentEnv().getAccessManager()
-                    .checkDbPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, db.getFullName(),
-                            PrivPredicate.SHOW)) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_DBACCESS_DENIED_ERROR,
-                        ConnectContext.get().getQualifiedUser(), db.getFullName());
-            }
-        } else {
-            for (String tblName : tableNames) {
-                if (!Env.getCurrentEnv().getAccessManager()
-                        .checkTblPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, db.getFullName(),
-                                tblName, PrivPredicate.SHOW)) {
-                    ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "SHOW LOAD WARNING",
-                            ConnectContext.get().getQualifiedUser(), ConnectContext.get().getRemoteIP(),
-                            db.getFullName() + ": " + tblName);
-                }
-            }
-        }
-        List<List<String>> rows = Lists.newArrayList();
-        long limit = showWarningsStmt.getLimitNum();
-        if (limit != -1L && limit < rows.size()) {
-            rows = rows.subList(0, (int) limit);
-        }
-
-        resultSet = new ShowResultSet(showWarningsStmt.getMetaData(), rows);
+        resultSet = handleShowLoadWarningV2(showWarningsStmt, db);
+        return;
     }
 
     private ShowResultSet handleShowLoadWarningV2(ShowLoadWarningsStmt showWarningsStmt, Database db)
@@ -1934,6 +1915,10 @@ public class ShowExecutor {
             resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
         } else if (showStmt.getCatalog() instanceof MaxComputeExternalCatalog) {
             handleShowMaxComputeTablePartitions(showStmt);
+        } else if (showStmt.getCatalog() instanceof IcebergExternalCatalog) {
+            handleShowIcebergTablePartitions(showStmt);
+        } else if (showStmt.getCatalog() instanceof PaimonExternalCatalog) {
+            handleShowPaimonTablePartitions(showStmt);
         } else {
             handleShowHMSTablePartitions(showStmt);
         }
@@ -2014,6 +1999,95 @@ public class ShowExecutor {
             rows = rows.subList(beginIndex, endIndex);
         }
 
+        resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
+    }
+
+    private void handleShowIcebergTablePartitions(ShowPartitionsStmt showStmt) {
+        IcebergExternalCatalog catalog = (IcebergExternalCatalog) showStmt.getCatalog();
+        String db = showStmt.getTableName().getDb();
+        String tbl = showStmt.getTableName().getTbl();
+        IcebergExternalTable icebergTable = (IcebergExternalTable) catalog.getDb(db).get().getTable(tbl).get();
+        LimitElement limit = showStmt.getLimitElement();
+        List<OrderByPair> orderByPairs = showStmt.getOrderByPairs();
+        Map<String, PartitionItem> partitions = icebergTable.getAndCopyPartitionItems(Optional.empty());
+        List<List<String>> rows = new ArrayList<>();
+        for (Map.Entry<String, PartitionItem> entry : partitions.entrySet()) {
+            List<String> row = new ArrayList<>();
+            Range<PartitionKey> items = entry.getValue().getItems();
+            row.add(entry.getKey());
+            row.add(items.lowerEndpoint().toString());
+            row.add(items.upperEndpoint().toString());
+            rows.add(row);
+        }
+        // sort by partition name
+        if (orderByPairs != null && orderByPairs.get(0).isDesc()) {
+            rows.sort(Comparator.comparing(x -> x.get(0), Comparator.reverseOrder()));
+        } else {
+            rows.sort(Comparator.comparing(x -> x.get(0)));
+        }
+        if (limit != null && limit.hasLimit()) {
+            int beginIndex = (int) limit.getOffset();
+            int endIndex = (int) (beginIndex + limit.getLimit());
+            if (endIndex > rows.size()) {
+                endIndex = rows.size();
+            }
+            rows = rows.subList(beginIndex, endIndex);
+        }
+        resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
+    }
+
+
+    private void handleShowPaimonTablePartitions(ShowPartitionsStmt showStmt) throws AnalysisException {
+        PaimonExternalCatalog paimonCatalog = (PaimonExternalCatalog) showStmt.getCatalog();
+        String db = showStmt.getTableName().getDb();
+        String tbl = showStmt.getTableName().getTbl();
+        PaimonExternalDatabase database = (PaimonExternalDatabase) paimonCatalog.getDb(db)
+                .orElseThrow(() -> new AnalysisException("Paimon database '" + db + "' does not exist"));
+        PaimonExternalTable paimonTable = database.getTable(tbl)
+                .orElseThrow(() -> new AnalysisException("Paimon table '" + db + "." + tbl + "' does not exist"));
+        LimitElement limit = showStmt.getLimitElement();
+        List<OrderByPair> orderByPairs = showStmt.getOrderByPairs();
+
+        Map<String, org.apache.paimon.partition.Partition> partitionSnapshot = paimonTable.getPartitionSnapshot(
+                Optional.empty());
+        if (partitionSnapshot == null) {
+            partitionSnapshot = Collections.emptyMap();
+        }
+
+        LinkedHashSet<String> partitionColumnNames = paimonTable
+                .getPartitionColumns(Optional.empty())
+                .stream()
+                .map(Column::getName)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        String partitionColumnsStr = String.join(",", partitionColumnNames);
+
+        List<List<String>> rows = partitionSnapshot
+                .entrySet()
+                .stream()
+                .map(entry -> {
+                    List<String> row = new ArrayList<>(5);
+                    row.add(entry.getKey());
+                    row.add(partitionColumnsStr);
+                    row.add(String.valueOf(entry.getValue().recordCount()));
+                    row.add(String.valueOf(entry.getValue().fileSizeInBytes()));
+                    row.add(String.valueOf(entry.getValue().fileCount()));
+                    return row;
+                }).collect(Collectors.toList());
+
+        // sort by partition name
+        if (orderByPairs != null && orderByPairs.get(0).isDesc()) {
+            rows.sort(Comparator.comparing(x -> x.get(0), Comparator.reverseOrder()));
+        } else {
+            rows.sort(Comparator.comparing(x -> x.get(0)));
+        }
+        if (limit != null && limit.hasLimit()) {
+            int beginIndex = (int) limit.getOffset();
+            int endIndex = (int) (beginIndex + limit.getLimit());
+            if (endIndex > rows.size()) {
+                endIndex = rows.size();
+            }
+            rows = rows.subList(beginIndex, endIndex);
+        }
         resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
     }
 
@@ -2380,26 +2454,6 @@ public class ShowExecutor {
         resultSet = new ShowResultSet(showStmt.getMetaData(), infos);
     }
 
-    private void handleShowSyncJobs() throws AnalysisException {
-        ShowSyncJobStmt showStmt = (ShowSyncJobStmt) stmt;
-        Env env = Env.getCurrentEnv();
-        DatabaseIf db = Env.getCurrentInternalCatalog().getDbOrAnalysisException(showStmt.getDbName());
-
-        List<List<Comparable>> syncInfos = env.getSyncJobManager().getSyncJobsInfoByDbId(db.getId());
-        Collections.sort(syncInfos, new ListComparator<List<Comparable>>(0));
-
-        List<List<String>> rows = Lists.newArrayList();
-        for (List<Comparable> syncInfo : syncInfos) {
-            List<String> row = new ArrayList<String>(syncInfo.size());
-
-            for (Comparable element : syncInfo) {
-                row.add(element.toString());
-            }
-            rows.add(row);
-        }
-        resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
-    }
-
     private void handleShowGrants() {
         ShowGrantsStmt showStmt = (ShowGrantsStmt) stmt;
         List<List<String>> infos = Env.getCurrentEnv().getAuth().getAuthInfo(showStmt.getUserIdent());
@@ -2580,7 +2634,12 @@ public class ShowExecutor {
                     }
                     DynamicPartitionProperty dynamicPartitionProperty
                             = olapTable.getTableProperty().getDynamicPartitionProperty();
-                    String tableName = olapTable.getName();
+                    String tableName = olapTable.getDisplayName();
+                    if (olapTable.isTemporary()) {
+                        if (!Util.isTempTableInCurrentSession(olapTable.getName())) {
+                            continue;
+                        }
+                    }
                     ReplicaAllocation replicaAlloc = dynamicPartitionProperty.getReplicaAllocation();
                     if (replicaAlloc.isNotSet()) {
                         replicaAlloc = olapTable.getDefaultReplicaAllocation();
@@ -3046,6 +3105,11 @@ public class ShowExecutor {
         resultSet = Env.getCurrentEnv().getPolicyMgr().showPolicy(showStmt);
     }
 
+    public void handleShowIndexPolicy() throws AnalysisException {
+        ShowIndexPolicyStmt showStmt = (ShowIndexPolicyStmt) stmt;
+        resultSet = Env.getCurrentEnv().getIndexPolicyMgr().showIndexPolicy(showStmt);
+    }
+
     public void handleShowStoragePolicyUsing() throws AnalysisException {
         ShowStoragePolicyUsingStmt showStmt = (ShowStoragePolicyUsingStmt) stmt;
         resultSet = Env.getCurrentEnv().getPolicyMgr().showStoragePolicyUsing(showStmt);
@@ -3080,11 +3144,24 @@ public class ShowExecutor {
                 row.add(databaseIf.isPresent() ? databaseIf.get().getFullName() : "DB may get deleted");
                 if (databaseIf.isPresent()) {
                     Optional<? extends TableIf> table = databaseIf.get().getTable(analysisInfo.tblId);
-                    row.add(table.isPresent() ? table.get().getName() : "Table may get deleted");
+                    row.add(table.isPresent() ? Util.getTempTableDisplayName(table.get().getName())
+                            : "Table may get deleted");
                 } else {
                     row.add("DB may get deleted");
                 }
-                row.add(analysisInfo.colName);
+                StringBuffer sb = new StringBuffer();
+                String colNames = analysisInfo.colName;
+                if (colNames != null) {
+                    for (String columnName : colNames.split(",")) {
+                        String[] kv = columnName.split(":");
+                        sb.append(Util.getTempTableDisplayName(kv[0]))
+                            .append(":").append(kv[1]).append(",");
+                    }
+                }
+                String newColNames = sb.toString();
+                newColNames = StringUtils.isEmpty(newColNames) ? ""
+                        : newColNames.substring(0, newColNames.length() - 1);
+                row.add(newColNames);
                 row.add(analysisInfo.jobType.toString());
                 row.add(analysisInfo.analysisType.toString());
                 row.add(analysisInfo.message);

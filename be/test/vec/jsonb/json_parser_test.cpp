@@ -23,8 +23,6 @@
 
 #include "vec/common/string_ref.h"
 #include "vec/common/uint128.h"
-#include "vec/core/field.h"
-#include "vec/core/types.h"
 
 using doris::vectorized::JSONDataParser;
 using doris::vectorized::SimdJSONParser;
@@ -283,7 +281,7 @@ TEST(JsonParserTest, TestHandleNewPathDirectCall) {
     doris::vectorized::Field value = std::move(array_data);
 
     // Create hash for the path
-    doris::vectorized::UInt128 hash = doris::vectorized::PathInData::get_parts_hash(path);
+    wide::UInt128 hash = doris::vectorized::PathInData::get_parts_hash(path);
 
     // Call handleNewPath directly
     // This should trigger the if (!nested_key.empty()) branch
@@ -320,7 +318,7 @@ TEST(JsonParserTest, TestHandleNewPathElseBranch) {
     doris::vectorized::Field value = std::move(array_data);
 
     // Create hash for the path
-    doris::vectorized::UInt128 hash = doris::vectorized::PathInData::get_parts_hash(path);
+    wide::UInt128 hash = doris::vectorized::PathInData::get_parts_hash(path);
 
     // First call to populate nested_sizes_by_key
     parser.handleNewPath(hash, path, value, ctx);

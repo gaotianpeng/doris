@@ -54,6 +54,7 @@ public:
                                          std::shared_ptr<Dependency>>>
                          le_state_map,
                  int task_idx);
+    ~PipelineTask();
 
     Status prepare(const TPipelineInstanceParams& local_params, const TDataSink& tsink,
                    QueryContext* query_ctx);
@@ -134,7 +135,10 @@ public:
     int task_id() const { return _index; };
     bool is_finalized() const { return _finalized; }
 
-    void set_wake_up_early() { _wake_up_early = true; }
+    void set_wake_up_early(PipelineId wake_by = -1) {
+        _wake_up_early = true;
+        _wake_by = wake_by;
+    }
 
     void clear_blocking_state() {
         auto fragment = _fragment_context.lock();
@@ -142,10 +146,8 @@ public:
         // We use a lock to assure all dependencies are not deconstructed here.
         std::unique_lock<std::mutex> lc(_dependency_lock);
         if (!_finalized && fragment) {
-            _execution_dep->set_always_ready();
-            for (auto* dep : _filter_dependencies) {
-                dep->set_always_ready();
-            }
+            std::for_each(_execution_dependencies.begin(), _execution_dependencies.end(),
+                          [&](Dependency* dep) { dep->set_ready(); });
             for (auto& deps : _read_dependencies) {
                 for (auto* dep : deps) {
                     dep->set_always_ready();
@@ -244,6 +246,7 @@ private:
     void _init_profile();
     void _fresh_profile_counter();
     Status _open();
+    Status _prepare();
 
     const TUniqueId _query_id;
     const PipelineId _pip_id;
@@ -297,7 +300,7 @@ private:
     std::vector<std::vector<Dependency*>> _read_dependencies;
     std::vector<Dependency*> _write_dependencies;
     std::vector<Dependency*> _finish_dependencies;
-    std::vector<Dependency*> _filter_dependencies;
+    std::vector<Dependency*> _execution_dependencies;
 
     // All shared states of this pipeline task.
     std::map<int, std::shared_ptr<BasicSharedState>> _op_shared_states;
@@ -310,8 +313,6 @@ private:
 
     Dependency* _blocked_dep = nullptr;
 
-    Dependency* _execution_dep = nullptr;
-
     std::atomic<bool> _finalized = false;
     std::mutex _dependency_lock;
 
@@ -319,6 +320,9 @@ private:
     std::atomic<bool> _eos = false;
     std::atomic<bool> _wake_up_early = false;
     const std::string _pipeline_name;
+    // PipelineTask maybe hold by TaskQueue
+    std::shared_ptr<MemTrackerLimiter> _query_mem_tracker;
+    int _wake_by = -1;
 };
 
 using PipelineTaskSPtr = std::shared_ptr<PipelineTask>;

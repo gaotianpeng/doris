@@ -50,6 +50,7 @@ import org.apache.doris.mtmv.MTMVRefreshContext;
 import org.apache.doris.mtmv.MTMVRefreshEnum.MTMVState;
 import org.apache.doris.mtmv.MTMVRefreshEnum.RefreshMethod;
 import org.apache.doris.mtmv.MTMVRefreshPartitionSnapshot;
+import org.apache.doris.mtmv.MTMVRelatedTableIf;
 import org.apache.doris.mtmv.MTMVRelation;
 import org.apache.doris.mtmv.MTMVUtil;
 import org.apache.doris.nereids.StatementContext;
@@ -61,6 +62,7 @@ import org.apache.doris.qe.AuditLogHelper;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.QueryState.MysqlStateType;
 import org.apache.doris.qe.StmtExecutor;
+import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TCell;
 import org.apache.doris.thrift.TRow;
 import org.apache.doris.thrift.TStatusCode;
@@ -73,7 +75,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.gson.Gson;
 import com.google.gson.annotations.SerializedName;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -84,6 +86,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -206,6 +209,13 @@ public class MTMVTask extends AbstractTask {
                     checkColumnTypeIfChange(mtmv, ctx);
                 }
                 if (mtmv.getMvPartitionInfo().getPartitionType() != MTMVPartitionType.SELF_MANAGE) {
+                    MTMVRelatedTableIf relatedTable = mtmv.getMvPartitionInfo().getRelatedTable();
+                    if (!relatedTable.isValidRelatedTable()) {
+                        throw new JobException("MTMV " + mtmv.getName() + "'s related table " + relatedTable.getName()
+                                + " is not a valid related table anymore, stop refreshing."
+                                + " e.g. Table has multiple partition columns"
+                                + " or including not supported transform functions.");
+                    }
                     syncPartitions = MTMVPartitionUtil.alignMvPartition(mtmv);
                 }
             } finally {
@@ -308,7 +318,7 @@ public class MTMVTask extends AbstractTask {
                 exec(execPartitionNames, tableWithPartKey);
                 break; // Exit loop if execution is successful
             } catch (Exception e) {
-                if (!(Config.isCloudMode() && e.getMessage().contains(FeConstants.CLOUD_RETRY_E230))) {
+                if (!(Config.isCloudMode() && SystemInfoService.needRetryWithReplan(e.getMessage()))) {
                     throw e; // Re-throw if it's not a retryable exception
                 }
                 lastException = e;
@@ -378,24 +388,53 @@ public class MTMVTask extends AbstractTask {
     }
 
     @Override
-    public synchronized void onFail() throws JobException {
+    public synchronized boolean onFail() throws JobException {
         LOG.info("mtmv task onFail, taskId: {}", super.getTaskId());
-        super.onFail();
+        boolean res = super.onFail();
+        if (!res) {
+            return false;
+        }
         after();
+        return true;
     }
 
     @Override
-    public synchronized void onSuccess() throws JobException {
+    public synchronized boolean onSuccess() throws JobException {
         if (LOG.isDebugEnabled()) {
             LOG.debug("mtmv task onSuccess, taskId: {}", super.getTaskId());
         }
-        super.onSuccess();
+        boolean res = super.onSuccess();
+        if (!res) {
+            return false;
+        }
         after();
+        return true;
+    }
+
+    /**
+     * The reason for overriding the parent class is to add synchronized protection
+     */
+    @Override
+    public synchronized boolean cancel(boolean needWaitCancelComplete) throws JobException {
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("mtmv task cancel, taskId: {}", super.getTaskId());
+        }
+        return super.cancel(needWaitCancelComplete);
     }
 
     @Override
-    protected synchronized void executeCancelLogic(boolean needWaitCancelComplete) {
-        LOG.info("mtmv task cancel, taskId: {}", super.getTaskId());
+    protected void executeCancelLogic(boolean needWaitCancelComplete) {
+        try {
+            // Mtmv is initialized in the before method.
+            // If the task has not yet run, the before method will not be used, so mtmv will be empty,
+            // which prevents the canceled task from being added to the history list
+            if (mtmv == null) {
+                mtmv = MTMVUtil.getMTMV(dbId, mtmvId);
+            }
+        } catch (UserException e) {
+            LOG.warn("executeCancelLogic failed:", e);
+            return;
+        }
         if (executor != null) {
             executor.cancel(new Status(TStatusCode.CANCELLED, "mtmv task cancelled"), needWaitCancelComplete);
         }
@@ -431,7 +470,7 @@ public class MTMVTask extends AbstractTask {
             }
             if (tableIf instanceof MvccTable) {
                 MvccTable mvccTable = (MvccTable) tableIf;
-                MvccSnapshot mvccSnapshot = mvccTable.loadSnapshot();
+                MvccSnapshot mvccSnapshot = mvccTable.loadSnapshot(Optional.empty(), Optional.empty());
                 snapshots.put(new MvccTableInfo(mvccTable), mvccSnapshot);
             }
         }

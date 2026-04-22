@@ -33,6 +33,7 @@
 #include "gutil/macros.h"
 #include "gutil/strings/substitute.h"
 #include "olap/olap_define.h"
+#include "olap/partial_update_info.h"
 #include "olap/rowset/segment_v2/column_writer.h"
 #include "olap/rowset/segment_v2/inverted_index_file_writer.h"
 #include "olap/tablet.h"
@@ -58,7 +59,6 @@ namespace io {
 class FileWriter;
 class FileSystem;
 } // namespace io
-
 namespace segment_v2 {
 class InvertedIndexFileWriter;
 
@@ -167,14 +167,31 @@ private:
     void _set_max_key(const Slice& key);
     void _serialize_block_to_row_column(vectorized::Block& block);
     Status _probe_key_for_mow(std::string key, std::size_t segment_pos, bool have_input_seq_column,
-                              bool have_delete_sign, PartialUpdateReadPlan& read_plan,
+                              bool have_delete_sign,
                               const std::vector<RowsetSharedPtr>& specified_rowsets,
                               std::vector<std::unique_ptr<SegmentCacheHandle>>& segment_caches,
                               bool& has_default_or_nullable,
                               std::vector<bool>& use_default_or_null_flag,
+                              const std::function<void(const RowLocation& loc)>& found_cb,
+                              const std::function<Status()>& not_found_cb,
                               PartialUpdateStats& stats);
-    Status _partial_update_preconditions_check(size_t row_pos);
+    Status _partial_update_preconditions_check(size_t row_pos, bool is_flexible_update);
     Status _append_block_with_partial_content(RowsInBlock& data, vectorized::Block& full_block);
+    Status _append_block_with_flexible_partial_content(RowsInBlock& data,
+                                                       vectorized::Block& full_block);
+    Status _generate_encoded_default_seq_value(const TabletSchema& tablet_schema,
+                                               const PartialUpdateInfo& info,
+                                               std::string* encoded_value);
+    Status _generate_flexible_read_plan(
+            FlexibleReadPlan& read_plan, RowsInBlock& data, size_t segment_start_pos,
+            bool schema_has_sequence_col, int32_t seq_map_col_unique_id,
+            std::vector<BitmapValue>* skip_bitmaps,
+            const std::vector<vectorized::IOlapColumnDataAccessor*>& key_columns,
+            vectorized::IOlapColumnDataAccessor* seq_column, const signed char* delete_signs,
+            const std::vector<RowsetSharedPtr>& specified_rowsets,
+            std::vector<std::unique_ptr<SegmentCacheHandle>>& segment_caches,
+            bool& has_default_or_nullable, std::vector<bool>& use_default_or_null_flag,
+            PartialUpdateStats& stats);
     Status _append_block_with_variant_subcolumns(RowsInBlock& data);
     Status _generate_key_index(
             RowsInBlock& data, std::vector<vectorized::IOlapColumnDataAccessor*>& key_columns,
@@ -190,6 +207,7 @@ private:
     bool _is_mow_with_cluster_key();
 
 private:
+    friend class ::doris::BlockAggregator;
     uint32_t _segment_id;
     TabletSchemaSPtr _tablet_schema;
     BaseTabletSPtr _tablet;
@@ -249,6 +267,8 @@ private:
 
     // contains auto generated columns, should be nullptr if no variants's subcolumns
     TabletSchemaSPtr _flush_schema = nullptr;
+
+    BlockAggregator _block_aggregator;
 };
 
 } // namespace segment_v2

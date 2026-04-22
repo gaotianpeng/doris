@@ -48,7 +48,7 @@ import org.apache.doris.datasource.jdbc.JdbcExternalCatalog;
 import org.apache.doris.datasource.jdbc.JdbcExternalDatabase;
 import org.apache.doris.datasource.jdbc.JdbcExternalTable;
 import org.apache.doris.datasource.jdbc.sink.JdbcTableSink;
-import org.apache.doris.load.Load;
+import org.apache.doris.load.LoadExprTransformUtils;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.planner.DataPartition;
 import org.apache.doris.planner.DataSink;
@@ -73,7 +73,7 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.thrift.TException;
@@ -771,7 +771,8 @@ public class NativeInsertStmt extends InsertStmt {
                         for (SlotRef slot : columns) {
                             smap.getLhs().add(slot);
                             smap.getRhs()
-                                    .add(Load.getExprFromDesc(analyzer, slotToIndex.get(slot.getColumnName()), slot));
+                                    .add(LoadExprTransformUtils.getExprFromDesc(analyzer,
+                                            slotToIndex.get(slot.getColumnName()), slot));
                         }
                         Expr e = entry.second.getDefineExpr().clone(smap);
                         e.analyze(analyzer);
@@ -803,7 +804,8 @@ public class NativeInsertStmt extends InsertStmt {
                         for (SlotRef slot : columns) {
                             smap.getLhs().add(slot);
                             smap.getRhs()
-                                    .add(Load.getExprFromDesc(analyzer, slotToIndex.get(slot.getColumnName()), slot));
+                                    .add(LoadExprTransformUtils.getExprFromDesc(analyzer,
+                                            slotToIndex.get(slot.getColumnName()), slot));
                         }
                         Expr e = entry.second.getDefineExpr().clone(smap);
                         e.analyze(analyzer);
@@ -900,7 +902,8 @@ public class NativeInsertStmt extends InsertStmt {
                         for (SlotRef slot : columns) {
                             smap.getLhs().add(slot);
                             smap.getRhs()
-                                    .add(Load.getExprFromDesc(analyzer, slotToIndex.get(slot.getColumnName()), slot));
+                                    .add(LoadExprTransformUtils.getExprFromDesc(analyzer,
+                                            slotToIndex.get(slot.getColumnName()), slot));
                         }
                         extentedRow.add(Expr.substituteList(Lists.newArrayList(entry.second.getDefineExpr()),
                                 smap, analyzer, false).get(0));
@@ -1022,7 +1025,9 @@ public class NativeInsertStmt extends InsertStmt {
                 ExprSubstitutionMap smap = new ExprSubstitutionMap();
                 for (SlotRef slot : columns) {
                     smap.getLhs().add(slot);
-                    smap.getRhs().add(Load.getExprFromDesc(analyzer, slotToIndex.get(slot.getColumnName()), slot));
+                    smap.getRhs().add(
+                            LoadExprTransformUtils.getExprFromDesc(analyzer, slotToIndex.get(slot.getColumnName()),
+                                    slot));
                 }
                 targetExpr = targetExpr.clone(smap);
                 targetExpr.analyze(analyzer);

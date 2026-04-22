@@ -17,6 +17,8 @@
 
 package org.apache.doris.alter;
 
+import org.apache.doris.analysis.AddColumnClause;
+import org.apache.doris.analysis.AddColumnsClause;
 import org.apache.doris.analysis.AddPartitionClause;
 import org.apache.doris.analysis.AddPartitionLikeClause;
 import org.apache.doris.analysis.AlterClause;
@@ -26,9 +28,15 @@ import org.apache.doris.analysis.AlterTableStmt;
 import org.apache.doris.analysis.AlterViewStmt;
 import org.apache.doris.analysis.ColumnRenameClause;
 import org.apache.doris.analysis.CreateMaterializedViewStmt;
+import org.apache.doris.analysis.CreateOrReplaceBranchClause;
+import org.apache.doris.analysis.CreateOrReplaceTagClause;
+import org.apache.doris.analysis.DropBranchClause;
+import org.apache.doris.analysis.DropColumnClause;
 import org.apache.doris.analysis.DropMaterializedViewStmt;
 import org.apache.doris.analysis.DropPartitionClause;
 import org.apache.doris.analysis.DropPartitionFromIndexClause;
+import org.apache.doris.analysis.DropTagClause;
+import org.apache.doris.analysis.ModifyColumnClause;
 import org.apache.doris.analysis.ModifyColumnCommentClause;
 import org.apache.doris.analysis.ModifyDistributionClause;
 import org.apache.doris.analysis.ModifyEngineClause;
@@ -36,6 +44,7 @@ import org.apache.doris.analysis.ModifyPartitionClause;
 import org.apache.doris.analysis.ModifyTableCommentClause;
 import org.apache.doris.analysis.ModifyTablePropertiesClause;
 import org.apache.doris.analysis.PartitionRenameClause;
+import org.apache.doris.analysis.ReorderColumnsClause;
 import org.apache.doris.analysis.ReplacePartitionClause;
 import org.apache.doris.analysis.ReplaceTableClause;
 import org.apache.doris.analysis.RollupRenameClause;
@@ -126,7 +135,7 @@ public class Alter {
         Database db = Env.getCurrentInternalCatalog().getDbOrDdlException(dbName);
         Env.getCurrentInternalCatalog().checkAvailableCapacity(db);
 
-        OlapTable olapTable = (OlapTable) db.getTableOrMetaException(tableName, TableType.OLAP);
+        OlapTable olapTable = (OlapTable) db.getNonTempTableOrMetaException(tableName, TableType.OLAP);
         ((MaterializedViewHandler) materializedViewHandler).processCreateMaterializedView(stmt, db, olapTable);
     }
 
@@ -334,6 +343,57 @@ public class Alter {
         Env.getCurrentEnv().getEditLog().logModifyTableProperties(info);
     }
 
+    private void processAlterTableForExternalTable(
+            ExternalTable table,
+            List<AlterClause> alterClauses) throws UserException {
+        for (AlterClause alterClause : alterClauses) {
+            if (alterClause instanceof ModifyTablePropertiesClause) {
+                setExternalTableAutoAnalyzePolicy(table, alterClauses);
+            } else if (alterClause instanceof CreateOrReplaceBranchClause) {
+                table.getCatalog().createOrReplaceBranch(
+                        table,
+                        ((CreateOrReplaceBranchClause) alterClause).getBranchInfo());
+            } else if (alterClause instanceof CreateOrReplaceTagClause) {
+                table.getCatalog().createOrReplaceTag(
+                        table,
+                        ((CreateOrReplaceTagClause) alterClause).getTagInfo());
+            } else if (alterClause instanceof DropBranchClause) {
+                table.getCatalog().dropBranch(
+                        table,
+                        ((DropBranchClause) alterClause).getDropBranchInfo());
+            } else if (alterClause instanceof DropTagClause) {
+                table.getCatalog().dropTag(
+                        table,
+                        ((DropTagClause) alterClause).getDropTagInfo());
+            } else if (alterClause instanceof TableRenameClause) {
+                TableRenameClause tableRename = (TableRenameClause) alterClause;
+                table.getCatalog().renameTable(
+                        table.getDbName(), table.getName(), tableRename.getNewTableName());
+            } else if (alterClause instanceof AddColumnClause) {
+                AddColumnClause addColumn = (AddColumnClause) alterClause;
+                table.getCatalog().addColumn(table, addColumn.getColumn(), addColumn.getColPos());
+            } else if (alterClause instanceof AddColumnsClause) {
+                AddColumnsClause addColumns = (AddColumnsClause) alterClause;
+                table.getCatalog().addColumns(table, addColumns.getColumns());
+            } else if (alterClause instanceof DropColumnClause) {
+                DropColumnClause dropColumn = (DropColumnClause) alterClause;
+                table.getCatalog().dropColumn(table, dropColumn.getColName());
+            } else if (alterClause instanceof ColumnRenameClause) {
+                ColumnRenameClause columnRename = (ColumnRenameClause) alterClause;
+                table.getCatalog().renameColumn(
+                        table, columnRename.getColName(), columnRename.getNewColName());
+            } else if (alterClause instanceof ModifyColumnClause) {
+                ModifyColumnClause modifyColumn = (ModifyColumnClause) alterClause;
+                table.getCatalog().modifyColumn(table, modifyColumn.getColumn(), modifyColumn.getColPos());
+            } else if (alterClause instanceof ReorderColumnsClause) {
+                ReorderColumnsClause reorderColumns = (ReorderColumnsClause) alterClause;
+                table.getCatalog().reorderColumns(table, reorderColumns.getColumnsByPos());
+            } else {
+                throw new UserException("Invalid alter operations for external table: " + alterClauses);
+            }
+        }
+    }
+
     private boolean needChangeMTMVState(List<AlterClause> alterClauses) {
         for (AlterClause alterClause : alterClauses) {
             if (alterClause.needChangeMTMVState()) {
@@ -511,6 +571,9 @@ public class Alter {
         switch (tableIf.getType()) {
             case MATERIALIZED_VIEW:
             case OLAP:
+                if (tableIf.isTemporary()) {
+                    throw new DdlException("Do not support alter temporary table[" + tableName + "]");
+                }
                 OlapTable olapTable = (OlapTable) tableIf;
                 needProcessOutsideTableLock = processAlterOlapTable(stmt, olapTable, alterClauses, (Database) dbIf);
                 break;
@@ -529,7 +592,7 @@ public class Alter {
             case HUDI_EXTERNAL_TABLE:
             case TRINO_CONNECTOR_EXTERNAL_TABLE:
                 alterClauses.addAll(stmt.getOps());
-                setExternalTableAutoAnalyzePolicy((ExternalTable) tableIf, alterClauses);
+                processAlterTableForExternalTable((ExternalTable) tableIf, alterClauses);
                 return;
             default:
                 throw new DdlException("Do not support alter "
@@ -600,6 +663,9 @@ public class Alter {
         try {
             List<TableType> tableTypes = Lists.newArrayList(TableType.OLAP, TableType.MATERIALIZED_VIEW);
             Table newTbl = db.getTableOrMetaException(newTblName, tableTypes);
+            if (newTbl.isTemporary()) {
+                throw new UserException("Do not support replace with temporary table");
+            }
             OlapTable olapNewTbl = (OlapTable) newTbl;
             List<Table> tableList = Lists.newArrayList(origTable, newTbl);
             tableList.sort((Comparator.comparing(Table::getId)));
@@ -700,23 +766,29 @@ public class Alter {
 
         String tableName = dbTableName.getTbl();
         View view = (View) db.getTableOrMetaException(tableName, TableType.VIEW);
-        modifyViewDef(db, view, stmt.getInlineViewDef(), ctx.getSessionVariable().getSqlMode(), stmt.getColumns());
+        modifyViewDef(db, view, stmt.getInlineViewDef(), ctx.getSessionVariable().getSqlMode(),
+                stmt.getColumns(), stmt.getComment());
     }
 
     private void modifyViewDef(Database db, View view, String inlineViewDef, long sqlMode,
-                               List<Column> newFullSchema) throws DdlException {
+                               List<Column> newFullSchema, String comment) throws DdlException {
         db.writeLockOrDdlException();
         try {
             view.writeLockOrDdlException();
             try {
-                view.setInlineViewDefWithSqlMode(inlineViewDef, sqlMode);
-                view.setNewFullSchema(newFullSchema);
+                if (comment != null) {
+                    view.setComment(comment);
+                }
+                // when do alter view modify comment, inlineViewDef and newFullSchema will be empty.
+                if (!Strings.isNullOrEmpty(inlineViewDef)) {
+                    view.setInlineViewDefWithSqlMode(inlineViewDef, sqlMode);
+                    view.setNewFullSchema(newFullSchema);
+                }
                 String viewName = view.getName();
                 db.unregisterTable(viewName);
                 db.registerTable(view);
-
                 AlterViewInfo alterViewInfo = new AlterViewInfo(db.getId(), view.getId(),
-                        inlineViewDef, newFullSchema, sqlMode);
+                        inlineViewDef, newFullSchema, sqlMode, comment);
                 Env.getCurrentEnv().getEditLog().logModifyViewDef(alterViewInfo);
                 LOG.info("modify view[{}] definition to {}", viewName, inlineViewDef);
             } finally {
@@ -732,6 +804,7 @@ public class Alter {
         long tableId = alterViewInfo.getTableId();
         String inlineViewDef = alterViewInfo.getInlineViewDef();
         List<Column> newFullSchema = alterViewInfo.getNewFullSchema();
+        String comment = alterViewInfo.getComment();
 
         Database db = Env.getCurrentInternalCatalog().getDbOrMetaException(dbId);
         View view = (View) db.getTableOrMetaException(tableId, TableType.VIEW);
@@ -740,8 +813,12 @@ public class Alter {
         view.writeLock();
         try {
             String viewName = view.getName();
-            view.setInlineViewDefWithSqlMode(inlineViewDef, alterViewInfo.getSqlMode());
-            view.setNewFullSchema(newFullSchema);
+            if (comment != null) {
+                view.setComment(comment);
+            } else {
+                view.setInlineViewDefWithSqlMode(inlineViewDef, alterViewInfo.getSqlMode());
+                view.setNewFullSchema(newFullSchema);
+            }
 
             // We do not need to init view here.
             // During the `init` phase, some `Alter-View` statements will access the remote file system,

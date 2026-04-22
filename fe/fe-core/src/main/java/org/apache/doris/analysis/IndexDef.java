@@ -217,7 +217,7 @@ public class IndexDef {
     }
 
     // Check if the column type is supported for inverted index
-    public boolean isSupportIdxType(Type colType) {
+    public static boolean isSupportIdxType(Type colType) {
         if (colType.isArrayType()) {
             Type itemType = ((ArrayType) colType).getItemType();
             if (itemType.isArrayType()) {
@@ -266,14 +266,17 @@ public class IndexDef {
                         + " or key columns of AGG_KEYS table. invalid index: " + indexName);
                 } else if (keysType == KeysType.UNIQUE_KEYS && !enableUniqueKeyMergeOnWrite
                         && indexType == IndexType.INVERTED && properties != null
-                        && properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY)) {
+                        && (properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY)
+                            || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY_ALIAS)
+                            || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_CUSTOM_ANALYZER_KEY))) {
                     throw new AnalysisException("INVERTED index with parser can NOT be used in value columns of"
                         + " UNIQUE_KEYS table with merge_on_write disable. invalid index: " + indexName);
                 }
             }
 
             if (indexType == IndexType.INVERTED) {
-                InvertedIndexUtil.checkInvertedIndexParser(indexColName, colType, properties);
+                InvertedIndexUtil.checkInvertedIndexParser(indexColName, colType, properties,
+                        invertedIndexFileStorageFormat);
             } else if (indexType == IndexType.NGRAM_BF) {
                 if (colType != PrimitiveType.CHAR && colType != PrimitiveType.VARCHAR
                         && colType != PrimitiveType.STRING) {
@@ -307,5 +310,13 @@ public class IndexDef {
         } catch (NumberFormatException e) {
             throw new AnalysisException("Invalid value for '" + key + "': " + valueStr, e);
         }
+    }
+
+    public boolean isAnalyzedInvertedIndex() {
+        return indexType == IndexDef.IndexType.INVERTED
+            && properties != null
+            && (properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY)
+                || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY_ALIAS)
+                || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_CUSTOM_ANALYZER_KEY));
     }
 }

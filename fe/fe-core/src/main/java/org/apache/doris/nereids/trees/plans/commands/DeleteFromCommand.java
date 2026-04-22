@@ -32,6 +32,7 @@ import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.nereids.NereidsPlanner;
 import org.apache.doris.nereids.analyzer.UnboundAlias;
@@ -70,6 +71,7 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.qe.StmtExecutor;
 import org.apache.doris.qe.VariableMgr;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -149,7 +151,7 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
                         scan.getTable().getName(), PrivPredicate.LOAD)) {
             String message = ErrorCode.ERR_TABLEACCESS_DENIED_ERROR.formatErrorMsg("LOAD",
                     ConnectContext.get().getQualifiedUser(), ConnectContext.get().getRemoteIP(),
-                    scan.getDatabase().getFullName() + ": " + scan.getTable().getName());
+                    scan.getDatabase().getFullName() + ": " + Util.getTempTableDisplayName(scan.getTable().getName()));
             throw new AnalysisException(message);
         }
 
@@ -228,10 +230,10 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
 
     private void checkColumn(Set<String> tableColumns, SlotReference slotReference, OlapTable table) {
         // 0. must slot from table
-        if (!slotReference.getColumn().isPresent()) {
+        if (!slotReference.getOriginalColumn().isPresent()) {
             throw new AnalysisException("");
         }
-        Column column = slotReference.getColumn().get();
+        Column column = slotReference.getOriginalColumn().get();
 
         if (Column.DELETE_SIGN.equalsIgnoreCase(column.getName())) {
             return;
@@ -263,11 +265,13 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
         if (!column.isKey()) {
             if (table.getKeysType() == KeysType.AGG_KEYS) {
                 throw new AnalysisException("delete predicate on value column only supports Unique table with"
-                        + " merge-on-write enabled and Duplicate table, but " + "Table[" + table.getName()
+                        + " merge-on-write enabled and Duplicate table, but " + "Table["
+                        + Util.getTempTableDisplayName(table.getName())
                         + "] is an Aggregate table.");
             } else if (table.getKeysType() == KeysType.UNIQUE_KEYS && !table.getEnableUniqueKeyMergeOnWrite()) {
                 throw new AnalysisException("delete predicate on value column only supports Unique table with"
-                        + " merge-on-write enabled and Duplicate table, but " + "Table[" + table.getName()
+                        + " merge-on-write enabled and Duplicate table, but " + "Table["
+                        + Util.getTempTableDisplayName(table.getName())
                         + "] is an unique table without merge-on-write.");
             }
         }
@@ -341,8 +345,8 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
 
     private void checkPredicate(Expression predicate) {
         if (predicate instanceof And) {
-            checkPredicate(((And) predicate).left());
-            checkPredicate(((And) predicate).right());
+            And and = (And) predicate;
+            and.children().forEach(child -> checkPredicate(child));
         } else if (predicate instanceof ComparisonPredicate) {
             checkComparisonPredicate((ComparisonPredicate) predicate);
         } else if (predicate instanceof IsNull) {
@@ -398,7 +402,7 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
         List<NamedExpression> selectLists = Lists.newArrayList();
         List<String> cols = Lists.newArrayList();
         boolean isMow = targetTable.getEnableUniqueKeyMergeOnWrite();
-        String tableName = tableAlias != null ? tableAlias : targetTable.getName();
+        String tableName = tableAlias != null ? tableAlias : Util.getTempTableDisplayName(targetTable.getName());
         boolean hasClusterKey = targetTable.getBaseSchema().stream().anyMatch(Column::isClusterKey);
         boolean hasSyncMaterializedView = false;
         // currently cluster key doesn't support partial update, so we can't convert
@@ -437,7 +441,8 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
         logicalQuery = handleCte(logicalQuery);
         // make UnboundTableSink
         return UnboundTableSinkCreator.createUnboundTableSink(nameParts, cols, ImmutableList.of(),
-                isTempPart, partitions, isPartialUpdate, DMLCommandType.DELETE, logicalQuery);
+                isTempPart, partitions, isPartialUpdate, TPartialUpdateNewRowPolicy.APPEND,
+                        DMLCommandType.DELETE, logicalQuery);
     }
 
     protected LogicalPlan handleCte(LogicalPlan logicalPlan) {

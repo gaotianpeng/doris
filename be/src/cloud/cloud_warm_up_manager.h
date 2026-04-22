@@ -47,6 +47,10 @@ struct JobMeta {
     std::vector<int64_t> tablet_ids;
 };
 
+// manager for
+// table warm up
+// cluster warm up
+// balance peer addr cache
 class CloudWarmUpManager {
 public:
     explicit CloudWarmUpManager(CloudStorageEngine& engine);
@@ -72,23 +76,39 @@ public:
 
     Status set_event(int64_t job_id, TWarmUpEventType::type event, bool clear = false);
 
-    void warm_up_rowset(RowsetMeta& rs_meta);
+    // If `sync_wait_timeout_ms` <= 0, the function will send the warm-up RPC
+    // and return immediately without waiting for the warm-up to complete.
+    // If `sync_wait_timeout_ms` > 0, the function will wait for the warm-up
+    // to finish or until the specified timeout (in milliseconds) is reached.
+    //
+    // @param rs_meta Metadata of the rowset to be warmed up.
+    // @param sync_wait_timeout_ms Timeout in milliseconds to wait for the warm-up
+    //                              to complete. Non-positive value means no waiting.
+    void warm_up_rowset(RowsetMeta& rs_meta, int64_t sync_wait_timeout_ms = -1);
 
     void recycle_cache(int64_t tablet_id, const std::vector<RecycledRowsets>& rowsets);
+
+    // Balance warm up cache management methods
+    void record_balanced_tablet(int64_t tablet_id, const std::string& host, int32_t brpc_port);
+    std::optional<std::pair<std::string, int32_t>> get_balanced_tablet_info(int64_t tablet_id);
+    void remove_balanced_tablet(int64_t tablet_id);
+    void remove_balanced_tablets(const std::vector<int64_t>& tablet_ids);
+    bool is_balanced_tablet_expired(const std::chrono::system_clock::time_point& ctime) const;
+    std::unordered_map<int64_t, std::pair<std::string, int32_t>> get_all_balanced_tablets() const;
 
 private:
     void handle_jobs();
 
     Status _do_warm_up_rowset(RowsetMeta& rs_meta, std::vector<TReplicaInfo>& replicas,
-                              bool skip_existence_check);
+                              int64_t sync_wait_timeout_ms, bool skip_existence_check);
 
     std::vector<TReplicaInfo> get_replica_info(int64_t tablet_id, bool bypass_cache,
                                                bool& cache_hit);
 
     void submit_download_tasks(io::Path path, int64_t file_size, io::FileSystemSPtr file_system,
                                int64_t expiration_time,
-                               std::shared_ptr<bthread::CountdownEvent> wait,
-                               bool is_index = false);
+                               std::shared_ptr<bthread::CountdownEvent> wait, bool is_index = false,
+                               std::function<void(Status)> done_cb = nullptr);
     std::mutex _mtx;
     std::condition_variable _cond;
     int64_t _cur_job_id {0};
@@ -106,6 +126,22 @@ private:
     using Cache = std::unordered_map<int64_t, CacheEntry>;
     // job_id -> cache
     std::unordered_map<int64_t, Cache> _tablet_replica_cache;
+
+    // Sharded lock for better performance
+    static constexpr size_t SHARD_COUNT = 10240;
+    struct Shard {
+        mutable std::mutex mtx;
+        std::unordered_map<int64_t, JobMeta> tablets;
+    };
+    std::array<Shard, SHARD_COUNT> _balanced_tablets_shards;
+
+    // Helper methods for shard operations
+    size_t get_shard_index(int64_t tablet_id) const {
+        return std::hash<int64_t> {}(tablet_id) % SHARD_COUNT;
+    }
+    Shard& get_shard(int64_t tablet_id) {
+        return _balanced_tablets_shards[get_shard_index(tablet_id)];
+    }
 };
 
 } // namespace doris

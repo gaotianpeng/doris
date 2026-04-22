@@ -22,7 +22,6 @@ import org.apache.doris.analysis.AlterCatalogNameStmt;
 import org.apache.doris.analysis.AlterCatalogPropertyStmt;
 import org.apache.doris.analysis.CreateCatalogStmt;
 import org.apache.doris.analysis.DropCatalogStmt;
-import org.apache.doris.analysis.RefreshCatalogStmt;
 import org.apache.doris.analysis.StatementBase;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Resource;
@@ -32,7 +31,6 @@ import org.apache.doris.datasource.es.EsExternalCatalog;
 import org.apache.doris.datasource.hive.HMSExternalCatalog;
 import org.apache.doris.datasource.iceberg.IcebergExternalCatalogFactory;
 import org.apache.doris.datasource.jdbc.JdbcExternalCatalog;
-import org.apache.doris.datasource.lakesoul.LakeSoulExternalCatalog;
 import org.apache.doris.datasource.maxcompute.MaxComputeExternalCatalog;
 import org.apache.doris.datasource.paimon.PaimonExternalCatalogFactory;
 import org.apache.doris.datasource.test.TestExternalCatalog;
@@ -63,9 +61,6 @@ public class CatalogFactory {
         } else if (stmt instanceof AlterCatalogNameStmt) {
             log.setCatalogId(catalogId);
             log.setNewCatalogName(((AlterCatalogNameStmt) stmt).getNewCatalogName());
-        } else if (stmt instanceof RefreshCatalogStmt) {
-            log.setCatalogId(catalogId);
-            log.setInvalidCache(((RefreshCatalogStmt) stmt).isInvalidCache());
         } else if (stmt instanceof AlterCatalogCommentStmt) {
             log.setCatalogId(catalogId);
             log.setComment(((AlterCatalogCommentStmt) stmt).getComment());
@@ -139,8 +134,7 @@ public class CatalogFactory {
                 catalog = new MaxComputeExternalCatalog(catalogId, name, resource, props, comment);
                 break;
             case "lakesoul":
-                catalog = new LakeSoulExternalCatalog(catalogId, name, resource, props, comment);
-                break;
+                throw new DdlException("Lakesoul catalog is no longer supported");
             case "test":
                 if (!FeConstants.runningUnitTest) {
                     throw new DdlException("test catalog is only for FE unit test");

@@ -21,10 +21,8 @@ import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.rules.Rule;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.trees.expressions.Expression;
-import org.apache.doris.nereids.trees.expressions.OrderExpression;
 import org.apache.doris.nereids.trees.expressions.WindowExpression;
 import org.apache.doris.nereids.trees.expressions.functions.agg.AggregateFunction;
-import org.apache.doris.nereids.trees.expressions.functions.agg.Count;
 import org.apache.doris.nereids.trees.expressions.functions.generator.TableGeneratingFunction;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GroupingScalarFunction;
 import org.apache.doris.nereids.trees.expressions.typecoercion.TypeCheckResult;
@@ -141,38 +139,6 @@ public class CheckAnalysis implements AnalysisRuleFactory {
     }
 
     private void checkAggregate(LogicalAggregate<? extends Plan> aggregate) {
-        Set<AggregateFunction> aggregateFunctions = aggregate.getAggregateFunctions();
-        boolean distinctMultiColumns = false;
-        for (AggregateFunction func : aggregateFunctions) {
-            if (!func.isDistinct()) {
-                continue;
-            }
-            if (func.arity() <= 1) {
-                continue;
-            }
-            if (func instanceof Count) {
-                for (int i = 1; i < func.arity(); i++) {
-                    if (!func.child(i).getInputSlots().isEmpty() && !(func.child(i) instanceof OrderExpression)) {
-                        // think about group_concat(distinct col_1, ',')
-                        distinctMultiColumns = true;
-                        break;
-                    }
-                }
-            }
-            if (distinctMultiColumns) {
-                break;
-            }
-        }
-
-        long distinctFunctionNum = 0;
-        for (AggregateFunction aggregateFunction : aggregateFunctions) {
-            distinctFunctionNum += aggregateFunction.isDistinct() ? 1 : 0;
-        }
-
-        if (distinctMultiColumns && distinctFunctionNum > 1) {
-            throw new AnalysisException(
-                    "The query contains multi count distinct or sum distinct, each can't have multi columns");
-        }
         for (Expression expr : aggregate.getGroupByExpressions()) {
             if (ExpressionUtils.hasNonWindowAggregateFunction(expr)) {
                 throw new AnalysisException(

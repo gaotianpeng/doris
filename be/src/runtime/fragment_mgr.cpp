@@ -365,6 +365,13 @@ Status FragmentMgr::trigger_pipeline_context_report(
 // Also, the reported status will always reflect the most recent execution status,
 // including the final status when execution finishes.
 void FragmentMgr::coordinator_callback(const ReportStatusRequest& req) {
+    DBUG_EXECUTE_IF("FragmentMgr::coordinator_callback.report_delay", {
+        int random_seconds = req.status.is<ErrorCode::DATA_QUALITY_ERROR>() ? 8 : 2;
+        LOG_INFO("sleep : ").tag("time", random_seconds).tag("query_id", print_id(req.query_id));
+        std::this_thread::sleep_for(std::chrono::seconds(random_seconds));
+        LOG_INFO("sleep done").tag("query_id", print_id(req.query_id));
+    });
+
     DCHECK(req.status.ok() || req.done); // if !status.ok() => done
     if (req.coord_addr.hostname == "external") {
         // External query (flink/spark read tablets) not need to report to FE.
@@ -437,7 +444,7 @@ void FragmentMgr::coordinator_callback(const ReportStatusRequest& req) {
     } else if (!req.runtime_states.empty()) {
         for (auto* rs : req.runtime_states) {
             if (rs->num_rows_load_total() > 0 || rs->num_rows_load_filtered() > 0 ||
-                req.runtime_state->num_finished_range() > 0) {
+                rs->num_finished_range() > 0) {
                 params.__isset.load_counters = true;
                 num_rows_load_success += rs->num_rows_load_success();
                 num_rows_load_filtered += rs->num_rows_load_filtered();
@@ -651,6 +658,12 @@ void FragmentMgr::remove_pipeline_context(
     g_fragment_last_active_time.set_value(now);
 
     _pipeline_map.erase({query_id, f_context->get_fragment_id()});
+}
+
+void FragmentMgr::remove_query_context(const TUniqueId& key) {
+#ifndef BE_TEST
+    _query_ctx_map.erase(key);
+#endif
 }
 
 std::shared_ptr<QueryContext> FragmentMgr::get_query_ctx(const TUniqueId& query_id) {
@@ -891,7 +904,7 @@ void FragmentMgr::cancel_query(const TUniqueId query_id, const Status reason) {
         }
     }
     query_ctx->cancel(reason);
-    _query_ctx_map.erase(query_id);
+    remove_query_context(query_id);
     LOG(INFO) << "Query " << print_id(query_id)
               << " is cancelled and removed. Reason: " << reason.to_string();
 }

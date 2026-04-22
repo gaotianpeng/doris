@@ -18,6 +18,8 @@
 package org.apache.doris.nereids;
 
 import org.apache.doris.analysis.StatementBase;
+import org.apache.doris.analysis.TableScanParams;
+import org.apache.doris.analysis.TableSnapshot;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.MTMV;
 import org.apache.doris.catalog.Partition;
@@ -222,6 +224,8 @@ public class StatementContext implements Closeable {
 
     private boolean privChecked;
 
+    private final Map<MvccTableInfo, MvccSnapshot> snapshots = Maps.newHashMap();
+
     // if greater than 0 means the duration has used
     private long materializedViewRewriteDuration = 0L;
 
@@ -232,7 +236,7 @@ public class StatementContext implements Closeable {
     // Record mtmv and valid partitions map because this is time-consuming behavior
     private final Map<BaseTableInfo, Collection<Partition>> mvCanRewritePartitionsMap = new HashMap<>();
 
-    private final Map<MvccTableInfo, MvccSnapshot> snapshots = Maps.newHashMap();
+    private boolean prepareStage = false;
 
     public StatementContext() {
         this(ConnectContext.get(), null, 0);
@@ -685,13 +689,13 @@ public class StatementContext implements Closeable {
     /**
      * Load snapshot information of mvcc
      */
-    public void loadSnapshots() {
+    public void loadSnapshots(Optional<TableSnapshot> tableSnapshot, Optional<TableScanParams> scanParams) {
         for (TableIf tableIf : tables.values()) {
             if (tableIf instanceof MvccTable) {
                 MvccTableInfo mvccTableInfo = new MvccTableInfo(tableIf);
                 // may be set by MTMV, we can not load again
                 if (!snapshots.containsKey(mvccTableInfo)) {
-                    snapshots.put(mvccTableInfo, ((MvccTable) tableIf).loadSnapshot());
+                    snapshots.put(mvccTableInfo, ((MvccTable) tableIf).loadSnapshot(tableSnapshot, scanParams));
                 }
             }
         }
@@ -799,5 +803,13 @@ public class StatementContext implements Closeable {
 
     public Map<BaseTableInfo, Collection<Partition>> getMvCanRewritePartitionsMap() {
         return mvCanRewritePartitionsMap;
+    }
+
+    public void setPrepareStage(boolean isPrepare) {
+        this.prepareStage = isPrepare;
+    }
+
+    public boolean isPrepareStage() {
+        return prepareStage;
     }
 }

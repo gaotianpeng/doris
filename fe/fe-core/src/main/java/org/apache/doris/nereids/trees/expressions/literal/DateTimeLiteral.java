@@ -43,10 +43,9 @@ import java.util.Objects;
  * date time literal.
  */
 public class DateTimeLiteral extends DateLiteral {
+    public static final DateTimeLiteral MIN_DATETIME = new DateTimeLiteral(0000, 1, 1, 0, 0, 0);
+    public static final DateTimeLiteral MAX_DATETIME = new DateTimeLiteral(9999, 12, 31, 23, 59, 59);
     protected static final int MAX_MICROSECOND = 999999;
-
-    private static final DateTimeLiteral MIN_DATETIME = new DateTimeLiteral(0000, 1, 1, 0, 0, 0);
-    private static final DateTimeLiteral MAX_DATETIME = new DateTimeLiteral(9999, 12, 31, 23, 59, 59);
 
     private static final Logger LOG = LogManager.getLogger(DateTimeLiteral.class);
 
@@ -133,7 +132,7 @@ public class DateTimeLiteral extends DateLiteral {
 
     /** parseDateTimeLiteral */
     public static Result<DateTimeLiteral, AnalysisException> parseDateTimeLiteral(String s, boolean isV2) {
-        Result<TemporalAccessor, AnalysisException> parseResult = parseDateTime(s);
+        Result<TemporalAccessor, ? extends Exception> parseResult = parseDateTime(s);
         if (parseResult.isError()) {
             return parseResult.cast();
         }
@@ -246,7 +245,7 @@ public class DateTimeLiteral extends DateLiteral {
         }
     }
 
-    protected boolean checkRange() {
+    public boolean checkRange() {
         return checkRange(year, month, day) || hour > MAX_DATETIME.getHour() || minute > MAX_DATETIME.getMinute()
                 || second > MAX_DATETIME.getSecond() || microSecond > MAX_MICROSECOND;
     }

@@ -60,6 +60,8 @@ Status InvertedIndexFileReader::_init_from(int32_t read_buffer_size, const io::I
             }
         })
 
+        DCHECK(_fs != nullptr) << "file system is nullptr, index_file_full_path: "
+                               << index_file_full_path;
         // 2. open file
         auto ok = DorisFSDirectory::FSIndexInput::open(
                 _fs, index_file_full_path.c_str(), index_input, err, read_buffer_size, file_size);
@@ -81,7 +83,7 @@ Status InvertedIndexFileReader::_init_from(int32_t read_buffer_size, const io::I
 
         // 3. read file
         int32_t version = _stream->readInt(); // Read version number
-        if (version == InvertedIndexStorageFormatPB::V2) {
+        if (version >= InvertedIndexStorageFormatPB::V2) {
             DCHECK(version == _storage_format);
             int32_t numIndices = _stream->readInt(); // Read number of indices
 
@@ -177,7 +179,8 @@ Result<std::unique_ptr<DorisCompoundReader>> InvertedIndexFileReader::_open(
                             "CLuceneError occur file size = -1, file is {}", index_file_path));
                 }
             })
-
+            DCHECK(_fs != nullptr)
+                    << "file system is nullptr, index_file_path: " << index_file_path;
             // 2. open file
             auto ok = DorisFSDirectory::FSIndexInput::open(
                     _fs, index_file_path.c_str(), index_input, err, _read_buffer_size, file_size);
@@ -223,6 +226,7 @@ Result<std::unique_ptr<DorisCompoundReader>> InvertedIndexFileReader::_open(
     }
     return compound_reader;
 }
+
 Result<std::unique_ptr<DorisCompoundReader>> InvertedIndexFileReader::open(
         const TabletIndex* index_meta, const io::IOContext* io_ctx) const {
     auto index_id = index_meta->index_id();

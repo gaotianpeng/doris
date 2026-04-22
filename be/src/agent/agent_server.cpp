@@ -148,6 +148,9 @@ void AgentServer::start_workers(StorageEngine& engine, ExecEnv* exec_env) {
     _workers[TTaskType::PUSH_STORAGE_POLICY] = std::make_unique<TaskWorkerPool>(
             "PUSH_STORAGE_POLICY", 1, [&engine](auto&& task) { return push_storage_policy_callback(engine, task); });
 
+    _workers[TTaskType::PUSH_INDEX_POLICY] = std::make_unique<TaskWorkerPool>(
+            "PUSH_INDEX_POLICY", 1, [](auto&& task) { return push_index_policy_callback(task); });
+
     _workers[TTaskType::PUSH_COOLDOWN_CONF] = std::make_unique<TaskWorkerPool>(
             "PUSH_COOLDOWN_CONF", 1, [&engine](auto&& task) { return push_cooldown_conf_callback(engine, task); });
 
@@ -196,6 +199,9 @@ void AgentServer::start_workers(StorageEngine& engine, ExecEnv* exec_env) {
 
     _report_workers.push_back(std::make_unique<ReportWorker>(
             "REPORT_OLAP_TABLET", _cluster_info, config::report_tablet_interval_seconds,[&engine, &cluster_info = _cluster_info] { report_tablet_callback(engine, cluster_info); }));
+
+    _report_workers.push_back(std::make_unique<ReportWorker>(
+            "REPORT_INDEX_POLICY", _cluster_info, config::report_index_policy_interval_seconds,[&cluster_info = _cluster_info] { report_index_policy_callback(cluster_info); }));
     // clang-format on
 
     exec_env->storage_engine().to_local().workers = &_workers;
@@ -219,6 +225,21 @@ void AgentServer::cloud_start_workers(CloudStorageEngine& engine, ExecEnv* exec_
     _workers[TTaskType::DROP] = std::make_unique<TaskWorkerPool>(
             "DROP_TABLE", 1, [&engine](auto&& task) { return drop_tablet_callback(engine, task); });
 
+    _workers[TTaskType::PUSH_INDEX_POLICY] = std::make_unique<TaskWorkerPool>(
+            "PUSH_INDEX_POLICY", 1, [](auto&& task) { return push_index_policy_callback(task); });
+
+    _workers[TTaskType::DOWNLOAD] = std::make_unique<TaskWorkerPool>(
+            "DOWNLOAD", config::download_worker_count,
+            [&engine, exec_env](auto&& task) { return download_callback(engine, exec_env, task); });
+
+    _workers[TTaskType::MOVE] = std::make_unique<TaskWorkerPool>(
+            "MOVE", 1,
+            [&engine, exec_env](auto&& task) { return move_dir_callback(engine, exec_env, task); });
+
+    _workers[TTaskType::RELEASE_SNAPSHOT] = std::make_unique<TaskWorkerPool>(
+            "RELEASE_SNAPSHOT", config::release_snapshot_worker_count,
+            [&engine](auto&& task) { return release_snapshot_callback(engine, task); });
+
     _report_workers.push_back(std::make_unique<ReportWorker>(
             "REPORT_TASK", _cluster_info, config::report_task_interval_seconds,
             [&cluster_info = _cluster_info] { report_task_callback(cluster_info); }));
@@ -236,6 +257,10 @@ void AgentServer::cloud_start_workers(CloudStorageEngine& engine, ExecEnv* exec_
                     report_tablet_callback(engine, cluster_info);
                 }));
     }
+
+    _report_workers.push_back(std::make_unique<ReportWorker>(
+            "REPORT_INDEX_POLICY", _cluster_info, config::report_index_policy_interval_seconds,
+            [&cluster_info = _cluster_info] { report_index_policy_callback(cluster_info); }));
 }
 
 // TODO(lingbin): each task in the batch may have it own status or FE must check and

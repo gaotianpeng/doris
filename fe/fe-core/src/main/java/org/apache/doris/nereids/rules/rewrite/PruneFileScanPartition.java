@@ -24,6 +24,7 @@ import org.apache.doris.nereids.rules.Rule;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner.PartitionTableType;
+import org.apache.doris.nereids.rules.expression.rules.SortedPartitionRanges;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFileScan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFileScan.SelectedPartitions;
@@ -31,11 +32,12 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -88,8 +90,16 @@ public class PruneFileScanPartition extends OneRewriteRuleFactory {
                 .collect(Collectors.toList());
 
         Map<String, PartitionItem> nameToPartitionItem = scan.getSelectedPartitions().selectedPartitions;
+        Optional<SortedPartitionRanges<String>> sortedPartitionRanges = Optional.empty();
+        boolean enableBinarySearch = ctx.getConnectContext() == null
+                || ctx.getConnectContext().getSessionVariable().enableBinarySearchFilteringPartitions;
+        if (enableBinarySearch) {
+            sortedPartitionRanges = (Optional) externalTable.getSortedPartitionRanges(scan);
+        }
+
         List<String> prunedPartitions = new ArrayList<>(PartitionPruner.prune(
-                partitionSlots, filter.getPredicate(), nameToPartitionItem, ctx, PartitionTableType.EXTERNAL));
+                partitionSlots, filter.getPredicate(), nameToPartitionItem, ctx,
+                PartitionTableType.EXTERNAL, sortedPartitionRanges));
 
         for (String name : prunedPartitions) {
             selectedPartitionItems.put(name, nameToPartitionItem.get(name));

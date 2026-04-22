@@ -17,13 +17,18 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.AggregateType;
+import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.DatabaseIf;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
@@ -31,6 +36,8 @@ import org.apache.doris.common.util.InternalDatabaseUtil;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
+
+import com.google.common.annotations.VisibleForTesting;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -86,6 +93,21 @@ public class AlterTableStmt extends DdlStmt implements NotFallbackInParser {
             }
             op.analyze(analyzer);
         }
+        checkTemporaryTable();
+    }
+
+    @VisibleForTesting
+    public void checkTemporaryTable() throws DdlException, AnalysisException {
+        String ctlName = tbl.getCtl();
+        String dbName = tbl.getDb();
+        String tableName = tbl.getTbl();
+        DatabaseIf dbIf = Env.getCurrentEnv().getCatalogMgr()
+                .getCatalogOrException(ctlName, catalog -> new DdlException("Unknown catalog " + catalog))
+                .getDbOrDdlException(dbName);
+        TableIf tableIf = dbIf.getTableOrDdlException(tableName);
+        if (tableIf.isTemporary()) {
+            throw new AnalysisException("Do not support alter temporary table[" + tableName + "]");
+        }
     }
 
     public void rewriteAlterClause(OlapTable table) throws UserException {
@@ -103,6 +125,16 @@ public class AlterTableStmt extends DdlStmt implements NotFallbackInParser {
                 if (table.getKeysType() != KeysType.UNIQUE_KEYS
                         && alterFeature == EnableFeatureClause.Features.SEQUENCE_LOAD) {
                     throw new AnalysisException("Sequence load only supported in unique tables.");
+                }
+                if (alterFeature == EnableFeatureClause.Features.UPDATE_FLEXIBLE_COLUMNS) {
+                    if (!(table.getKeysType() == KeysType.UNIQUE_KEYS && table.getEnableUniqueKeyMergeOnWrite())) {
+                        throw new AnalysisException("Update flexible columns feature is only supported"
+                                + " on merge-on-write unique tables.");
+                    }
+                    if (table.hasSkipBitmapColumn()) {
+                        throw new AnalysisException("table " + table.getName()
+                                + " has enabled update flexible columns feature already.");
+                    }
                 }
                 // analyse sequence column
                 Type sequenceColType = null;
@@ -148,6 +180,11 @@ public class AlterTableStmt extends DdlStmt implements NotFallbackInParser {
                     } else if (alterFeature == EnableFeatureClause.Features.SEQUENCE_LOAD) {
                         addColumnClause = new AddColumnClause(ColumnDef.newSequenceColumnDef(sequenceColType), null,
                                 null, null);
+                    } else if (alterFeature == EnableFeatureClause.Features.UPDATE_FLEXIBLE_COLUMNS) {
+                        ColumnDef skipBItmapCol = ColumnDef.newSkipBitmapColumnDef(AggregateType.NONE);
+                        List<Column> fullSchema = table.getBaseSchema(true);
+                        String lastCol = fullSchema.get(fullSchema.size() - 1).getName();
+                        addColumnClause = new AddColumnClause(skipBItmapCol, new ColumnPosition(lastCol), null, null);
                     }
                     addColumnClause.analyze(analyzer);
                     clauses.add(addColumnClause);
@@ -169,7 +206,11 @@ public class AlterTableStmt extends DdlStmt implements NotFallbackInParser {
                     || alterClause instanceof DropColumnClause
                     || alterClause instanceof ModifyColumnClause
                     || alterClause instanceof ReorderColumnsClause
-                    || alterClause instanceof ModifyEngineClause) {
+                    || alterClause instanceof ModifyEngineClause
+                    || alterClause instanceof CreateOrReplaceBranchClause
+                    || alterClause instanceof CreateOrReplaceTagClause
+                    || alterClause instanceof DropBranchClause
+                    || alterClause instanceof DropTagClause) {
                 clauses.add(alterClause);
             } else {
                 throw new AnalysisException(table.getType().toString() + " [" + table.getName() + "] "

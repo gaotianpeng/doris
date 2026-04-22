@@ -194,7 +194,9 @@ public:
     // Skip the rows in block, use in OFFSET, LIMIT operation
     void skip_num_rows(int64_t& offset);
 
-    size_t columns() const { return data.size(); }
+    /// As the assumption we used around, the number of columns won't exceed int16 range. so no need to worry when we
+    ///  assign it to int32.
+    uint32_t columns() const { return static_cast<uint32_t>(data.size()); }
 
     /// Checks that every column in block is not nullptr and has same number of elements.
     void check_number_of_rows(bool allow_null_columns = false) const;
@@ -298,7 +300,7 @@ public:
 
     static Status filter_block(Block* block, int filter_column_id, int column_to_keep);
 
-    static void erase_useless_column(Block* block, int column_to_keep) {
+    static void erase_useless_column(Block* block, size_t column_to_keep) {
         block->erase_tail(column_to_keep);
     }
 
@@ -591,7 +593,9 @@ public:
                             << " src type: " << block.get_by_position(i).type->get_name();
                     DCHECK(((DataTypeNullable*)_data_types[i].get())
                                    ->get_nested_type()
-                                   ->equals(*block.get_by_position(i).type));
+                                   ->equals(*block.get_by_position(i).type))
+                            << " target type: " << _data_types[i]->get_name()
+                            << " src type: " << block.get_by_position(i).type->get_name();
                     DCHECK(!block.get_by_position(i).type->is_nullable());
                     _columns[i]->insert_range_from(*make_nullable(block.get_by_position(i).column)
                                                             ->convert_to_full_column_if_const(),

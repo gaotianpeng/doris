@@ -153,6 +153,7 @@ message ClusterPB {
     optional int64 mtime = 11;
     repeated string cluster_names = 12; // clusters in virtual cluster
     optional ClusterPolicy cluster_policy = 13; // virtual cluster policy
+    map<string, string> properties = 14; // clsuter additional properties
 }
 
 message NodeInfoPB {
@@ -178,6 +179,8 @@ message NodeInfoPB {
     optional bool is_smooth_upgrade = 12;
     // fqdn
     optional string host = 13;
+    optional string public_endpoint = 14;
+    optional string private_endpoint = 15;
 }
 
 enum NodeStatusPB {
@@ -499,6 +502,30 @@ message RecycleStagePB {
     optional StagePB stage = 3;
 }
 
+message RestoreJobCloudPB {
+    enum State {
+        UNKNOWN = 0;
+        PREPARED = 1;
+        COMMITTED = 2;
+        DROPPED = 3;
+        COMPLETED = 4;
+        RECYCLING = 5;
+    }
+    optional int64 tablet_id = 1;
+    optional int64 ctime_s = 2;
+    optional int64 mtime_s = 3;
+    optional int64 expired_at_s = 4; // expiration timestamp
+    optional doris.TabletMetaCloudPB tablet_meta = 5;
+    optional State state = 6;
+    optional int64 total_rowset_num = 7;
+    optional int64 total_row_num = 8;
+    optional int64 total_segment_num = 9;
+    optional int64 total_disk_size = 10;
+    optional int64 committed_rowset_num = 11;
+    optional bool need_recycle_data = 12;
+    optional int64 version = 13;
+}
+
 message JobRecyclePB {
     enum Status {
         IDLE = 0;
@@ -624,7 +651,7 @@ message TabletStatsPB {
     optional int64 cumulative_point = 9;
     optional int64 last_base_compaction_time_ms = 10;
     optional int64 last_cumu_compaction_time_ms = 11;
-    optional int64 full_compaction_cnt = 12;
+    optional int64 full_compaction_cnt = 12; // used by calc_sync_versions() only
     optional int64 last_full_compaction_time_ms = 13;
     optional int64 index_size = 14;
     optional int64 segment_size = 15; 
@@ -1043,6 +1070,7 @@ message GetRowsetRequest {
     // for compability reason we use FILL_WITH_DICT as default
     optional SchemaOp schema_op = 8  [default = FILL_WITH_DICT];
     optional string request_ip = 9;
+    optional int64 full_compaction_cnt = 10;
 }
 
 message GetRowsetResponse {
@@ -1050,7 +1078,9 @@ message GetRowsetResponse {
     repeated doris.RowsetMetaCloudPB rowset_meta = 2;
     optional TabletStatsPB stats = 3;
     // Return dict value if SchemaOp is RETURN_DICT
-    optional SchemaCloudDictionary schema_dict = 4; 
+    optional SchemaCloudDictionary schema_dict = 4;
+    // The current max version of the partition
+    optional int64 partition_max_version = 5;
 }
 
 message GetSchemaDictRequest {
@@ -1087,9 +1117,30 @@ message PartitionRequest {
     optional int64 db_id = 6;
     optional bool need_update_table_version = 7;
     optional string request_ip = 8;
+    repeated int64 partition_versions = 9;
 }
 
 message PartitionResponse {
+    optional MetaServiceResponseStatus status = 1;
+}
+
+message RestoreJobRequest {
+    enum Action {
+        UNKONWN  = 0;
+        PREPARE = 1;
+        COMMIT = 2;
+        ABORT = 3;
+        COMPLETE = 4;
+    }
+    optional string cloud_unique_id = 1;
+    optional int64 tablet_id = 2;
+    optional doris.TabletMetaCloudPB tablet_meta = 3;
+    optional int64 expiration = 4;
+    optional string request_ip = 5;
+    optional Action action = 6;
+}
+
+message RestoreJobResponse {
     optional MetaServiceResponseStatus status = 1;
 }
 
@@ -1165,6 +1216,7 @@ message AlterClusterRequest {
         UPDATE_CLUSTER_ENDPOINT = 9;
         SET_CLUSTER_STATUS = 10;
         ALTER_VCLUSTER_INFO = 11;
+        ALTER_PROPERTIES = 12;
     }
     optional string instance_id = 1;
     optional string cloud_unique_id = 2; // For auth
@@ -1507,14 +1559,18 @@ message UpdateDeleteBitmapRequest {
     repeated int64 versions = 9;
     // Serialized roaring bitmaps indexed with {rowset_id, segment_id, version}
     repeated bytes segment_delete_bitmaps = 10;
-    optional bool unlock = 11;
+    optional bool without_lock = 11;
     // to determine whether this is in an explicit txn and whether it's the first sub txn
     optional bool is_explicit_txn = 12;
     optional int64 txn_id = 13;
-
     // for load txn only
     optional int64 next_visible_version = 14;
     optional string request_ip = 15;
+    // remove delete_bitmap of pre rowsets since it is agged when compaction
+    optional int64 pre_rowset_agg_start_version = 16;
+    optional int64 pre_rowset_agg_end_version = 17;
+    // when update delete_bitmap of pre rowsets, check the rowset exists
+    repeated int64 pre_rowset_versions = 18;
 }
 
 message UpdateDeleteBitmapResponse {
@@ -1532,6 +1588,7 @@ message GetDeleteBitmapRequest {
     optional int64 cumulative_compaction_cnt = 8;
     optional int64 cumulative_point = 9;
     optional string request_ip = 10;
+    optional int64 dbm_bytes_threshold = 11;
 }
 
 message GetDeleteBitmapResponse {
@@ -1542,6 +1599,10 @@ message GetDeleteBitmapResponse {
     // Serialized roaring bitmaps indexed with {rowset_id, segment_id, version}
     repeated bytes segment_delete_bitmaps = 5;
     optional int64 tablet_id = 6;
+    // indicates whether the reponse contains all request rowsets' delete bitmap
+    // when `has_more` is `true`, BE should launch RPC again to get the results for remaining rowsets
+    optional bool has_more = 100;
+    repeated string returned_rowset_ids = 101;
 }
 
 message RemoveDeleteBitmapRequest {
@@ -1567,6 +1628,10 @@ message DeleteBitmapUpdateLockPB {
     repeated int64 initiators = 3;
 }
 
+message MowTabletJobPB {
+    optional int64 expiration = 1;
+}
+
 message GetDeleteBitmapUpdateLockRequest {
     optional string cloud_unique_id = 1; // For auth
     optional int64 table_id = 2;
@@ -1577,6 +1642,7 @@ message GetDeleteBitmapUpdateLockRequest {
     optional bool require_compaction_stats = 7 [default = false];
     repeated TabletIndexPB tablet_indexes = 8;
     optional string request_ip = 9;
+    optional bool urgent = 10;
 }
 
 message GetDeleteBitmapUpdateLockResponse {
@@ -1664,7 +1730,12 @@ service MetaService {
     rpc get_version(GetVersionRequest) returns (GetVersionResponse);
     rpc create_tablets(CreateTabletsRequest) returns (CreateTabletsResponse);
     rpc update_tablet(UpdateTabletRequest) returns (UpdateTabletResponse);
+    // DEPRECATED
     rpc update_tablet_schema(UpdateTabletSchemaRequest) returns (UpdateTabletSchemaResponse);
+
+    rpc prepare_restore_job(RestoreJobRequest) returns (RestoreJobResponse);
+    rpc commit_restore_job(RestoreJobRequest) returns (RestoreJobResponse);
+    rpc finish_restore_job(RestoreJobRequest) returns (RestoreJobResponse);
 
     rpc get_tablet(GetTabletRequest) returns (GetTabletResponse);
     rpc prepare_rowset(CreateRowsetRequest) returns (CreateRowsetResponse);

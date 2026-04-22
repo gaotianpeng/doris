@@ -18,68 +18,12 @@
 // https://github.com/ClickHouse/ClickHouse/blob/master/src/Interpreters/tests/gtest_lru_file_cache.cpp
 // and modified by Doris
 
-#include <gen_cpp/Types_types.h>
-#include <gtest/gtest-message.h>
-#include <gtest/gtest-test-part.h>
-#include <stddef.h>
-#if defined(__APPLE__)
-#include <sys/mount.h>
-#else
-#include <sys/statfs.h>
-#endif
-
-// IWYU pragma: no_include <bits/chrono.h>
-#include <gtest/gtest.h>
-
-#include <chrono> // IWYU pragma: keep
-#include <condition_variable>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <list>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <ranges>
-#include <stdexcept>
-#include <string>
-#include <thread>
-#include <vector>
-
-#include "common/config.h"
-#include "cpp/sync_point.h"
-#include "gtest/gtest_pred_impl.h"
-#include "io/cache/block_file_cache.h"
-#include "io/cache/block_file_cache_factory.h"
-#include "io/cache/block_file_cache_profile.h"
-#include "io/cache/cached_remote_file_reader.h"
-#include "io/cache/file_block.h"
-#include "io/cache/file_cache_common.h"
-#include "io/cache/fs_file_cache_storage.h"
-#include "io/fs/path.h"
-#include "olap/options.h"
-#include "runtime/exec_env.h"
-#include "util/slice.h"
-#include "util/time.h"
-
+#include "block_file_cache_test_common.h"
 namespace doris::io {
-
-extern int disk_used_percentage(const std::string& path, std::pair<int, int>* percent);
-
-namespace fs = std::filesystem;
 
 fs::path caches_dir = fs::current_path() / "lru_cache_test";
 std::string cache_base_path = caches_dir / "cache1" / "";
 std::string tmp_file = caches_dir / "tmp_file";
-
-constexpr unsigned long long operator"" _mb(unsigned long long m) {
-    return m * 1024 * 1024;
-}
-
-constexpr unsigned long long operator"" _kb(unsigned long long m) {
-    return m * 1024;
-}
 
 void assert_range([[maybe_unused]] size_t assert_n, io::FileBlockSPtr file_block,
                   const io::FileBlock::Range& expected_range, io::FileBlock::State expected_state) {
@@ -94,7 +38,17 @@ std::vector<io::FileBlockSPtr> fromHolder(const io::FileBlocksHolder& holder) {
     return std::vector<io::FileBlockSPtr>(holder.file_blocks.begin(), holder.file_blocks.end());
 }
 
-void download(io::FileBlockSPtr file_block, size_t size = 0) {
+bool wait_for_async_open_success(io::BlockFileCache& cache, int timeout_ms = 3000) {
+    for (int i = 0; i < timeout_ms; ++i) {
+        if (cache.get_async_open_success()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return cache.get_async_open_success();
+}
+
+void download(io::FileBlockSPtr file_block, size_t size) {
     const auto& hash = file_block->get_hash_value();
     if (size == 0) {
         size = file_block->range().size();
@@ -113,7 +67,7 @@ void download(io::FileBlockSPtr file_block, size_t size = 0) {
     ASSERT_TRUE(fs::exists(subdir));
 }
 
-void download_into_memory(io::FileBlockSPtr file_block, size_t size = 0) {
+void download_into_memory(io::FileBlockSPtr file_block, size_t size) {
     if (size == 0) {
         size = file_block->range().size();
     }
@@ -136,101 +90,6 @@ void complete_into_memory(const io::FileBlocksHolder& holder) {
         ASSERT_TRUE(file_block->get_or_set_downloader() == io::FileBlock::get_caller_id());
         download_into_memory(file_block);
     }
-}
-
-class BlockFileCacheTest : public testing::Test {
-public:
-    static void SetUpTestSuite() {
-        config::file_cache_enter_disk_resource_limit_mode_percent = 99;
-        config::enable_evict_file_cache_in_advance = false; // disable evict in
-                                                            // advance for most
-                                                            // cases for simple
-                                                            // verification
-        bool exists {false};
-        ASSERT_TRUE(global_local_filesystem()->exists(caches_dir, &exists).ok());
-        if (!exists) {
-            ASSERT_TRUE(global_local_filesystem()->create_directory(caches_dir).ok());
-        }
-        ASSERT_TRUE(global_local_filesystem()->exists(tmp_file, &exists).ok());
-        if (!exists) {
-            FileWriterPtr writer;
-            ASSERT_TRUE(global_local_filesystem()->create_file(tmp_file, &writer).ok());
-            for (int i = 0; i < 10; i++) {
-                std::string data(1_mb, '0' + i);
-                ASSERT_TRUE(writer->append(Slice(data.data(), data.size())).ok());
-            }
-            std::string data(1, '0');
-            ASSERT_TRUE(writer->append(Slice(data.data(), data.size())).ok());
-            ASSERT_TRUE(writer->close().ok());
-        }
-        ExecEnv::GetInstance()->_file_cache_factory = factory.get();
-        ExecEnv::GetInstance()->_file_cache_open_fd_cache = std::make_unique<io::FDCache>();
-    }
-    static void TearDownTestSuite() {
-        config::file_cache_enter_disk_resource_limit_mode_percent = 99;
-        ExecEnv::GetInstance()->_file_cache_open_fd_cache.reset(nullptr);
-    }
-
-private:
-    inline static std::unique_ptr<FileCacheFactory> factory = std::make_unique<FileCacheFactory>();
-};
-
-TEST_F(BlockFileCacheTest, init) {
-    std::string string = std::string(R"(
-        [
-        {
-            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
-            "total_size" : 193273528320,
-            "query_limit" : 38654705664
-        },
-        {
-            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
-            "total_size" : 193273528320,
-            "query_limit" : 38654705664
-        }
-        ]
-        )");
-    config::enable_file_cache_query_limit = true;
-    std::vector<CachePath> cache_paths;
-    EXPECT_TRUE(parse_conf_cache_paths(string, cache_paths));
-    EXPECT_EQ(cache_paths.size(), 2);
-    for (const auto& cache_path : cache_paths) {
-        io::FileCacheSettings settings = cache_path.init_settings();
-        EXPECT_EQ(settings.capacity, 193273528320);
-        EXPECT_EQ(settings.max_query_cache_size, 38654705664);
-    }
-
-    // err normal
-    std::string err_string = std::string(R"(
-        [
-        {
-            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
-            "total_size" : "193273528320",
-            "query_limit" : -1
-        }
-        ]
-        )");
-    cache_paths.clear();
-    EXPECT_FALSE(parse_conf_cache_paths(err_string, cache_paths));
-
-    // err query_limit
-    err_string = std::string(R"(
-        [
-        {
-            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
-            "total_size" : -1
-        }
-        ]
-        )");
-    cache_paths.clear();
-    EXPECT_FALSE(parse_conf_cache_paths(err_string, cache_paths));
-
-    err_string = std::string(R"(
-        [
-        ]
-        )");
-    cache_paths.clear();
-    EXPECT_FALSE(parse_conf_cache_paths(err_string, cache_paths));
 }
 
 void test_file_cache(io::FileCacheType cache_type) {
@@ -273,13 +132,7 @@ void test_file_cache(io::FileCacheType cache_type) {
     {
         io::BlockFileCache mgr(cache_base_path, settings);
         ASSERT_TRUE(mgr.initialize().ok());
-
-        for (int i = 0; i < 100; i++) {
-            if (mgr.get_async_open_success()) {
-                break;
-            };
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        ASSERT_TRUE(wait_for_async_open_success(mgr));
         {
             auto holder = mgr.get_or_set(key, 0, 10, context); /// Add range [0, 9]
             auto blocks = fromHolder(holder);
@@ -612,12 +465,7 @@ void test_file_cache(io::FileCacheType cache_type) {
 
         io::BlockFileCache cache2(cache_base_path, settings);
         ASSERT_TRUE(cache2.initialize().ok());
-        for (int i = 0; i < 100; i++) {
-            if (cache2.get_async_open_success()) {
-                break;
-            };
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        ASSERT_TRUE(wait_for_async_open_success(cache2));
         auto holder1 = cache2.get_or_set(key, 2, 28, context); /// Get [2, 29]
 
         auto blocks1 = fromHolder(holder1);
@@ -650,12 +498,7 @@ void test_file_cache(io::FileCacheType cache_type) {
         settings2.max_file_block_size = 10;
         io::BlockFileCache cache2(cache_path2, settings2);
         ASSERT_TRUE(cache2.initialize().ok());
-        for (int i = 0; i < 100; i++) {
-            if (cache2.get_async_open_success()) {
-                break;
-            };
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        ASSERT_TRUE(wait_for_async_open_success(cache2));
         auto holder1 = cache2.get_or_set(key, 0, 25, context); /// Get [0, 24]
         auto blocks1 = fromHolder(holder1);
 
@@ -1058,6 +901,64 @@ void test_file_cache_memory_storage(io::FileCacheType cache_type) {
         auto blocks1 = fromHolder(holder1);
         ASSERT_EQ(blocks1.size(), 1);
     }
+}
+
+TEST_F(BlockFileCacheTest, init) {
+    std::string string = std::string(R"(
+        [
+        {
+            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
+            "total_size" : 193273528320,
+            "query_limit" : 38654705664
+        },
+        {
+            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
+            "total_size" : 193273528320,
+            "query_limit" : 38654705664
+        }
+        ]
+        )");
+    config::enable_file_cache_query_limit = true;
+    std::vector<CachePath> cache_paths;
+    EXPECT_TRUE(parse_conf_cache_paths(string, cache_paths));
+    EXPECT_EQ(cache_paths.size(), 2);
+    for (const auto& cache_path : cache_paths) {
+        io::FileCacheSettings settings = cache_path.init_settings();
+        EXPECT_EQ(settings.capacity, 193273528320);
+        EXPECT_EQ(settings.max_query_cache_size, 38654705664);
+    }
+
+    // err normal
+    std::string err_string = std::string(R"(
+        [
+        {
+            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
+            "total_size" : "193273528320",
+            "query_limit" : -1
+        }
+        ]
+        )");
+    cache_paths.clear();
+    EXPECT_FALSE(parse_conf_cache_paths(err_string, cache_paths));
+
+    // err query_limit
+    err_string = std::string(R"(
+        [
+        {
+            "path" : "/mnt/ssd01/clickbench/hot/be/file_cache",
+            "total_size" : -1
+        }
+        ]
+        )");
+    cache_paths.clear();
+    EXPECT_FALSE(parse_conf_cache_paths(err_string, cache_paths));
+
+    err_string = std::string(R"(
+        [
+        ]
+        )");
+    cache_paths.clear();
+    EXPECT_FALSE(parse_conf_cache_paths(err_string, cache_paths));
 }
 
 TEST_F(BlockFileCacheTest, normal) {
@@ -2060,42 +1961,40 @@ TEST_F(BlockFileCacheTest, test_async_load) {
     other_context.stats = &rstats;
     context.cache_type = other_context.cache_type = io::FileCacheType::NORMAL;
     context.query_id = query_id;
-    auto key = io::BlockFileCache::hash("key1");
-    std::atomic_bool flag1 {false};
-    SyncPoint::CallbackGuard guard1;
-    sp->set_call_back(
-            "BlockFileCache::TmpFile2",
-            [&](auto&&) {
-                while (!flag1) {
-                }
-            },
-            &guard1);
-    io::BlockFileCache cache(cache_base_path, settings);
-    ASSERT_TRUE(cache.initialize());
-    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // wait to load disk
-    auto holder = cache.get_or_set(key, 100, 1, context);       /// Add range [9, 9]
-    auto blocks = fromHolder(holder);
-    ASSERT_EQ(blocks.size(), 1);
-    assert_range(1, blocks[0], io::FileBlock::Range(100, 100), io::FileBlock::State::EMPTY);
-    ASSERT_TRUE(blocks[0]->get_or_set_downloader() == io::FileBlock::get_caller_id());
-    assert_range(2, blocks[0], io::FileBlock::Range(100, 100), io::FileBlock::State::DOWNLOADING);
-    auto key_str = key.to_string();
-    auto subdir = fs::path(cache_base_path) / key_str.substr(0, 3) /
-                  (key_str + "_" + std::to_string(blocks[0]->expiration_time()));
-    ASSERT_TRUE(fs::exists(subdir));
-    size_t size = blocks[0]->range().size();
-    std::string data(size, '0');
-    Slice result(data.data(), size);
-    ASSERT_TRUE(blocks[0]->append(result));
-    ASSERT_TRUE(blocks[0]->finalize());
-    flag1 = true;
-    for (int i = 0; i < 100; i++) {
-        if (cache.get_async_open_success()) {
-            break;
-        };
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+        auto key = io::BlockFileCache::hash("key1");
+        std::atomic_bool flag1 {false};
+        SyncPoint::CallbackGuard guard1;
+        sp->set_call_back(
+                "BlockFileCache::TmpFile2",
+                [&](auto&&) {
+                    while (!flag1) {
+                    }
+                },
+                &guard1);
+        io::BlockFileCache cache(cache_base_path, settings);
+        ASSERT_TRUE(cache.initialize());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // wait to load disk
+        auto holder = cache.get_or_set(key, 100, 1, context);       /// Add range [9, 9]
+        auto blocks = fromHolder(holder);
+        ASSERT_EQ(blocks.size(), 1);
+        assert_range(1, blocks[0], io::FileBlock::Range(100, 100), io::FileBlock::State::EMPTY);
+        ASSERT_TRUE(blocks[0]->get_or_set_downloader() == io::FileBlock::get_caller_id());
+        assert_range(2, blocks[0], io::FileBlock::Range(100, 100),
+                     io::FileBlock::State::DOWNLOADING);
+        auto key_str = key.to_string();
+        auto subdir = fs::path(cache_base_path) / key_str.substr(0, 3) /
+                      (key_str + "_" + std::to_string(blocks[0]->expiration_time()));
+        ASSERT_TRUE(fs::exists(subdir));
+        size_t size = blocks[0]->range().size();
+        std::string data(size, '0');
+        Slice result(data.data(), size);
+        ASSERT_TRUE(blocks[0]->append(result));
+        ASSERT_TRUE(blocks[0]->finalize());
+        flag1 = true;
+        ASSERT_TRUE(wait_for_async_open_success(cache));
+        EXPECT_EQ(cache.get_file_blocks_num(io::FileCacheType::NORMAL), 10);
     }
-    EXPECT_EQ(cache.get_file_blocks_num(io::FileCacheType::NORMAL), 10);
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -2124,43 +2023,41 @@ TEST_F(BlockFileCacheTest, test_async_load_with_limit) {
     other_context.stats = &rstats;
     context.cache_type = other_context.cache_type = io::FileCacheType::NORMAL;
     context.query_id = query_id;
-    auto key = io::BlockFileCache::hash("key1");
-    std::atomic_bool flag1 {false};
-    SyncPoint::CallbackGuard guard1;
-    sp->set_call_back(
-            "BlockFileCache::TmpFile2",
-            [&](auto&&) {
-                while (!flag1) {
-                }
-            },
-            &guard1);
-    io::BlockFileCache cache(cache_base_path, settings);
-    ASSERT_TRUE(cache.initialize());
-    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // wait to load disk
-    cache._disk_resource_limit_mode = true;
-    auto holder = cache.get_or_set(key, 100, 1, context); /// Add range [9, 9]
-    auto blocks = fromHolder(holder);
-    ASSERT_EQ(blocks.size(), 1);
-    assert_range(1, blocks[0], io::FileBlock::Range(100, 100), io::FileBlock::State::EMPTY);
-    ASSERT_TRUE(blocks[0]->get_or_set_downloader() == io::FileBlock::get_caller_id());
-    assert_range(2, blocks[0], io::FileBlock::Range(100, 100), io::FileBlock::State::DOWNLOADING);
-    auto key_str = key.to_string();
-    auto subdir = fs::path(cache_base_path) / key_str.substr(0, 3) /
-                  (key_str + "_" + std::to_string(blocks[0]->expiration_time()));
-    ASSERT_TRUE(fs::exists(subdir));
-    size_t size = blocks[0]->range().size();
-    std::string data(size, '0');
-    Slice result(data.data(), size);
-    ASSERT_TRUE(blocks[0]->append(result));
-    ASSERT_TRUE(blocks[0]->finalize());
-    flag1 = true;
-    for (int i = 0; i < 100; i++) {
-        if (cache.get_async_open_success()) {
-            break;
-        };
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+        auto key = io::BlockFileCache::hash("key1");
+        std::atomic_bool flag1 {false};
+        SyncPoint::CallbackGuard guard1;
+        sp->set_call_back(
+                "BlockFileCache::TmpFile2",
+                [&](auto&&) {
+                    while (!flag1) {
+                    }
+                },
+                &guard1);
+        io::BlockFileCache cache(cache_base_path, settings);
+        ASSERT_TRUE(cache.initialize());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // wait to load disk
+        cache._disk_resource_limit_mode = true;
+        auto holder = cache.get_or_set(key, 100, 1, context); /// Add range [9, 9]
+        auto blocks = fromHolder(holder);
+        ASSERT_EQ(blocks.size(), 1);
+        assert_range(1, blocks[0], io::FileBlock::Range(100, 100), io::FileBlock::State::EMPTY);
+        ASSERT_TRUE(blocks[0]->get_or_set_downloader() == io::FileBlock::get_caller_id());
+        assert_range(2, blocks[0], io::FileBlock::Range(100, 100),
+                     io::FileBlock::State::DOWNLOADING);
+        auto key_str = key.to_string();
+        auto subdir = fs::path(cache_base_path) / key_str.substr(0, 3) /
+                      (key_str + "_" + std::to_string(blocks[0]->expiration_time()));
+        ASSERT_TRUE(fs::exists(subdir));
+        size_t size = blocks[0]->range().size();
+        std::string data(size, '0');
+        Slice result(data.data(), size);
+        ASSERT_TRUE(blocks[0]->append(result));
+        ASSERT_TRUE(blocks[0]->finalize());
+        flag1 = true;
+        ASSERT_TRUE(wait_for_async_open_success(cache));
+        EXPECT_EQ(cache.get_file_blocks_num(io::FileCacheType::NORMAL), 9);
     }
-    EXPECT_EQ(cache.get_file_blocks_num(io::FileCacheType::NORMAL), 9);
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -3489,10 +3386,10 @@ TEST_F(BlockFileCacheTest, state_to_string) {
     EXPECT_EQ(FileBlock::state_to_string(FileBlock::State::DOWNLOADED), "DOWNLOADED");
 }
 
-TEST_F(BlockFileCacheTest, string_to_cache_type) {
-    EXPECT_EQ(BlockFileCache::string_to_cache_type("idx"), FileCacheType::INDEX);
-    EXPECT_EQ(BlockFileCache::string_to_cache_type("disposable"), FileCacheType::DISPOSABLE);
-    EXPECT_EQ(BlockFileCache::string_to_cache_type("ttl"), FileCacheType::TTL);
+TEST_F(BlockFileCacheTest, surfix_to_cache_type) {
+    EXPECT_EQ(surfix_to_cache_type("idx"), FileCacheType::INDEX);
+    EXPECT_EQ(surfix_to_cache_type("disposable"), FileCacheType::DISPOSABLE);
+    EXPECT_EQ(surfix_to_cache_type("ttl"), FileCacheType::TTL);
 }
 
 TEST_F(BlockFileCacheTest, append_many_time) {
@@ -3761,6 +3658,7 @@ TEST_F(BlockFileCacheTest, query_file_cache_reserve) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -3869,6 +3767,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_tail) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_tail" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -3931,6 +3830,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_tail) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_error_handle) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_error_handle" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -4002,6 +3902,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_error_handle) {
     }
     EXPECT_TRUE(reader.close().ok());
     EXPECT_TRUE(reader.closed());
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -4011,6 +3912,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_error_handle) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_init) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_init" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -4062,6 +3964,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_init) {
         CachedRemoteFileReader reader(local_reader, opts);
         EXPECT_EQ(reader._cache->get_base_path(), cache_base_path);
     }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -4071,6 +3974,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_init) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_concurrent) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_concurrent" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -4146,6 +4050,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_concurrent) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_concurrent_2) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_concurrent_2" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -4658,6 +4563,7 @@ TEST_F(BlockFileCacheTest, remove_if_cached_when_isnt_releasable) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_opt_lock) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_opt_lock" / "";
     config::enable_read_cache_file_directly = true;
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
@@ -5341,7 +5247,7 @@ TEST_F(BlockFileCacheTest, test_load) {
 
     {
         auto type = cache.dump_single_cache_type(key, 10086);
-        ASSERT_TRUE(type == "_ttl");
+        ASSERT_TRUE(type == "ttl");
         auto holder = cache.get_or_set(key, 10086, 3, context);
         auto blocks = fromHolder(holder);
         ASSERT_EQ(blocks.size(), 1);
@@ -5362,7 +5268,7 @@ TEST_F(BlockFileCacheTest, test_load) {
     }
     {
         auto type = cache.dump_single_cache_type(key, 20086);
-        ASSERT_TRUE(type == "_ttl");
+        ASSERT_TRUE(type == "ttl");
         auto holder = cache.get_or_set(key, 20086, 3, context);
         auto blocks = fromHolder(holder);
         ASSERT_EQ(blocks.size(), 1);
@@ -5987,9 +5893,8 @@ TEST_F(BlockFileCacheTest, seize_after_full) {
     };
 
     for (auto& args : args_vec) {
-        std::cout << "filled with " << io::BlockFileCache::cache_type_to_string(args.first_type)
-                  << " and seize with "
-                  << io::BlockFileCache::cache_type_to_string(args.second_type) << std::endl;
+        std::cout << "filled with " << io::cache_type_to_string(args.first_type)
+                  << " and seize with " << io::cache_type_to_string(args.second_type) << std::endl;
         if (fs::exists(cache_base_path)) {
             fs::remove_all(cache_base_path);
         }
@@ -7276,6 +7181,7 @@ TEST_F(BlockFileCacheTest, validate_get_or_set_crash) {
 extern bvar::Adder<uint64_t> g_skip_local_cache_io_sum_bytes;
 
 TEST_F(BlockFileCacheTest, reader_dryrun_when_download_file_cache) {
+    std::string cache_base_path = caches_dir / "reader_dryrun_when_download_file_cache" / "";
     bool org = config::enable_reader_dryrun_when_download_file_cache;
     config::enable_reader_dryrun_when_download_file_cache = true;
     if (fs::exists(cache_base_path)) {
@@ -7753,6 +7659,7 @@ TEST_F(BlockFileCacheTest, test_upgrade_cache_dir_version) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_ttl_index) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_ttl_index" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -7829,6 +7736,7 @@ TEST_F(BlockFileCacheTest, cached_remote_file_reader_ttl_index) {
 }
 
 TEST_F(BlockFileCacheTest, cached_remote_file_reader_normal_index) {
+    std::string cache_base_path = caches_dir / "cached_remote_file_reader_normal_index" / "";
     if (fs::exists(cache_base_path)) {
         fs::remove_all(cache_base_path);
     }
@@ -7976,6 +7884,172 @@ TEST_F(BlockFileCacheTest, test_reset_capacity) {
     }
     if (fs::exists(cache_path2)) {
         fs::remove_all(cache_path2);
+    }
+    FileCacheFactory::instance()->_caches.clear();
+    FileCacheFactory::instance()->_path_to_cache.clear();
+    FileCacheFactory::instance()->_capacity = 0;
+}
+
+TEST_F(BlockFileCacheTest, cached_remote_file_reader_direct_read_and_evict_cache) {
+    config::enable_read_cache_file_directly = true;
+    std::string cache_base_path = caches_dir / "cache_direct_read" / "";
+    if (fs::exists(cache_base_path)) {
+        fs::remove_all(cache_base_path);
+    }
+    fs::create_directories(cache_base_path);
+    TUniqueId query_id;
+    query_id.hi = 1;
+    query_id.lo = 1;
+    io::FileCacheSettings settings;
+    settings.query_queue_size = 6291456;
+    settings.query_queue_elements = 6;
+    settings.index_queue_size = 1048576;
+    settings.index_queue_elements = 1;
+    settings.disposable_queue_size = 1048576;
+    settings.disposable_queue_elements = 1;
+    settings.capacity = 8388608;
+    settings.max_file_block_size = 1048576;
+    settings.max_query_cache_size = 0;
+    io::CacheContext context;
+    ReadStatistics rstats;
+    context.stats = &rstats;
+    context.query_id = query_id;
+    ASSERT_TRUE(FileCacheFactory::instance()->create_file_cache(cache_base_path, settings).ok());
+    FileReaderSPtr local_reader;
+    ASSERT_TRUE(global_local_filesystem()->open_file(tmp_file, &local_reader));
+    io::FileReaderOptions opts;
+    opts.cache_type = io::cache_type_from_string("file_block_cache");
+    opts.is_doris_table = true;
+    auto reader = std::make_shared<CachedRemoteFileReader>(local_reader, opts);
+
+    std::string buffer;
+    buffer.resize(64_kb);
+    IOContext io_ctx;
+    FileCacheStatistics stats;
+    io_ctx.file_cache_stats = &stats;
+    size_t bytes_read {0};
+    ASSERT_TRUE(
+            reader->read_at(100, Slice(buffer.data(), buffer.size()), &bytes_read, &io_ctx).ok());
+    EXPECT_EQ(std::string(64_kb, '0'), buffer);
+
+    auto cache = FileCacheFactory::instance()->_path_to_cache[cache_base_path];
+    EXPECT_GT(cache->_cur_cache_size, 0);
+
+    auto ret_str = FileCacheFactory::instance()->clear_file_caches(
+            /*sync*/ false); // use async to evict cache
+    std::cout << ret_str << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    // evict would be success even if one reference is held by the reader
+    EXPECT_EQ(cache->_cur_cache_size, 0);
+
+    // try to read sth
+    ASSERT_TRUE(
+            reader->read_at(100, Slice(buffer.data(), buffer.size()), &bytes_read, &io_ctx).ok());
+    EXPECT_EQ(std::string(64_kb, '0'), buffer);
+
+    EXPECT_TRUE(reader->close().ok());
+    EXPECT_TRUE(reader->closed());
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (fs::exists(cache_base_path)) {
+        fs::remove_all(cache_base_path);
+    }
+    FileCacheFactory::instance()->_caches.clear();
+    FileCacheFactory::instance()->_path_to_cache.clear();
+    FileCacheFactory::instance()->_capacity = 0;
+}
+
+extern bvar::Adder<uint64_t> g_read_cache_direct_whole_num;
+extern bvar::Adder<uint64_t> g_read_cache_direct_partial_num;
+extern bvar::Adder<uint64_t> g_read_cache_indirect_num;
+extern bvar::Adder<uint64_t> g_read_cache_direct_whole_bytes;
+extern bvar::Adder<uint64_t> g_read_cache_direct_partial_bytes;
+extern bvar::Adder<uint64_t> g_read_cache_indirect_bytes;
+
+TEST_F(BlockFileCacheTest, cached_remote_file_reader_direct_read_bytes_check) {
+    std::string cache_base_path = caches_dir / "cache_direct_read_bytes_check" / "";
+    uint64_t org_g_read_cache_direct_whole_num = g_read_cache_direct_whole_num.get_value();
+    uint64_t org_g_read_cache_direct_whole_bytes = g_read_cache_direct_whole_bytes.get_value();
+    uint64_t org_g_read_cache_direct_partial_num = g_read_cache_direct_partial_num.get_value();
+    uint64_t org_g_read_cache_indirect_num = g_read_cache_indirect_num.get_value();
+    uint64_t org_g_read_cache_direct_partial_bytes = g_read_cache_direct_partial_bytes.get_value();
+    uint64_t org_g_read_cache_indirect_bytes = g_read_cache_indirect_bytes.get_value();
+
+    config::enable_read_cache_file_directly = true;
+    if (fs::exists(cache_base_path)) {
+        fs::remove_all(cache_base_path);
+    }
+    fs::create_directories(cache_base_path);
+    TUniqueId query_id;
+    query_id.hi = 1;
+    query_id.lo = 1;
+    io::FileCacheSettings settings;
+    settings.query_queue_size = 6291456;
+    settings.query_queue_elements = 6;
+    settings.index_queue_size = 1048576;
+    settings.index_queue_elements = 1;
+    settings.disposable_queue_size = 1048576;
+    settings.disposable_queue_elements = 1;
+    settings.capacity = 8388608;
+    settings.max_file_block_size = 1048576;
+    settings.max_query_cache_size = 0;
+    io::CacheContext context;
+    ReadStatistics rstats;
+    context.stats = &rstats;
+    context.query_id = query_id;
+    ASSERT_TRUE(FileCacheFactory::instance()->create_file_cache(cache_base_path, settings).ok());
+    FileReaderSPtr local_reader;
+    ASSERT_TRUE(global_local_filesystem()->open_file(tmp_file, &local_reader));
+    io::FileReaderOptions opts;
+    opts.cache_type = io::cache_type_from_string("file_block_cache");
+    opts.is_doris_table = true;
+    auto reader = std::make_shared<CachedRemoteFileReader>(local_reader, opts);
+
+    std::string buffer;
+    buffer.resize(64_kb);
+    IOContext io_ctx;
+    FileCacheStatistics stats;
+    io_ctx.file_cache_stats = &stats;
+    size_t bytes_read {0};
+    // read offset 100 size 64k
+    ASSERT_TRUE(
+            reader->read_at(100, Slice(buffer.data(), buffer.size()), &bytes_read, &io_ctx).ok());
+    EXPECT_EQ(std::string(64_kb, '0'), buffer);
+
+    auto cache = FileCacheFactory::instance()->_path_to_cache[cache_base_path];
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_EQ(cache->_cur_cache_size, 1048576);
+    EXPECT_EQ(g_read_cache_indirect_num.get_value() - org_g_read_cache_indirect_num, 1);
+    EXPECT_EQ(g_read_cache_indirect_bytes.get_value() - org_g_read_cache_indirect_bytes, 64_kb);
+
+    // read offset 640k size 64k
+    ASSERT_TRUE(
+            reader->read_at(10 * 64_kb, Slice(buffer.data(), buffer.size()), &bytes_read, &io_ctx)
+                    .ok());
+    EXPECT_EQ(std::string(64_kb, '0'), buffer);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_EQ(cache->_cur_cache_size, 1048576);
+    EXPECT_EQ(g_read_cache_direct_whole_num.get_value() - org_g_read_cache_direct_whole_num, 1);
+    EXPECT_EQ(g_read_cache_direct_whole_bytes.get_value() - org_g_read_cache_direct_whole_bytes,
+              64_kb);
+
+    // try to read first two blocks
+    ASSERT_TRUE(reader->read_at(1048576 - 100, Slice(buffer.data(), buffer.size()), &bytes_read,
+                                &io_ctx)
+                        .ok());
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_EQ(cache->_cur_cache_size, 2097152);
+    EXPECT_EQ(g_read_cache_direct_partial_num.get_value() - org_g_read_cache_direct_partial_num, 1);
+    EXPECT_EQ(g_read_cache_direct_partial_bytes.get_value() - org_g_read_cache_direct_partial_bytes,
+              100);
+    EXPECT_EQ(g_read_cache_indirect_bytes.get_value() - org_g_read_cache_indirect_bytes,
+              64_kb + 64_kb - 100);
+
+    EXPECT_TRUE(reader->close().ok());
+    EXPECT_TRUE(reader->closed());
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (fs::exists(cache_base_path)) {
+        fs::remove_all(cache_base_path);
     }
     FileCacheFactory::instance()->_caches.clear();
     FileCacheFactory::instance()->_path_to_cache.clear();

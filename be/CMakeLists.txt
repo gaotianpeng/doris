@@ -142,6 +142,9 @@ option(WITH_MYSQL "Support access MySQL" ON)
 option(BUILD_FS_BENCHMARK "ON for building fs benchmark tool or OFF for not" OFF)
 message(STATUS "build fs benchmark tool: ${BUILD_FS_BENCHMARK}")
 
+option(BUILD_FILE_CACHE_LRU_TOOL "ON for building file cache lru tool or OFF for not" OFF)
+message(STATUS "build file cache lru tool: ${BUILD_FILE_CACHE_LRU_TOOL}")
+
 set(CMAKE_SKIP_RPATH TRUE)
 set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_STATIC_RUNTIME ON)
@@ -228,6 +231,15 @@ target_compile_options(ic PRIVATE ${clucene_options})
 install(DIRECTORY
     ${SRC_DIR}/clucene/src/contribs-lib/CLucene/analysis/jieba/dict
     DESTINATION ${OUTPUT_DIR})
+
+install(DIRECTORY
+    ${BASE_DIR}/dict/icu/uax29
+    DESTINATION ${OUTPUT_DIR}/dict/icu)
+
+
+install(DIRECTORY
+    ${BASE_DIR}/dict/ik
+    DESTINATION ${OUTPUT_DIR}/dict)
 
 # Check if functions are supported in this platform. All flags will generated
 # in gensrc/build/common/env_config.h.
@@ -338,9 +350,12 @@ if ("${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86" OR "${CMAKE_BUILD_TARGET_ARCH}" 
 endif()
 
 if (ARCH_ARM)
-    add_compile_options(-march=armv8-a+crc)
+    if (NOT DEFINED ARM_MARCH OR "${ARM_MARCH}" STREQUAL "")
+        set(ARM_MARCH "armv8-a+crc" CACHE STRING "Specify the ARM architecture instruction set" FORCE)
+    endif()
+    add_compile_options(-march=${ARM_MARCH})
+    message(STATUS "ARM_MARCH is ${ARM_MARCH}")
 endif()
-#
 
 if (WITH_MYSQL)
     add_definitions(-DDORIS_WITH_MYSQL)
@@ -533,13 +548,16 @@ set(COMMON_THIRDPARTY
 
 if ((ARCH_AMD64 OR ARCH_AARCH64) AND OS_LINUX)
     add_library(hadoop_hdfs STATIC IMPORTED)
-    set_target_properties(hadoop_hdfs PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/hadoop_hdfs/native/libhdfs.a)
+    set_target_properties(hadoop_hdfs PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/hadoop_hdfs_3_4/native/libhdfs.a)
 
     set(COMMON_THIRDPARTY
         ${COMMON_THIRDPARTY}
         hadoop_hdfs
     )
     add_definitions(-DUSE_HADOOP_HDFS)
+    # USE_DORIS_HADOOP_HDFS means use hadoop deps from doris-thirdparty.
+    # the hadoop deps from doris-thirdparty contains some modification diff from the standard hadoop, such as log interface
+    add_definitions(-DUSE_DORIS_HADOOP_HDFS)
 else()
     add_library(hdfs3 STATIC IMPORTED)
     set_target_properties(hdfs3 PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libhdfs3.a)

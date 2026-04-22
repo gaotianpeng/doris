@@ -1603,6 +1603,124 @@ TEST(MetaServiceHttpTest, get_obj_store_info_response_sk) {
     ms->get_obj_store_info(&cntl, &req1, &res1, nullptr);
 }
 
+TEST(MetaServiceHttpTest, get_instance_response_sk) {
+    auto sp = SyncPoint::get_instance();
+    sp->enable_processing();
+    DORIS_CLOUD_DEFER {
+        sp->disable_processing();
+    };
+
+    GetInstanceResponse res;
+    auto* obj_info = res.mutable_instance()->add_obj_info();
+    obj_info->set_ak("instance-ak");
+    obj_info->set_sk("instance-sk");
+    auto foo = [res](auto args) {
+        (*(try_any_cast<GetInstanceResponse**>(args[0])))->CopyFrom(res);
+    };
+    sp->set_call_back("get_instance_sk_response", foo);
+    sp->set_call_back("get_instance_sk_response_return",
+                      [](auto&& args) { *try_any_cast<bool*>(args.back()) = true; });
+
+    auto rate_limiter = std::make_shared<cloud::RateLimiter>();
+
+    auto ms = std::make_unique<cloud::MetaServiceImpl>(nullptr, nullptr, rate_limiter);
+
+    auto bar = [](auto args) {
+        std::cout << *try_any_cast<std::string*>(args[0]);
+
+        EXPECT_TRUE((*try_any_cast<std::string*>(args[0])).find("instance-sk") ==
+                    std::string::npos);
+        EXPECT_TRUE((*try_any_cast<std::string*>(args[0]))
+                            .find("md5: 79d1924d669b7412019edc42db31bd92") != std::string::npos);
+    };
+    sp->set_call_back("sk_finish_rpc", bar);
+
+    GetInstanceResponse res1;
+    GetInstanceRequest req1;
+    brpc::Controller cntl;
+    ms->get_instance(&cntl, &req1, &res1, nullptr);
+}
+
+TEST(MetaServiceHttpTest, create_instance_request_sk) {
+    auto sp = SyncPoint::get_instance();
+    sp->enable_processing();
+    DORIS_CLOUD_DEFER {
+        sp->disable_processing();
+    };
+
+    CreateInstanceRequest req;
+    req.set_instance_id("get_value_instance_id");
+    req.set_user_id("test_user");
+    req.set_name("test_name");
+    ObjectStoreInfoPB obj;
+    obj.set_ak("instance-ak");
+    obj.set_sk("instance-sk");
+    req.mutable_obj_info()->CopyFrom(obj);
+
+    auto foo = [req](auto args) {
+        (*(try_any_cast<CreateInstanceRequest**>(args[0])))->CopyFrom(req);
+    };
+    sp->set_call_back("create_instance_sk_request", foo);
+    sp->set_call_back("create_instance_sk_request_return",
+                      [](auto&& args) { *try_any_cast<bool*>(args.back()) = true; });
+
+    auto rate_limiter = std::make_shared<cloud::RateLimiter>();
+
+    auto ms = std::make_unique<cloud::MetaServiceImpl>(nullptr, nullptr, rate_limiter);
+
+    auto bar = [](auto args) {
+        std::cout << *try_any_cast<std::string*>(args[0]) << '\n';
+
+        EXPECT_TRUE((*try_any_cast<std::string*>(args[0])).find("instance-sk") ==
+                    std::string::npos);
+        EXPECT_TRUE((*try_any_cast<std::string*>(args[0]))
+                            .find("md5: 79d1924d669b7412019edc42db31bd92") != std::string::npos);
+    };
+    sp->set_call_back("sk_begin_rpc", bar);
+
+    CreateInstanceResponse res1;
+    CreateInstanceRequest req1;
+    brpc::Controller cntl;
+    ms->create_instance(&cntl, &req1, &res1, nullptr);
+}
+
+TEST(MetaServiceHttpTest, create_stage_request_sk) {
+    auto sp = SyncPoint::get_instance();
+    sp->enable_processing();
+    DORIS_CLOUD_DEFER {
+        sp->disable_processing();
+    };
+
+    CreateStageRequest req;
+    req.mutable_stage()->mutable_obj_info()->set_ak("stage-ak");
+    req.mutable_stage()->mutable_obj_info()->set_sk("stage-sk");
+
+    auto foo = [req](auto args) {
+        (*(try_any_cast<CreateStageRequest**>(args[0])))->CopyFrom(req);
+    };
+    sp->set_call_back("create_stage_sk_request", foo);
+    sp->set_call_back("create_stage_sk_request_return",
+                      [](auto&& args) { *try_any_cast<bool*>(args.back()) = true; });
+
+    auto rate_limiter = std::make_shared<cloud::RateLimiter>();
+
+    auto ms = std::make_unique<cloud::MetaServiceImpl>(nullptr, nullptr, rate_limiter);
+
+    auto bar = [](auto args) {
+        std::cout << *try_any_cast<std::string*>(args[0]) << '\n';
+
+        EXPECT_TRUE((*try_any_cast<std::string*>(args[0])).find("stage-sk") == std::string::npos);
+        EXPECT_TRUE((*try_any_cast<std::string*>(args[0]))
+                            .find("md5: f497d053066fa4b7d3b1f6564597d233") != std::string::npos);
+    };
+    sp->set_call_back("sk_begin_rpc", bar);
+
+    CreateStageResponse res1;
+    CreateStageRequest req1;
+    brpc::Controller cntl;
+    ms->create_stage(&cntl, &req1, &res1, nullptr);
+}
+
 TEST(MetaServiceHttpTest, AdjustRateLimit) {
     HttpContext ctx;
     {
@@ -1774,6 +1892,101 @@ TEST(MetaServiceHttpTest, UpdateConfig) {
             }
         }
         {
+            auto [status_code, content] =
+                    ctx.query<std::string>("update_config",
+                                           "configs=delete_bitmap_lock_v2_white_list="
+                                           "warehouse2;warehouse3&persist=true");
+
+            ASSERT_EQ(status_code, 200);
+            ASSERT_EQ(config::delete_bitmap_lock_v2_white_list, "warehouse2;warehouse3");
+            auto& meta_service = ctx.meta_service_;
+            std::string use_version = "";
+            std::string instance_id = "warehouse1";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v1");
+            instance_id = "warehouse2";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v2");
+            instance_id = "warehouse3";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v2");
+            config::Properties props;
+            ASSERT_TRUE(props.load(config::custom_conf_path.c_str(), true));
+            {
+                bool new_val_set = false;
+                std::string white_list = "";
+                ASSERT_TRUE(props.get_or_default("delete_bitmap_lock_v2_white_list", nullptr,
+                                                 white_list, &new_val_set));
+                ASSERT_TRUE(new_val_set);
+                ASSERT_EQ(white_list, "warehouse2;warehouse3");
+                instance_id = "warehouse1";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v1");
+                instance_id = "warehouse2";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v2");
+                instance_id = "warehouse3";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v2");
+            }
+        }
+        //resend config will rewrite it
+        {
+            auto [status_code, content] = ctx.query<std::string>(
+                    "update_config", "configs=delete_bitmap_lock_v2_white_list=''&persist=true");
+            ASSERT_EQ(status_code, 200);
+            ASSERT_EQ(config::delete_bitmap_lock_v2_white_list, "''");
+            auto& meta_service = ctx.meta_service_;
+            std::string use_version = "";
+            std::string instance_id = "warehouse1";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v1");
+            instance_id = "warehouse2";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v1");
+            instance_id = "warehouse3";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v1");
+        }
+        {
+            auto [status_code, content] =
+                    ctx.query<std::string>("update_config",
+                                           "configs=delete_bitmap_lock_v2_white_list="
+                                           "warehouse4;warehouse5&persist=true");
+            ASSERT_EQ(status_code, 200);
+            ASSERT_EQ(config::delete_bitmap_lock_v2_white_list, "warehouse4;warehouse5");
+            auto& meta_service = ctx.meta_service_;
+            std::string use_version = "";
+            std::string instance_id = "warehouse3";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v1");
+            instance_id = "warehouse4";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v2");
+            instance_id = "warehouse5";
+            meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+            ASSERT_EQ(use_version, "v2");
+            config::Properties props;
+            ASSERT_TRUE(props.load(config::custom_conf_path.c_str(), true));
+            {
+                bool new_val_set = false;
+                std::string white_list = "";
+                ASSERT_TRUE(props.get_or_default("delete_bitmap_lock_v2_white_list", nullptr,
+                                                 white_list, &new_val_set));
+                ASSERT_TRUE(new_val_set);
+                ASSERT_EQ(white_list, "warehouse4;warehouse5");
+                instance_id = "warehouse3";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v1");
+                instance_id = "warehouse4";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v2");
+                instance_id = "warehouse5";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v2");
+            }
+        }
+        {
             auto [status_code, content] = ctx.query<std::string>(
                     "update_config", "configs=enable_s3_rate_limiter=false&persist=true");
             ASSERT_EQ(status_code, 200);
@@ -1804,6 +2017,25 @@ TEST(MetaServiceHttpTest, UpdateConfig) {
                                                  enable_s3_rate_limiter, &new_val_set));
                 ASSERT_TRUE(new_val_set);
                 ASSERT_FALSE(enable_s3_rate_limiter);
+            }
+            {
+                bool new_val_set = false;
+                std::string white_list = "";
+                ASSERT_TRUE(props.get_or_default("delete_bitmap_lock_v2_white_list", nullptr,
+                                                 white_list, &new_val_set));
+                ASSERT_TRUE(new_val_set);
+                ASSERT_EQ(white_list, "warehouse4;warehouse5");
+                auto& meta_service = ctx.meta_service_;
+                std::string use_version = "";
+                std::string instance_id = "warehouse3";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v1");
+                instance_id = "warehouse4";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v2");
+                instance_id = "warehouse5";
+                meta_service->get_delete_bitmap_lock_version(use_version, instance_id);
+                ASSERT_EQ(use_version, "v2");
             }
         }
         std::filesystem::remove(config::custom_conf_path);
@@ -1863,10 +2095,11 @@ TEST(HttpEncodeKeyTest, ProcessHttpSetValue) {
     auto response = process_http_set_value(txn_kv.get(), &cntl);
     EXPECT_EQ(response.status_code, 200) << response.msg;
     std::stringstream final_json;
-    final_json << "original_value_hex=" << hex(initial_rowset_meta.SerializeAsString()) << "\n"
-               << "key_hex=" << hex(initial_key) << "\n"
+    final_json << "key_hex=" << hex(initial_key) << "\n"
                << "original_value_json=" << proto_to_json(initial_rowset_meta) << "\n"
-               << "changed_value_hex=" << hex(new_rowset_meta.SerializeAsString()) << "\n";
+               << "new_value_json=" << proto_to_json(new_rowset_meta) << "\n"
+               << "original_value_hex=" << hex(initial_rowset_meta.SerializeAsString()) << "\n"
+               << "new_value_hex=" << hex(new_rowset_meta.SerializeAsString()) << "\n";
     // std::cout << "xxx " << final_json.str() << std::endl;
     EXPECT_EQ(response.body, final_json.str());
 
@@ -2851,4 +3084,37 @@ TEST(MetaServiceHttpTest, VirtualClusterTest) {
 
     } // namespace doris::cloud
 }
+
+TEST(MetaServiceHttpTest, ShortGetTabletStatsDebugStringTest) {
+    config::enable_idempotent_request_injection = true;
+    auto sp = SyncPoint::get_instance();
+    sp->enable_processing();
+    DORIS_CLOUD_DEFER {
+        sp->disable_processing();
+    };
+
+    HttpContext ctx(true);
+    auto& meta_service = ctx.meta_service_;
+    constexpr auto table_id = 10001, index_id = 11001, partition_id = 12001;
+    int64_t tablet_id = 10001;
+    GetTabletStatsRequest req;
+    GetTabletStatsResponse res;
+
+    brpc::Controller cntl;
+    for (size_t i = 0; i < 50; i++) {
+        auto* idx = req.add_tablet_idx();
+        idx->set_table_id(table_id);
+        idx->set_index_id(index_id);
+        idx->set_partition_id(partition_id);
+        idx->set_tablet_id(tablet_id + i);
+    }
+
+    meta_service->get_tablet_stats(&cntl, &req, &res, nullptr);
+
+    sp->set_call_back("idempotent_injection_short_debug_string_for_get_stats", [](auto&& args) {
+        GetTabletStatsRequest debug_req = *try_any_cast<GetTabletStatsRequest*>(args.back());
+        ASSERT_EQ(10, debug_req.tablet_idx_size());
+    });
+}
+
 } // namespace doris::cloud

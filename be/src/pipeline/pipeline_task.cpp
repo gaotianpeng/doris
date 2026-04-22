@@ -72,16 +72,32 @@ PipelineTask::PipelineTask(
           _sink(pipeline->sink_shared_pointer()),
           _le_state_map(std::move(le_state_map)),
           _task_idx(task_idx),
-          _execution_dep(state->get_query_ctx()->get_execution_dependency()),
           _pipeline_name(_pipeline->name()) {
     _pipeline_task_watcher.start();
-
+#ifndef BE_TEST
+    _query_mem_tracker = fragment_context->get_query_ctx()->query_mem_tracker;
+#endif
+    _execution_dependencies.push_back(state->get_query_ctx()->get_execution_dependency());
     auto shared_state = _sink->create_shared_state();
     if (shared_state) {
         _sink_shared_state = shared_state;
     }
 }
-
+PipelineTask::~PipelineTask() {
+// PipelineTask is also hold by task queue( https://github.com/apache/doris/pull/49753),
+// so that it maybe the last one to be destructed.
+// But pipeline task hold some objects, like operators, shared state, etc. So that should release
+// memory manually.
+#ifndef BE_TEST
+    SCOPED_SWITCH_THREAD_MEM_TRACKER_LIMITER(_query_mem_tracker);
+#endif
+    _sink_shared_state.reset();
+    _op_shared_states.clear();
+    _sink.reset();
+    _operators.clear();
+    _block.reset();
+    _pipeline.reset();
+}
 Status PipelineTask::prepare(const TPipelineInstanceParams& local_params, const TDataSink& tsink,
                              QueryContext* query_ctx) {
     DCHECK(_sink);
@@ -120,13 +136,11 @@ Status PipelineTask::prepare(const TPipelineInstanceParams& local_params, const 
                 _state->get_local_state(op->operator_id())->get_query_statistics_ptr());
     }
     {
-        std::vector<Dependency*> filter_dependencies;
-        const auto& deps = _state->get_local_state(_source->operator_id())->filter_dependencies();
-        std::copy(deps.begin(), deps.end(),
-                  std::inserter(filter_dependencies, filter_dependencies.end()));
-
+        const auto& deps =
+                _state->get_local_state(_source->operator_id())->execution_dependencies();
         std::unique_lock<std::mutex> lc(_dependency_lock);
-        filter_dependencies.swap(_filter_dependencies);
+        std::copy(deps.begin(), deps.end(),
+                  std::inserter(_execution_dependencies, _execution_dependencies.end()));
     }
     if (auto fragment = _fragment_context.lock()) {
         if (fragment->get_query_ctx()->is_cancelled()) {
@@ -213,10 +227,7 @@ Status PipelineTask::_open() {
     _dry_run = _sink->should_dry_run(_state);
     for (auto& o : _operators) {
         auto* local_state = _state->get_local_state(o->operator_id());
-        auto st = local_state->open(_state);
-        DCHECK(st.is<ErrorCode::PIP_WAIT_FOR_RF>() ? !_filter_dependencies.empty() : true)
-                << debug_string();
-        RETURN_IF_ERROR(st);
+        RETURN_IF_ERROR(local_state->open(_state));
     }
     RETURN_IF_ERROR(_state->get_sink_local_state()->open(_state));
     RETURN_IF_ERROR(_extract_dependencies());
@@ -233,17 +244,22 @@ void PipelineTask::set_task_queue(TaskQueue* task_queue) {
     _task_queue = task_queue;
 }
 
+Status PipelineTask::_prepare() {
+    SCOPED_TIMER(_task_profile->total_time_counter());
+    SCOPED_CPU_TIMER(_task_cpu_timer);
+    for (auto& o : _operators) {
+        RETURN_IF_ERROR(_state->get_local_state(o->operator_id())->prepare(_state));
+    }
+    RETURN_IF_ERROR(_state->get_sink_local_state()->prepare(_state));
+    return Status::OK();
+}
+
 bool PipelineTask::_wait_to_start() {
     // Before task starting, we should make sure
     // 1. Execution dependency is ready (which is controlled by FE 2-phase commit)
     // 2. Runtime filter dependencies are ready
-    _blocked_dep = _execution_dep->is_blocked_by(shared_from_this());
-    if (_blocked_dep != nullptr) {
-        static_cast<Dependency*>(_blocked_dep)->start_watcher();
-        return true;
-    }
-
-    for (auto* op_dep : _filter_dependencies) {
+    // 3. All tablets are loaded into local storage
+    for (auto* op_dep : _execution_dependencies) {
         _blocked_dep = op_dep->is_blocked_by(shared_from_this());
         if (_blocked_dep != nullptr) {
             _blocked_dep->start_watcher();
@@ -326,12 +342,13 @@ Status PipelineTask::execute(bool* eos) {
         }
         fragment_context->get_query_ctx()->update_cpu_time(delta_cpu_time);
     }};
+    if (!_wake_up_early) {
+        RETURN_IF_ERROR(_prepare());
+    }
     if (_wait_to_start()) {
-        if (config::enable_prefetch_tablet) {
-            RETURN_IF_ERROR(_source->hold_tablets(_state));
-        }
         return Status::OK();
     }
+    RETURN_IF_ERROR(_prepare());
 
     // The status must be runnable
     if (!_opened && !fragment_context->is_canceled()) {
@@ -576,9 +593,9 @@ std::string PipelineTask::debug_string() {
     fmt::format_to(
             debug_string_buffer,
             "PipelineTask[this = {}, id = {}, open = {}, eos = {}, finalized = {}, dry run = "
-            "{}, _wake_up_early = {}, is running = {}]",
+            "{}, _wake_up_early = {}, _wake_up_by = {}, is running = {}]",
             (void*)this, _index, _opened, _eos, _finalized, _dry_run, _wake_up_early.load(),
-            is_running());
+            _wake_by, is_running());
     std::unique_lock<std::mutex> lc(_dependency_lock);
     auto* cur_blocked_dep = _blocked_dep;
     auto fragment = _fragment_context.lock();
@@ -616,10 +633,10 @@ std::string PipelineTask::debug_string() {
                        _write_dependencies[j]->debug_string(i + 1));
     }
 
-    fmt::format_to(debug_string_buffer, "\nRuntime Filter Dependency Information: \n");
-    for (size_t j = 0; j < _filter_dependencies.size(); j++, i++) {
+    fmt::format_to(debug_string_buffer, "\nExecution Dependency Information: \n");
+    for (size_t j = 0; j < _execution_dependencies.size(); j++, i++) {
         fmt::format_to(debug_string_buffer, "{}. {}\n", i,
-                       _filter_dependencies[j]->debug_string(i + 1));
+                       _execution_dependencies[j]->debug_string(i + 1));
     }
 
     fmt::format_to(debug_string_buffer, "Finish Dependency Information: \n");

@@ -26,6 +26,7 @@ import org.apache.doris.cloud.catalog.ComputeGroup;
 import org.apache.doris.cloud.proto.Cloud;
 import org.apache.doris.cloud.proto.Cloud.ClusterPB;
 import org.apache.doris.cloud.proto.Cloud.InstanceInfoPB;
+import org.apache.doris.cloud.proto.Cloud.ObjectStoreInfoPB;
 import org.apache.doris.cloud.qe.ComputeGroupException;
 import org.apache.doris.cloud.rpc.MetaServiceProxy;
 import org.apache.doris.common.AnalysisException;
@@ -179,10 +180,10 @@ public class CloudSystemInfoService extends SystemInfoService {
                 if (computeGroupName.equals(vcg.getPolicy().getActiveComputeGroup())) {
                     return vcg.getName();
                 }
-                if (vcg.getPolicy().getStandbyComputeGroup().contains(computeGroupName)) {
+                if (vcg.getPolicy().getStandbyComputeGroup().equals(computeGroupName)) {
                     return vcg.getName();
                 }
-                if (vcg.getSubComputeGroups().contains(computeGroupName)) {
+                if (vcg.getSubComputeGroups().stream().anyMatch(subCgName -> subCgName.equals(computeGroupName))) {
                     return vcg.getName();
                 }
             }
@@ -278,8 +279,6 @@ public class CloudSystemInfoService extends SystemInfoService {
         for (Backend be : toAdd) {
             Env.getCurrentEnv().getEditLog().logAddBackend(be);
             LOG.info("added cloud backend={} ", be);
-            // backends is changed, regenerated tablet number metrics
-            MetricRepo.generateBackendsTabletMetrics();
 
             String host = be.getHost();
             if (existedHostToBeList.keySet().contains(host)) {
@@ -304,8 +303,6 @@ public class CloudSystemInfoService extends SystemInfoService {
             be.setLastMissingHeartbeatTime(System.currentTimeMillis());
             Env.getCurrentEnv().getEditLog().logDropBackend(be);
             LOG.info("dropped cloud backend={}, and lastMissingHeartbeatTime={}", be, be.getLastMissingHeartbeatTime());
-            // backends is changed, regenerated tablet number metrics
-            MetricRepo.generateBackendsTabletMetrics();
         }
 
         // Update idToBackendRef
@@ -314,6 +311,10 @@ public class CloudSystemInfoService extends SystemInfoService {
         toDel.forEach(i -> copiedBackends.remove(i.getId()));
         ImmutableMap<Long, Backend> newIdToBackend = ImmutableMap.copyOf(copiedBackends);
         idToBackendRef = newIdToBackend;
+        // backends is changed, regenerated tablet number metrics
+        // metric repo should be regenerated after setting `idToBackendRef`
+        LOG.info("Add {} and delete {} backend metrics", toAdd.size(), toDel.size());
+        MetricRepo.generateBackendsTabletMetrics();
 
         // Update idToReportVersionRef
         Map<Long, AtomicLong> copiedReportVersions = Maps.newHashMap(idToReportVersionRef);
@@ -404,6 +405,7 @@ public class CloudSystemInfoService extends SystemInfoService {
             // ATTN: Empty clusters are treated as dropped clusters.
             if (be.isEmpty()) {
                 LOG.info("del clusterId {} and clusterName {} due to be nodes eq 0", clusterId, clusterName);
+                MetricRepo.unregisterCloudMetrics(clusterId, clusterName, toDel);
                 boolean succ = clusterNameToId.remove(clusterName, clusterId);
 
                 // remove from computeGroupIdToComputeGroup
@@ -578,7 +580,12 @@ public class CloudSystemInfoService extends SystemInfoService {
     @Override
     public void addBackends(List<HostInfo> hostInfos, Map<String, String> tagMap) throws UserException {
         // issue rpc to meta to add this node, then fe master would add this node to its backends
-
+        if (Strings.isNullOrEmpty(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())) {
+            throw new DdlException("unable to add backends due to empty cloud_instance_id");
+        }
+        if (hostInfos.isEmpty()) {
+            return;
+        }
         String clusterName = tagMap.getOrDefault(Tag.COMPUTE_GROUP_NAME, Tag.VALUE_DEFAULT_COMPUTE_GROUP_NAME);
         if (clusterName.isEmpty()) {
             throw new UserException("ComputeGroup'name can not be empty");
@@ -590,7 +597,48 @@ public class CloudSystemInfoService extends SystemInfoService {
                 : String.valueOf(Config.cluster_id);
 
         String cloudUniqueId = "1:" + instanceId + ":" + RandomIdentifierGenerator.generateRandomIdentifier(8);
-        alterBackendCluster(hostInfos, computeGroupId, cloudUniqueId, Cloud.AlterClusterRequest.Operation.ADD_NODE);
+
+        String publicEndpoint = tagMap.getOrDefault(Tag.PUBLIC_ENDPOINT, "");
+        String privateEndpoint = tagMap.getOrDefault(Tag.PRIVATE_ENDPOINT, "");
+
+        Cloud.ClusterPB clusterPB = Cloud.ClusterPB.newBuilder()
+                .setClusterId(computeGroupId)
+                .setType(Cloud.ClusterPB.Type.COMPUTE)
+                .build();
+
+        for (HostInfo hostInfo : hostInfos) {
+            Cloud.NodeInfoPB nodeInfoPB = Cloud.NodeInfoPB.newBuilder()
+                    .setCloudUniqueId(cloudUniqueId)
+                    .setIp(hostInfo.getHost())
+                    .setHost(hostInfo.getHost())
+                    .setHeartbeatPort(hostInfo.getPort())
+                    .setCtime(System.currentTimeMillis() / 1000)
+                    .setPublicEndpoint(publicEndpoint)
+                    .setPrivateEndpoint(privateEndpoint)
+                    .build();
+            clusterPB = clusterPB.toBuilder().addNodes(nodeInfoPB).build();
+            LOG.info("adding backend node: host={}, port={}, publicEndpoint={}, privateEndpoint={}",
+                    hostInfo.getHost(), hostInfo.getPort(), publicEndpoint, privateEndpoint);
+        }
+
+        Cloud.AlterClusterRequest request = Cloud.AlterClusterRequest.newBuilder()
+                .setInstanceId(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())
+                .setOp(Cloud.AlterClusterRequest.Operation.ADD_NODE)
+                .setCluster(clusterPB)
+                .build();
+
+        Cloud.AlterClusterResponse response;
+        try {
+            response = MetaServiceProxy.getInstance().alterCluster(request);
+            LOG.info("add backends, request: {}, response: {}", request, response);
+            if (response.getStatus().getCode() != Cloud.MetaServiceCode.OK) {
+                LOG.warn("add backends not ok, response: {}", response);
+                throw new DdlException("failed to add backends errorCode: " + response.getStatus().getCode()
+                        + " msg: " + response.getStatus().getMsg());
+            }
+        } catch (RpcException e) {
+            throw new DdlException("failed to add backends", e);
+        }
     }
 
     // final entry of dropping backend
@@ -716,8 +764,15 @@ public class CloudSystemInfoService extends SystemInfoService {
                 && Strings.isNullOrEmpty(clusterName)) {
             return 1;
         }
-
-        return super.getMinPipelineExecutorSize();
+        List<Backend> currentBackends = getBackendsByClusterName(clusterName);
+        if (currentBackends == null || currentBackends.isEmpty()) {
+            return 1;
+        }
+        return currentBackends.stream()
+                .mapToInt(Backend::getPipelineExecutorSize)
+                .filter(size -> size > 0)
+                .min()
+                .orElse(1);
     }
 
     @Override
@@ -755,6 +810,9 @@ public class CloudSystemInfoService extends SystemInfoService {
     public List<Backend> getBackendsByClusterName(final String clusterName) {
         String physicalClusterName = getPhysicalCluster(clusterName);
         String clusterId = clusterNameToId.getOrDefault(physicalClusterName, "");
+        LOG.debug("getBackendsByClusterName clusterName={} "
+                + "physicalClusterName={} clusterId={} clusterNameToId={} clusterIdToBackend={}",
+                clusterName, physicalClusterName, clusterId, clusterNameToId, clusterIdToBackend);
         if (clusterId.isEmpty()) {
             return new ArrayList<>();
         }
@@ -766,6 +824,9 @@ public class CloudSystemInfoService extends SystemInfoService {
         String clusterName = getClusterNameByClusterId(clusterId);
         String physicalClusterName = getPhysicalCluster(clusterName);
         String physicalClusterId = getCloudClusterIdByName(physicalClusterName);
+        LOG.debug("getBackendsByClusterId clusterName={} "
+                + "physicalClusterName={} clusterId={} clusterNameToId={} clusterIdToBackend={}",
+                clusterName, physicalClusterName, clusterId, clusterNameToId, clusterIdToBackend);
 
         // copy a new List
         return new ArrayList<>(clusterIdToBackend.getOrDefault(physicalClusterId, new ArrayList<>()));
@@ -1040,8 +1101,8 @@ public class CloudSystemInfoService extends SystemInfoService {
         String clusterNameMeta = cpb.getClusterName();
         Cloud.ClusterStatus clusterStatus = cpb.hasClusterStatus()
                 ? cpb.getClusterStatus() : Cloud.ClusterStatus.NORMAL;
-        String publicEndpoint = cpb.getPublicEndpoint();
-        String privateEndpoint = cpb.getPrivateEndpoint();
+        String clusterPublicEndpoint = cpb.getPublicEndpoint();
+        String clusterPrivateEndpoint = cpb.getPrivateEndpoint();
         // Prepare backends
         List<Backend> backends = new ArrayList<>();
         for (Cloud.NodeInfoPB node : cpb.getNodesList()) {
@@ -1050,14 +1111,24 @@ public class CloudSystemInfoService extends SystemInfoService {
             newTagMap.put(Tag.CLOUD_CLUSTER_NAME, clusterNameMeta);
             newTagMap.put(Tag.CLOUD_CLUSTER_ID, clusterId);
             newTagMap.put(Tag.CLOUD_CLUSTER_STATUS, String.valueOf(clusterStatus));
-            newTagMap.put(Tag.CLOUD_CLUSTER_PUBLIC_ENDPOINT, publicEndpoint);
-            newTagMap.put(Tag.CLOUD_CLUSTER_PRIVATE_ENDPOINT, privateEndpoint);
+            // Prioritize node-level endpoint configuration, use cluster-level endpoint if
+            // node endpoint is empty
+            String nodePublicEndpoint = node.hasPublicEndpoint() && !node.getPublicEndpoint().isEmpty()
+                    ? node.getPublicEndpoint()
+                    : clusterPublicEndpoint;
+            String nodePrivateEndpoint = node.hasPrivateEndpoint() && !node.getPrivateEndpoint().isEmpty()
+                    ? node.getPrivateEndpoint()
+                    : clusterPrivateEndpoint;
+
+            newTagMap.put(Tag.PUBLIC_ENDPOINT, nodePublicEndpoint);
+            newTagMap.put(Tag.PRIVATE_ENDPOINT, nodePrivateEndpoint);
             newTagMap.put(Tag.CLOUD_UNIQUE_ID, node.getCloudUniqueId());
             Backend b = new Backend(Env.getCurrentEnv().getNextId(), node.getIp(), node.getHeartbeatPort());
             b.setTagMap(newTagMap);
             backends.add(b);
-            LOG.info("new backend to add, clusterName={} clusterId={} backend={}",
-                    clusterNameMeta, clusterId, b.toString());
+            LOG.info(
+                    "new backend to add, clusterName={} clusterId={} backend={}, publicEndpoint={}, privateEndpoint={}",
+                    clusterNameMeta, clusterId, b.toString(), nodePublicEndpoint, nodePrivateEndpoint);
         }
 
         updateCloudBackends(backends, new ArrayList<>());
@@ -1469,6 +1540,7 @@ public class CloudSystemInfoService extends SystemInfoService {
         try {
             Cloud.GetInstanceRequest request = builder.build();
             response = MetaServiceProxy.getInstance().getInstance(request);
+            response = hideAkSkForStorageVault(response.toBuilder());
             LOG.info("get instance info, request: {}, response: {}", request, response);
             if (response.getStatus().getCode() != Cloud.MetaServiceCode.OK) {
                 LOG.warn("Failed to get instance info, response: {}", response);
@@ -1479,6 +1551,61 @@ public class CloudSystemInfoService extends SystemInfoService {
             LOG.warn("Failed to get instance info {}", cloudUniqueId, e);
             throw new IOException("Failed to get instance info");
         }
+    }
+
+    private String hideKey(String key) {
+        if (key == null || key.isEmpty()) {
+            return "";
+        }
+
+        int keyLen = key.length();
+        int reservedCount = (keyLen > 6) ? 6 : (keyLen > 2 ? keyLen - 2 : 0);
+        int xCount = keyLen - reservedCount;
+
+        int leftXCount = xCount / 2;
+        StringBuilder result = new StringBuilder();
+
+        for (int i = 0; i < leftXCount; i++) {
+            result.append('x');
+        }
+
+        int startIndex = leftXCount;
+        int endIndex = startIndex + reservedCount;
+        result.append(key.substring(startIndex, endIndex));
+
+        int rightXCount = xCount - leftXCount;
+        for (int i = 0; i < rightXCount; i++) {
+            result.append('x');
+        }
+        return result.toString();
+    }
+
+    public Cloud.GetInstanceResponse hideAkSkForStorageVault(Cloud.GetInstanceResponse.Builder resp) {
+        if (resp == null) {
+            return null;
+        }
+
+        if (resp.getInstance().getObjInfoCount() == 0) {
+            return resp.build();
+        }
+
+        for (int i = 0; i < resp.getInstance().getObjInfoCount(); i++) {
+            ObjectStoreInfoPB objInfo = resp.getInstance().getObjInfo(i);
+            if (objInfo == null) {
+                continue;
+            }
+            if (objInfo.hasAk()) {
+                String ak = objInfo.getAk();
+                String hiddenAk = hideKey(ak);
+                resp.getInstanceBuilder().getObjInfoBuilder(i).setAk(hiddenAk);
+            }
+            if (objInfo.hasSk()) {
+                String sk = objInfo.getSk();
+                String hiddenSk = hideKey(sk);
+                resp.getInstanceBuilder().getObjInfoBuilder(i).setSk(hiddenSk);
+            }
+        }
+        return resp.build();
     }
 
     public void renameComputeGroup(String originalName, String newGroupName) throws UserException {
@@ -1525,6 +1652,50 @@ public class CloudSystemInfoService extends SystemInfoService {
             throw new UserException("failed to alter rename compute group", e);
         } finally {
             LOG.info("alter rename compute group, request: {}, response: {}", request, response);
+        }
+    }
+
+    public void alterComputeGroupProperties(String computeGroupName, Map<String, String> properties)
+            throws UserException {
+        String cloudInstanceId = ((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId();
+        if (Strings.isNullOrEmpty(cloudInstanceId)) {
+            throw new DdlException("unable to alter compute group properties due to empty cloud_instance_id");
+        }
+        String computeGroupId = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                .getCloudClusterIdByName(computeGroupName);
+        if (Strings.isNullOrEmpty(computeGroupId)) {
+            LOG.info("alter compute group properties {} not found, unable to alter", computeGroupName);
+            throw new DdlException("compute group '" + computeGroupName + "' not found, unable to alter properties");
+        }
+
+        ClusterPB clusterPB = ClusterPB.newBuilder()
+                .setClusterId(computeGroupId)
+                .setClusterName(computeGroupName)
+                .setType(ClusterPB.Type.COMPUTE)
+                .putAllProperties(properties)
+                .build();
+
+        Cloud.AlterClusterRequest request = Cloud.AlterClusterRequest.newBuilder()
+                .setInstanceId(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())
+                .setOp(Cloud.AlterClusterRequest.Operation.ALTER_PROPERTIES)
+                .setCluster(clusterPB)
+                .build();
+
+
+        Cloud.AlterClusterResponse response = null;
+        try {
+            response = MetaServiceProxy.getInstance().alterCluster(request);
+            if (response.getStatus().getCode() != Cloud.MetaServiceCode.OK) {
+                LOG.warn("alter compute group properties not ok, response: {}", response);
+                throw new UserException("failed to alter compute group properties errorCode: "
+                    + response.getStatus().getCode()
+                    + " msg: " + response.getStatus().getMsg() + " may be you can try later");
+            }
+        } catch (RpcException e) {
+            LOG.warn("alter compute group properties rpc exception");
+            throw new UserException("failed to alter compute group properties", e);
+        } finally {
+            LOG.info("alter compute group properties, request: {}, response: {}", request, response);
         }
     }
 }

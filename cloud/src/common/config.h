@@ -22,6 +22,7 @@
 namespace doris::cloud::config {
 
 CONF_Int32(brpc_listen_port, "5000");
+CONF_Int32(brpc_internal_listen_port, "-1");
 CONF_Int32(brpc_num_threads, "64");
 // connections without data transmission for so many seconds will be closed
 // Set -1 to disable it.
@@ -99,9 +100,8 @@ CONF_Int32(recycle_pool_parallelism, "40");
 CONF_Bool(enable_inverted_check, "false");
 // Currently only used for recycler test
 CONF_Bool(enable_delete_bitmap_inverted_check, "false");
-// checks if https://github.com/apache/doris/pull/40204 works as expected
-CONF_Bool(enable_delete_bitmap_storage_optimize_check, "false");
-CONF_mInt64(delete_bitmap_storage_optimize_check_version_gap, "1000");
+CONF_Bool(enable_delete_bitmap_storage_optimize_v2_check, "false");
+CONF_mInt64(delete_bitmap_storage_optimize_v2_check_skip_seconds, "300"); // 5min
 // interval for scanning instances to do checks and inspections
 CONF_mInt32(scan_instances_interval_seconds, "60"); // 1min
 // interval for check object
@@ -118,7 +118,19 @@ CONF_mInt64(recycle_task_threshold_seconds, "10800"); // 3h
 // **just for TEST**
 CONF_Bool(force_immediate_recycle, "false");
 
-CONF_mBool(enable_checker_for_meta_key_check, "false");
+CONF_mBool(enable_mow_job_key_check, "false");
+
+CONF_mBool(enable_restore_job_check, "false");
+
+CONF_mBool(enable_tablet_stats_key_check, "false");
+CONF_mBool(enable_txn_key_check, "false");
+
+CONF_mBool(enable_meta_key_check, "false");
+CONF_mBool(enable_version_key_check, "false");
+CONF_mBool(enable_meta_rowset_key_check, "false");
+
+CONF_mInt64(mow_job_key_check_expiration_diff_seconds, "600"); // 10min
+
 CONF_String(test_s3_ak, "");
 CONF_String(test_s3_sk, "");
 CONF_String(test_s3_endpoint, "");
@@ -265,6 +277,8 @@ CONF_mInt64(max_num_aborted_txn, "100");
 
 // Max byte getting delete bitmap can return, default is 1GB
 CONF_mInt64(max_get_delete_bitmap_byte, "1073741824");
+// retry configs of remove_delete_bitmap_update_lock txn_conflict
+CONF_Bool(delete_bitmap_enable_retry_txn_conflict, "true");
 
 // Max byte txn commit when updating delete bitmap, default is 7MB.
 // Because the size of one fdb transaction can't exceed 10MB, and
@@ -278,9 +292,10 @@ CONF_mInt64(max_txn_commit_byte, "7340032");
 CONF_Bool(enable_cloud_txn_lazy_commit, "true");
 CONF_Int32(txn_lazy_commit_rowsets_thresold, "1000");
 CONF_Int32(txn_lazy_commit_num_threads, "8");
-CONF_Int32(txn_lazy_max_rowsets_per_batch, "1000");
+CONF_mInt64(txn_lazy_max_rowsets_per_batch, "1000");
 // max TabletIndexPB num for batch get
 CONF_Int32(max_tablet_index_num_per_batch, "1000");
+CONF_Int32(max_restore_job_rowsets_per_batch, "1000");
 
 // the possibility to use a lazy commit for a doris txn, ranges from 0 to 100,
 // usually for testing
@@ -291,6 +306,17 @@ CONF_Bool(enable_check_instance_id, "true");
 
 // Check if ip eq 127.0.0.1, ms/recycler exit
 CONF_Bool(enable_loopback_address_for_ms, "false");
+
+// delete_bitmap_lock version config
+// here is some examples:
+// 1. If instance1,instance2 use v2, config should be
+// delete_bitmap_lock_v2_white_list = instance1;instance2
+// 2. If all instance use v2, config should be
+// delete_bitmap_lock_v2_white_list = *
+CONF_mString(delete_bitmap_lock_v2_white_list, "");
+// FOR DEBUGGING
+CONF_mBool(use_delete_bitmap_lock_random_version, "false");
+
 // Which vaults should be recycled. If empty, recycle all vaults.
 // Comma seprated list: recycler_storage_vault_white_list="aaa,bbb,ccc"
 CONF_Strings(recycler_storage_vault_white_list, "");
@@ -325,4 +351,9 @@ CONF_mString(ca_cert_file_paths,
              "/etc/ssl/ca-bundle.pem");
 
 CONF_Bool(enable_check_fe_drop_in_safe_time, "true");
+CONF_mBool(enable_logging_conflict_keys, "false");
+
+CONF_mString(aws_credentials_provider_version, "v2");
+CONF_Validator(aws_credentials_provider_version,
+               [](const std::string& config) -> bool { return config == "v1" || config == "v2"; });
 } // namespace doris::cloud::config

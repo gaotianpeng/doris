@@ -120,6 +120,12 @@ public class Config extends ConfigBase {
             "The threshold of slow query, in milliseconds. "
                     + "If the response time of a query exceeds this threshold, it will be recorded in audit log."})
     public static long qe_slow_log_ms = 5000;
+    @ConfField(mutable = true, description = {"sql_digest 生成的时间阈值，单位为毫秒。如果一个查询的响应时间超过这个阈值，"
+            + "则会为其生成 sql_digest。",
+            "The threshold of sql_digest generation, in milliseconds. "
+                    + "If the response time of a query exceeds this threshold, "
+                    + "sql_digest will be generated for it."})
+    public static long sql_digest_generation_threshold_ms = 5000;
     @ConfField(description = {"FE 审计日志文件的切分周期", "The split cycle of the FE audit log file"},
             options = {"DAY", "HOUR"})
     public static String audit_log_roll_interval = "DAY";
@@ -149,7 +155,7 @@ public class Config extends ConfigBase {
     public static long prepared_stmt_start_id = -1;
 
     @ConfField(description = {"插件的安装目录", "The installation directory of the plugin"})
-    public static String plugin_dir = System.getenv("DORIS_HOME") + "/plugins";
+    public static String plugin_dir =  EnvUtils.getDorisHome() + "/plugins";
 
     @ConfField(mutable = true, masterOnly = true, description = {"是否启用插件", "Whether to enable the plugin"})
     public static boolean plugin_enable = true;
@@ -158,7 +164,7 @@ public class Config extends ConfigBase {
             "JDBC 驱动的存放路径。在创建 JDBC Catalog 时，如果指定的驱动文件路径不是绝对路径，则会在这个目录下寻找",
             "The path to save jdbc drivers. When creating JDBC Catalog,"
                     + "if the specified driver file path is not an absolute path, Doris will find jars from this path"})
-    public static String jdbc_drivers_dir = System.getenv("DORIS_HOME") + "/jdbc_drivers";
+    public static String jdbc_drivers_dir = EnvUtils.getDorisHome() + "/plugins/jdbc_drivers";
 
     @ConfField(description = {"JDBC 驱动的安全路径。在创建 JDBC Catalog 时，允许使用的文件或者网络路径，可配置多个，使用分号分隔"
             + "默认为 * 表示全部允许，如果设置为空也表示全部允许",
@@ -198,6 +204,12 @@ public class Config extends ConfigBase {
             "For ALTER, EXPORT jobs, remove the finished job if expired."})
     public static int history_job_keep_max_second = 7 * 24 * 3600; // 7 days
 
+    @ConfField(mutable = true, masterOnly = true, description = {
+            "针对 EXPORT 作业，如果系统内 EXPORT 作业数量超过这个值，则会删除最老的记录。",
+            "For EXPORT jobs, If the number of EXPORT jobs in the system exceeds this value, "
+                    + "the oldest records will be deleted."})
+    public static int max_export_history_job_num = 1000;
+
     @ConfField(description = {"事务的清理周期，单位为秒。每个周期内，将会清理已经结束的并且过期的历史事务信息",
             "The clean interval of transaction, in seconds. "
                     + "In each cycle, the expired history transaction will be cleaned"})
@@ -209,10 +221,10 @@ public class Config extends ConfigBase {
     public static int label_clean_interval_second = 1 * 3600; // 1 hours
 
     @ConfField(description = {"元数据的存储目录", "The directory to save Doris meta data"})
-    public static String meta_dir = System.getenv("DORIS_HOME") + "/doris-meta";
+    public static String meta_dir =  EnvUtils.getDorisHome() + "/doris-meta";
 
     @ConfField(description = {"临时文件的存储目录", "The directory to save Doris temp data"})
-    public static String tmp_dir = System.getenv("DORIS_HOME") + "/temp_dir";
+    public static String tmp_dir =  EnvUtils.getDorisHome() + "/temp_dir";
 
     @ConfField(description = {"元数据日志的存储类型。BDB: 日志存储在 BDBJE 中。LOCAL：日志存储在本地文件中（仅用于测试）",
             "The storage type of the metadata log. BDB: Logs are stored in BDBJE. "
@@ -244,6 +256,10 @@ public class Config extends ConfigBase {
             "After writting multiple batching BDBJE continuously, need a short rest. "
                     + "Indicates the writting count before a rest"})
     public static long batch_edit_log_continuous_count_for_rest = 1000;
+
+    @ConfField(description = {
+            "攒批写 EditLog。", "Batch EditLog writing"})
+    public static boolean enable_batch_editlog = true;
 
     @ConfField(description = {"元数据同步的容忍延迟时间，单位为秒。如果元数据的延迟超过这个值，非主 FE 会停止提供服务",
             "The toleration delay time of meta data synchronization, in seconds. "
@@ -367,7 +383,7 @@ public class Config extends ConfigBase {
 
     @ConfField(description = {"FE https 服务的 key store 路径",
             "The key store path of FE https service"})
-    public static String key_store_path = System.getenv("DORIS_HOME")
+    public static String key_store_path =  EnvUtils.getDorisHome()
             + "/conf/ssl/doris_ssl_certificate.keystore";
 
     @ConfField(description = {"FE https 服务的 key store 密码",
@@ -530,6 +546,27 @@ public class Config extends ConfigBase {
             "the upper limit of failure logs of PUBLISH_VERSION task"})
     public static long publish_version_task_failed_log_threshold = 80;
 
+    @ConfField(masterOnly = true, description = {"Publish 线程池的数目",
+            "Num of thread to handle publish task"})
+    public static int publish_thread_pool_num = 128;
+
+    @ConfField(masterOnly = true, description = {"Publish 线程池的队列大小",
+            "Queue size to store publish task in publish thread pool"})
+    public static int publish_queue_size = 128;
+
+    @ConfField(mutable = true, description = {"是否启用并行发布版本",
+            "Whether to enable parallel publish version"})
+    public static boolean enable_parallel_publish_version = true;
+
+
+    @ConfField(masterOnly = true, description = {"Tablet report 线程池的数目",
+        "Num of thread to handle tablet report task"})
+    public static int tablet_report_thread_pool_num = 10;
+
+    @ConfField(masterOnly = true, description = {"Tablet report 线程池的队列大小",
+        "Queue size to store tablet report task in publish thread pool"})
+    public static int tablet_report_queue_size = 1024;
+
     @ConfField(mutable = true, masterOnly = true, description = {"提交事务的最大超时时间，单位是秒。"
             + "该参数仅用于事务型 insert 操作中。",
             "Maximal waiting time for all data inserted before one transaction to be committed, in seconds. "
@@ -555,9 +592,9 @@ public class Config extends ConfigBase {
             "The interval of load job scheduler, in seconds."})
     public static int load_checker_interval_second = 5;
 
-    @ConfField(description = {"spark load job 调度器的执行间隔，单位是秒。",
-            "The interval of spark load job scheduler, in seconds."})
-    public static int spark_load_checker_interval_second = 60;
+    @ConfField(description = {"ingestion load job 调度器的执行间隔，单位是秒。",
+            "The interval of ingestion load job scheduler, in seconds."})
+    public static int ingestion_load_checker_interval_second = 60;
 
     @ConfField(mutable = true, masterOnly = true, description = {"Broker load 的默认超时时间，单位是秒。",
             "Default timeout for broker load job, in seconds."})
@@ -618,63 +655,9 @@ public class Config extends ConfigBase {
             "Minimal timeout for load job, in seconds."})
     public static int min_load_timeout_second = 1; // 1s
 
-    @ConfField(mutable = true, masterOnly = true, description = {"Hadoop load 的默认超时时间，单位是秒。",
-            "Default timeout for hadoop load job, in seconds."})
-    public static int hadoop_load_default_timeout_second = 86400 * 3; // 3 day
-
-    @ConfField(description = {"Spark DPP 程序的版本", "Default spark dpp version"})
-    public static String spark_dpp_version = "1.2-SNAPSHOT";
-
-    @ConfField(mutable = true, masterOnly = true, description = {"Spark load 的默认超时时间，单位是秒。",
-            "Default timeout for spark load job, in seconds."})
-    public static int spark_load_default_timeout_second = 86400; // 1 day
-
-    @ConfField(mutable = true, masterOnly = true, description = {"Spark Load 所使用的 Spark 程序目录",
-            "Spark dir for Spark Load"})
-    public static String spark_home_default_dir = System.getenv("DORIS_HOME") + "/lib/spark2x";
-
-    @ConfField(description = {"Spark load 所使用的依赖项目录", "Spark dependencies dir for Spark Load"})
-    public static String spark_resource_path = "";
-
-    @ConfField(description = {"Spark launcher 日志路径", "Spark launcher log dir"})
-    public static String spark_launcher_log_dir = System.getenv("LOG_DIR") + "/spark_launcher_log";
-
-    @ConfField(description = {"Yarn client 的路径", "Yarn client path"})
-    public static String yarn_client_path = System.getenv("DORIS_HOME") + "/lib/yarn-client/hadoop/bin/yarn";
-
-    @ConfField(description = {"Yarn 配置文件的路径", "Yarn config path"})
-    public static String yarn_config_dir = System.getenv("DORIS_HOME") + "/lib/yarn-config";
-
-    @ConfField(mutable = true, masterOnly = true, description = {"Sync job 的最大提交间隔，单位是秒。",
-            "Maximal intervals between two sync job's commits."})
-    public static long sync_commit_interval_second = 10;
-
-    @ConfField(description = {"Sync job 调度器的执行间隔，单位是秒。",
-            "The interval of sync job scheduler, in seconds."})
-    public static int sync_checker_interval_second = 5;
-
-    @ConfField(description = {"Sync job 的最大并发数。",
-            "Maximal concurrent num of sync job."})
-    public static int max_sync_task_threads_num = 10;
-
-    @ConfField(mutable = true, masterOnly = true, description = {"Sync job 的最小提交事件数。如果收到的事件数小于该值，"
-            + "Sync Job 会继续等待下一批数据，直到时间超过 `sync_commit_interval_second`。这个值应小于 canal 的缓冲区大小。",
-            "Min events that a sync job will commit. When receiving events less than it, SyncJob will continue "
-                    + "to wait for the next batch of data until the time exceeds `sync_commit_interval_second`."})
-    public static long min_sync_commit_size = 10000;
-
-    @ConfField(mutable = true, masterOnly = true, description = {"Sync job 的最小提交字节数。如果收到的字节数小于该值，"
-            + "Sync Job 会继续等待下一批数据，直到时间超过 `sync_commit_interval_second`。这个值应小于 canal 的缓冲区大小。",
-            "Min bytes that a sync job will commit. When receiving bytes less than it, SyncJob will continue "
-                    + "to wait for the next batch of data until the time exceeds `sync_commit_interval_second`."})
-    public static long min_bytes_sync_commit = 15 * 1024 * 1024; // 15 MB
-
-    @ConfField(mutable = true, masterOnly = true, description = {"Sync job 的最大提交字节数。如果收到的字节数大于该值，"
-            + "Sync Job 会立即提交所有数据。这个值应大于 canal 的缓冲区大小和 `min_bytes_sync_commit`。",
-            "Max bytes that a sync job will commit. When receiving bytes larger than it, SyncJob will commit "
-                    + "all data immediately. You should set it larger than canal memory and "
-                    + "`min_bytes_sync_commit`."})
-    public static long max_bytes_sync_commit = 64 * 1024 * 1024; // 64 MB
+    @ConfField(mutable = true, masterOnly = true, description = {"Ingestion load 的默认超时时间，单位是秒。",
+            "Default timeout for ingestion load job, in seconds."})
+    public static int ingestion_load_default_timeout_second = 86400; // 1 day
 
     @ConfField(mutable = true, masterOnly = true, description = {"Broker Load 的最大等待 job 数量。"
             + "这个值是一个期望值。在某些情况下，比如切换 master，当前等待的 job 数量可能会超过这个值。",
@@ -718,7 +701,7 @@ public class Config extends ConfigBase {
             + "并且应小于 `max_running_txn_num_per_db`。",
             "The pending load task executor pool size. "
                     + "This pool size limits the max running pending load tasks.",
-            "Currently, it only limits the pending load task of broker load and spark load.",
+            "Currently, it only limits the pending load task of broker load and ingestion load.",
             "It should be less than `max_running_txn_num_per_db`"})
     public static int async_pending_load_task_pool_size = 10;
 
@@ -865,35 +848,6 @@ public class Config extends ConfigBase {
     @Deprecated
     @ConfField public static String backup_plugin_path = "/tools/trans_file_tool/trans_files.sh";
 
-    // Configurations for hadoop dpp
-    /**
-     * The following configurations are not available.
-     */
-    @ConfField public static String dpp_hadoop_client_path = "/lib/hadoop-client/hadoop/bin/hadoop";
-    @ConfField public static long dpp_bytes_per_reduce = 100 * 1024 * 1024L; // 100M
-    @ConfField public static String dpp_default_cluster = "palo-dpp";
-    @ConfField public static String dpp_default_config_str = ""
-            + "{"
-            + "hadoop_configs : '"
-            + "mapred.job.priority=NORMAL;"
-            + "mapred.job.map.capacity=50;"
-            + "mapred.job.reduce.capacity=50;"
-            + "mapred.hce.replace.streaming=false;"
-            + "abaci.long.stored.job=true;"
-            + "dce.shuffle.enable=false;"
-            + "dfs.client.authserver.force_stop=true;"
-            + "dfs.client.auth.method=0"
-            + "'}";
-    @ConfField public static String dpp_config_str = ""
-            + "{palo-dpp : {"
-            + "hadoop_palo_path : '/dir',"
-            + "hadoop_configs : '"
-            + "fs.default.name=hdfs://host:port;"
-            + "mapred.job.tracker=host:port;"
-            + "hadoop.job.ugi=user,password"
-            + "'}"
-            + "}";
-
     // For forward compatibility, will be removed later.
     // check token when download image file.
     @ConfField public static boolean enable_token_check = true;
@@ -902,14 +856,11 @@ public class Config extends ConfigBase {
      * Set to true if you deploy Palo using thirdparty deploy manager
      * Valid options are:
      *      disable:    no deploy manager
-     *      k8s:        Kubernetes
-     *      ambari:     Ambari
+     *      k8s:        Kubernetes NB:Support removed starting from version 3.1.X
+     *      ambari:     Ambari NB: Support removed starting from version 3.1.X
      *      local:      Local File (for test or Boxer2 BCC version)
      */
     @ConfField public static String enable_deploy_manager = "disable";
-
-    // If use k8s deploy manager locally, set this to true and prepare the certs files
-    @ConfField public static boolean with_k8s_certs = false;
 
     // Set runtime locale when exec some cmds
     @ConfField public static String locale = "zh_CN.UTF-8";
@@ -944,6 +895,17 @@ public class Config extends ConfigBase {
     // All frontends will get tablet stat from all backends at each interval
     @ConfField(mutable = true)
     public static int tablet_stat_update_interval_second = 60;  // 1 min
+
+    // update interval of alive session
+    // Only master FE collect this info from all frontends at each interval
+    @ConfField public static int alive_session_update_interval_second = 5;
+
+    @ConfField public static int fe_session_mgr_threads_num = 1;
+
+    @ConfField public static int fe_session_mgr_blocking_queue_size = 1024;
+
+    @ConfField(mutable = true, masterOnly = true)
+    public static int loss_conn_fe_temp_table_keep_second = 60;
 
     /**
      * Max bytes a broker scanner can process in one broker load job.
@@ -1017,13 +979,6 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = false, masterOnly = true)
     public static int db_used_data_quota_update_interval_secs = 300;
-
-    /**
-     * Load using hadoop cluster will be deprecated in future.
-     * Set to true to disable this kind of load.
-     */
-    @ConfField(mutable = true, masterOnly = true)
-    public static boolean disable_hadoop_load = false;
 
     /**
      * fe will call es api to get es index shard info every es_state_sync_interval_secs
@@ -1293,7 +1248,7 @@ public class Config extends ConfigBase {
      * Save small files
      */
     @ConfField
-    public static String small_file_dir = System.getenv("DORIS_HOME") + "/small_files";
+    public static String small_file_dir =  EnvUtils.getDorisHome() + "/small_files";
 
     /**
      * This will limit the max recursion depth of hash distribution pruner.
@@ -1450,9 +1405,33 @@ public class Config extends ConfigBase {
     @ConfField(
             mutable = true,
             masterOnly = false,
-            callbackClassString = "org.apache.doris.common.NereidsSqlCacheManager$UpdateConfig"
+            callbackClassString = "org.apache.doris.common.cache.NereidsSqlCacheManager$UpdateConfig",
+            description = {
+                    "当前默认设置为 300，用来控制控制NereidsSqlCacheManager中sql cache过期时间，超过一段时间不访问cache会被回收",
+                    "The current default setting is 300, which is used to control the expiration time of SQL cache"
+                            + "in NereidsSqlCacheManager. If the cache is not accessed for a period of time, "
+                            + "it will be reclaimed"
+            }
     )
     public static int expire_sql_cache_in_fe_second = 300;
+
+
+    /**
+     *  Expire sql sql in frontend time
+     */
+    @ConfField(
+            mutable = true,
+            masterOnly = false,
+            callbackClassString = "org.apache.doris.common.cache.NereidsSortedPartitionsCacheManager$UpdateConfig",
+            description = {
+                "当前默认设置为 300，用来控制控制NereidsSortedPartitionsCacheManager中分区元数据缓存过期时间，"
+                    + "超过一段时间不访问cache会被回收",
+                "The current default setting is 300, which is used to control the expiration time of "
+                    + "the partition metadata cache in NereidsSortedPartitionsCheManager. "
+                    + "If the cache is not accessed for a period of time, it will be reclaimed"
+            }
+    )
+    public static int expire_cache_partition_meta_table_in_fe_second = 300;
 
     /**
      * Set the maximum number of rows that can be cached
@@ -1490,6 +1469,12 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true, masterOnly = true)
     public static boolean enable_hidden_version_column_by_default = true;
+
+    /**
+     * Whether to add a skip bitmap column when create merge-on-write unique table
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_skip_bitmap_column_by_default = false;
 
     /**
      * Used to set default db data quota bytes.
@@ -1677,6 +1662,20 @@ public class Config extends ConfigBase {
     @ConfField(mutable = false)
     public static long backup_handler_update_interval_millis = 3000;
 
+
+    /**
+     * Whether to enable cloud restore job.
+     */
+    @ConfField(mutable = true, masterOnly = true, description = {"是否开启存算分离恢复功能。",
+        "Whether to enable cloud restore job."}, varType = VariableAnnotation.EXPERIMENTAL)
+    public static boolean enable_cloud_restore_job = false;
+
+    @ConfField(mutable = true, masterOnly = true, description = {
+        "存算分离恢复过程中，一次 create tablets rpc 创建的 tablet 数量上限，默认值为256个",
+        "During the cloud restore job, the maximum number of tablets created by one "
+            + "create tablets RPC, 256 by default."})
+    public static int cloud_restore_create_tablet_batch_size = 256;
+
     /**
      * Control the default max num of the instance for a user.
      */
@@ -1704,6 +1703,9 @@ public class Config extends ConfigBase {
     @ConfField(masterOnly = true)
     public static int lower_case_table_names = 0;
 
+    /**
+     * Used to limit the length of table name.
+     */
     @ConfField(mutable = true, masterOnly = true)
     public static int table_name_length_limit = 64;
 
@@ -1712,6 +1714,12 @@ public class Config extends ConfigBase {
             "Used to limit the length of column comment; "
                     + "If the existing column comment is too long, it will be truncated when displayed."})
     public static int column_comment_length_limit = -1;
+
+    @ConfField(mutable = true, description = {
+            "内部表的默认压缩类型。支持的值有: LZ4, LZ4F, LZ4HC, ZLIB, ZSTD, SNAPPY, NONE。",
+            "Default compression type for internal tables. Supported values: LZ4, LZ4F, LZ4HC, ZLIB, ZSTD,"
+            + " SNAPPY, NONE."})
+    public static String default_compression_type = "LZ4F";
 
     /*
      * The job scheduling interval of the schema change handler.
@@ -1927,6 +1935,7 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, varType = VariableAnnotation.EXPERIMENTAL)
     public static boolean enable_workload_group = true;
 
+
     @ConfField(mutable = true, varType = VariableAnnotation.EXPERIMENTAL)
     public static boolean enable_wg_memory_sum_limit = false;
 
@@ -1998,7 +2007,7 @@ public class Config extends ConfigBase {
      * Max data version of backends serialize block.
      */
     @ConfField(mutable = false)
-    public static int max_be_exec_version = 8;
+    public static int max_be_exec_version = 9;
 
     /**
      * Min data version of backends serialize block.
@@ -2206,12 +2215,17 @@ public class Config extends ConfigBase {
     @ConfField(mutable = false, masterOnly = false)
     public static long max_external_schema_cache_num = 10000;
 
-    /**
-     * The expiration time of a cache object after last access of it.
-     * For external schema cache and hive meta cache.
-     */
-    @ConfField(mutable = false, masterOnly = false)
-    public static long external_cache_expire_time_minutes_after_access = 10; // 10 mins
+    @ConfField(description = {
+            "外部表元数据缓存对象在最后访问后过期的时间。",
+            "The expiration time of a cache object after last access of it. For external meta cache."
+    })
+    public static long external_cache_expire_time_seconds_after_access = 86400L; // 24 hours
+
+    @ConfField(description = {
+            "外部表元数据缓存对象的自动刷新时间",
+            "The auto refresh time of external meta cache."
+    })
+    public static long external_cache_refresh_time_minutes = 10; // 10 mins
 
     /**
      * Github workflow test type, for setting some session variables
@@ -2257,6 +2271,9 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static boolean enable_query_hive_views = true;
 
+    @ConfField(mutable = true)
+    public static boolean enable_query_iceberg_views = true;
+
     /**
      * If set to true, doris will automatically synchronize hms metadata to the cache in fe.
      */
@@ -2279,8 +2296,7 @@ public class Config extends ConfigBase {
      */
     @ConfField(
             mutable = true,
-            varType = VariableAnnotation.EXPERIMENTAL,
-            callbackClassString = "org.apache.doris.common.NereidsSqlCacheManager$UpdateConfig",
+            callbackClassString = "org.apache.doris.common.cache.NereidsSqlCacheManager$UpdateConfig",
             description = {
                 "当前默认设置为 100，用来控制控制NereidsSqlCacheManager管理的sql cache数量。",
                 "Now default set to 100, this config is used to control the number of "
@@ -2288,6 +2304,19 @@ public class Config extends ConfigBase {
             }
     )
     public static int sql_cache_manage_num = 100;
+
+    @ConfField(
+            mutable = true,
+            callbackClassString = "org.apache.doris.common.cache.NereidsSortedPartitionsCacheManager$UpdateConfig",
+            description = {
+                    "当前默认设置为 100，用来控制控制NereidsSortedPartitionsCacheManager中有序分区元数据的缓存个数，"
+                            + "用于加速分区裁剪",
+                    "The current default setting is 100, which is used to control the number of ordered "
+                            + "partition metadata caches in NereidsSortedPartitionsCacheManager, "
+                            + "and to accelerate partition pruning"
+            }
+    )
+    public static int cache_partition_meta_table_manage_num = 100;
 
     /**
      * Maximum number of events to poll in each RPC.
@@ -2329,14 +2358,14 @@ public class Config extends ConfigBase {
      * Default CA certificate file location for mysql ssl connection.
      */
     @ConfField(mutable = false, masterOnly = false)
-    public static String mysql_ssl_default_ca_certificate = System.getenv("DORIS_HOME")
+    public static String mysql_ssl_default_ca_certificate =  EnvUtils.getDorisHome()
             + "/mysql_ssl_default_certificate/ca_certificate.p12";
 
     /**
      * Default server certificate file location for mysql ssl connection.
      */
     @ConfField(mutable = false, masterOnly = false)
-    public static String mysql_ssl_default_server_certificate = System.getenv("DORIS_HOME")
+    public static String mysql_ssl_default_server_certificate =  EnvUtils.getDorisHome()
             + "/mysql_ssl_default_certificate/server_certificate.p12";
 
     /**
@@ -2571,11 +2600,6 @@ public class Config extends ConfigBase {
             "Export任务允许的最大并行数",
             "The maximum parallelism allowed by Export job"})
     public static int maximum_parallelism_of_export_job = 50;
-
-    @ConfField(mutable = true, description = {
-            "ExportExecutorTask任务中一个OutFile语句允许的最大tablets数量",
-            "The maximum number of tablets allowed by an OutfileStatement in an ExportExecutorTask"})
-    public static int maximum_tablets_of_outfile_in_export = 10;
 
     @ConfField(mutable = true, description = {
             "是否用 mysql 的 bigint 类型来返回 Doris 的 largeint 类型",
@@ -2894,7 +2918,12 @@ public class Config extends ConfigBase {
 
     @ConfField(mutable = true, masterOnly = false, description = {"指定 trino-connector catalog 的插件默认加载路径",
             "Specify the default plugins loading path for the trino-connector catalog"})
-    public static String trino_connector_plugin_dir = EnvUtils.getDorisHome() + "/connectors";
+    public static String trino_connector_plugin_dir = EnvUtils.getDorisHome() + "/plugins/connectors";
+
+    @ConfField(description = {
+            "存放 hadoop conf 配置文件的默认目录。",
+            "The default directory for storing hadoop conf configuration files."})
+    public static String hadoop_config_dir = EnvUtils.getDorisHome() + "/plugins/hadoop_conf/";
 
     @ConfField(mutable = true)
     public static boolean fix_tablet_partition_id_eq_0 = false;
@@ -3152,7 +3181,7 @@ public class Config extends ConfigBase {
     public static int drop_user_notify_ms_max_times = 86400;
 
     @ConfField(mutable = true, masterOnly = true)
-    public static long cloud_tablet_rebalancer_interval_second = 20;
+    public static long cloud_tablet_rebalancer_interval_second = 1;
 
     @ConfField(mutable = true, masterOnly = true)
     public static boolean enable_cloud_partition_balance = true;
@@ -3178,8 +3207,26 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, masterOnly = true)
     public static int cloud_min_balance_tablet_num_per_run = 2;
 
-    @ConfField(mutable = true, masterOnly = true)
-    public static boolean enable_cloud_warm_up_for_rebalance = true;
+    @ConfField(mutable = true, masterOnly = true, description = {"指定存算分离模式下所有Compute group的扩缩容预热方式。"
+            + "without_warmup: 直接修改tablet分片映射，首次读从S3拉取，均衡最快但性能波动最大；"
+            + "async_warmup: 异步预热，尽力而为拉取cache，均衡较快但可能cache miss；"
+            + "sync_warmup: 同步预热，确保cache迁移完成，均衡较慢但无cache miss；"
+            + "peer_read_async_warmup: 直接修改tablet分片映射，首次读从Peer BE拉取，均衡最快可能会影响同计算组中其他BE性能。"
+            + "注意：此为全局FE配置，也可通过SQL（ALTER COMPUTE GROUP cg PROPERTIES）"
+            + "设置compute group维度的balance类型，compute group维度配置优先级更高",
+        "Specify the scaling and warming methods for all Compute groups in a cloud mode. "
+            + "without_warmup: Directly modify shard mapping, first read from S3,"
+            + "fastest re-balance but largest fluctuation; "
+            + "async_warmup: Asynchronous warmup, best-effort cache pulling, "
+            + "faster re-balance but possible cache miss; "
+            + "sync_warmup: Synchronous warmup, ensure cache migration completion, "
+            + "slower re-balance but no cache miss; "
+            + "peer_read_async_warmup: Directly modify shard mapping, first read from Peer BE, "
+            + "fastest re-balance but may affect other BEs in the same compute group performance. "
+            + "Note: This is a global FE configuration, you can also use SQL (ALTER COMPUTE GROUP cg PROPERTIES) "
+            + "to set balance type at compute group level, compute group level configuration has higher priority"},
+            options = {"without_warmup", "async_warmup", "sync_warmup", "peer_read_async_warmup"})
+    public static String cloud_warm_up_for_rebalance_type = "async_warmup";
 
     @ConfField(mutable = true, masterOnly = false)
     public static String security_checker_class_name = "";
@@ -3252,9 +3299,19 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static int audit_event_log_queue_size = 250000;
 
-    @ConfField(description = {"存算分离模式下streamload导入使用的转发策略, 可选值为public-private或者空",
-            "streamload route policy in cloud mode, availale options are public-private and empty string"})
+    @ConfField(mutable = true, description = {
+            "streamload导入使用的转发策略, 可选值为public-private/public/private/direct/random-be/空",
+            "streamload route policy, available options are "
+            + "public-private/public/private/direct/random-be and empty string" })
     public static String streamload_redirect_policy = "";
+
+    @ConfField(mutable = true, description = {
+            "存算分离模式下是否启用group commit的streamload BE转发功能。"
+                    + "解决LB随机转发导致group commit攒批失效的问题，通过BE二次转发确保同表请求到达同一BE节点。",
+            "Whether to enable group commit streamload BE forward feature in cloud mode. "
+                    + "Solves the issue where LB random forwarding breaks group commit batching "
+                    + "by implementing BE-level forwarding to ensure same-table requests reach the same BE node." })
+    public static boolean enable_group_commit_streamload_be_forward = false;
 
     @ConfField(description = {"存算分离模式下建表是否检查残留recycler key, 默认true",
         "create table in cloud mode, check recycler key remained, default true"})
@@ -3335,6 +3392,18 @@ public class Config extends ConfigBase {
             })
     public static String[] auto_start_ignore_resume_db_names = {"__internal_schema", "information_schema"};
 
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_mow_load_force_take_ms_lock = true;
+
+    @ConfField(mutable = true, masterOnly = true)
+    public static long mow_load_force_take_ms_lock_threshold_ms = 500;
+
+    @ConfField(mutable = true, masterOnly = true)
+    public static long mow_get_ms_lock_retry_backoff_base = 20;
+
+    @ConfField(mutable = true, masterOnly = true)
+    public static long mow_get_ms_lock_retry_backoff_interval = 80;
+
     // ATTN: DONOT add any config not related to cloud mode here
     // ATTN: DONOT add any config not related to cloud mode here
     // ATTN: DONOT add any config not related to cloud mode here
@@ -3389,4 +3458,63 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, description = {"Prometheus 输出表维度指标的个数限制",
             "Prometheus output table dimension metric count limit"})
     public static int prom_output_table_metrics_limit = 10000;
+
+    @ConfField(description = {"认证插件目录",
+            "Authentication plugin directory"})
+    public static String authentication_plugins_dir = EnvUtils.getDorisHome() + "/plugins/authentication";
+
+    @ConfField(description = {"鉴权插件目录",
+            "Authorization plugin directory"})
+    public static String authorization_plugins_dir = EnvUtils.getDorisHome() + "/plugins/authorization";
+
+    @ConfField(description = {
+            "鉴权插件配置文件路径，需在 DORIS_HOME 下，默认为 conf/authorization.conf",
+            "Authorization plugin configuration file path, need to be in DORIS_HOME,"
+                    + "default is conf/authorization.conf"})
+    public static String authorization_config_file_path = "/conf/authorization.conf";
+
+    @ConfField(description = {
+            "认证插件配置文件路径，需在 DORIS_HOME 下，默认为 conf/authentication.conf",
+            "Authentication plugin configuration file path, need to be in DORIS_HOME,"
+                    + "default is conf/authentication.conf"})
+    public static String authentication_config_file_path = "/conf/authentication.conf";
+
+    @ConfField(mutable = true, description = {
+        "KMS 主密钥的 ID，用于生成和加密数据密钥",
+        "The ID of the master key in KMS, used for generating and encrypting data keys"
+    })
+    public static String doris_tde_key_id = "";
+
+    @ConfField(mutable = true, description = {
+        "KMS 服务的访问地址（endpoint），需与密钥所在的 region 匹配",
+        "The endpoint of the KMS service, should match the region of the key"
+    })
+    public static String doris_tde_key_endpoint = "";
+
+    @ConfField(mutable = true, description = {
+        "KMS 密钥所属的区域，用于 SDK 调用时的区域配置",
+        "The region where the KMS key is located, used for SDK configuration"
+    })
+    public static String doris_tde_key_region = "";
+
+    @ConfField(mutable = true, description = {
+        "TDE（透明数据加密）的密钥提供方，目前支持 aws_kms",
+        "The key provider for TDE (Transparent Data Encryption), currently supports aws_kms"
+    })
+    public static String doris_tde_key_provider = "";
+
+    @ConfField(mutable = true, description = {
+        "数据加密所使用的算法，默认 AES256，后续可能置空由 KMS 自动决定",
+        "The encryption algorithm used for data, default is AES256, may be set to empty later for KMS to decide"
+    })
+    public static String doris_tde_algorithm = "PLAINTEXT";
+
+    @ConfField(mutable = true)
+    public static String aws_credentials_provider_version = "v2";
+
+    @ConfField(description = {
+            "agent tasks 健康检查的时间间隔，默认五分钟，小于等于0时不做健康检查",
+            "agent tasks health check interval, default is five minutes, no health check when less than or equal to 0"
+    })
+    public static long agent_task_health_check_intervals_ms = 5 * 60 * 1000L; // 5 min
 }

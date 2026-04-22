@@ -19,9 +19,11 @@ package org.apache.doris.datasource.iceberg.source;
 
 import org.apache.doris.common.util.LocationPath;
 import org.apache.doris.datasource.FileSplit;
+import org.apache.doris.datasource.property.storage.StorageProperties;
 
 import lombok.Data;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -35,14 +37,16 @@ public class IcebergSplit extends FileSplit {
     // but the original datafile path must be used.
     private final String originalPath;
     private Integer formatVersion;
-    private List<IcebergDeleteFileFilter> deleteFileFilters;
-    private Map<String, String> config;
+    private List<IcebergDeleteFileFilter> deleteFileFilters = new ArrayList<>();
+    private Map<StorageProperties.Type, StorageProperties> config;
     // tableLevelRowCount will be set only table-level count push down opt is available.
     private long tableLevelRowCount = -1;
+    // Partition values are used to do runtime filter partition pruning.
+    private Map<String, String> icebergPartitionValues = null;
 
     // File path will be changed if the file is modified, so there's no need to get modification time.
     public IcebergSplit(LocationPath file, long start, long length, long fileLength, String[] hosts,
-                        Integer formatVersion, Map<String, String> config,
+                        Integer formatVersion, Map<StorageProperties.Type, StorageProperties> config,
                         List<String> partitionList, String originalPath) {
         super(file, start, length, fileLength, 0, hosts, partitionList);
         this.formatVersion = formatVersion;

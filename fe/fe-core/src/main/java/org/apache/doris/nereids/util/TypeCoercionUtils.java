@@ -29,12 +29,12 @@ import org.apache.doris.nereids.trees.expressions.Add;
 import org.apache.doris.nereids.trees.expressions.BinaryArithmetic;
 import org.apache.doris.nereids.trees.expressions.BinaryOperator;
 import org.apache.doris.nereids.trees.expressions.BitAnd;
+import org.apache.doris.nereids.trees.expressions.BitNot;
 import org.apache.doris.nereids.trees.expressions.BitOr;
 import org.apache.doris.nereids.trees.expressions.BitXor;
 import org.apache.doris.nereids.trees.expressions.CaseWhen;
 import org.apache.doris.nereids.trees.expressions.Cast;
 import org.apache.doris.nereids.trees.expressions.ComparisonPredicate;
-import org.apache.doris.nereids.trees.expressions.CompoundPredicate;
 import org.apache.doris.nereids.trees.expressions.Divide;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.InPredicate;
@@ -450,7 +450,7 @@ public class TypeCoercionUtils {
     public static Expression castIfNotSameType(Expression input, DataType targetType) {
         if (input.isNullLiteral()) {
             return new NullLiteral(targetType);
-        } else if (input.getDataType().equals(targetType) || isSubqueryAndDataTypeIsBitmap(input)
+        } else if (input.getDataType().equals(targetType)
                 || (input.getDataType().isStringLikeType()) && targetType.isStringLikeType()) {
             return input;
         } else {
@@ -473,16 +473,12 @@ public class TypeCoercionUtils {
     public static Expression castIfNotSameTypeStrict(Expression input, DataType targetType) {
         if (input.isNullLiteral()) {
             return new NullLiteral(targetType);
-        } else if (input.getDataType().equals(targetType) || isSubqueryAndDataTypeIsBitmap(input)) {
+        } else if (input.getDataType().equals(targetType)) {
             return input;
         } else {
             checkCanCastTo(input.getDataType(), targetType);
             return unSafeCast(input, targetType);
         }
-    }
-
-    private static boolean isSubqueryAndDataTypeIsBitmap(Expression input) {
-        return input instanceof SubqueryExpr && input.getDataType().isBitmapType();
     }
 
     private static boolean canCastTo(DataType input, DataType target) {
@@ -622,7 +618,7 @@ public class TypeCoercionUtils {
             } else if (dataType.isDateTimeType() && DateTimeChecker.isValidDateTime(value)) {
                 ret = DateTimeLiteral.parseDateTimeLiteral(value, false).orElse(null);
             } else if (dataType.isDateV2Type() && DateTimeChecker.isValidDateTime(value)) {
-                Result<DateLiteral, AnalysisException> parseResult = DateV2Literal.parseDateLiteral(value);
+                Result<DateLiteral, AnalysisException> parseResult = DateV2Literal.parseDateLiteral(value, true);
                 if (parseResult.isOk()) {
                     ret = parseResult.get();
                 } else {
@@ -633,7 +629,7 @@ public class TypeCoercionUtils {
                     }
                 }
             } else if (dataType.isDateType() && DateTimeChecker.isValidDateTime(value)) {
-                ret = DateLiteral.parseDateLiteral(value).orElse(null);
+                ret = DateLiteral.parseDateLiteral(value, false).orElse(null);
             }
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {
@@ -804,6 +800,21 @@ public class TypeCoercionUtils {
 
     private static Expression castChildren(Expression parent, Expression left, Expression right, DataType commonType) {
         return parent.withChildren(castIfNotSameType(left, commonType), castIfNotSameType(right, commonType));
+    }
+
+    /**
+     * process BitNot type coercion, cast child to bigint.
+     */
+    public static Expression processBitNot(BitNot bitNot) {
+        Expression child = bitNot.child();
+        if (!(child.getDataType().isIntegralType() || child.getDataType().isBooleanType())) {
+            child = new Cast(child, BigIntType.INSTANCE);
+        }
+        if (child != bitNot.child()) {
+            return bitNot.withChildren(child);
+        } else {
+            return bitNot;
+        }
     }
 
     /**
@@ -1211,28 +1222,6 @@ public class TypeCoercionUtils {
                     return caseWhen.withChildren(newChildren);
                 })
                 .orElseThrow(() -> new AnalysisException("Cannot find common type for case when " + caseWhen));
-    }
-
-    /**
-     * process compound predicate type coercion.
-     */
-    public static Expression processCompoundPredicate(CompoundPredicate compoundPredicate) {
-        // check
-        compoundPredicate.checkLegalityBeforeTypeCoercion();
-        ImmutableList.Builder<Expression> newChildren
-                = ImmutableList.builderWithExpectedSize(compoundPredicate.arity());
-        boolean changed = false;
-        for (Expression child : compoundPredicate.children()) {
-            Expression newChild;
-            if (child.getDataType().isNullType()) {
-                newChild = new NullLiteral(BooleanType.INSTANCE);
-            } else {
-                newChild = castIfNotSameType(child, BooleanType.INSTANCE);
-            }
-            changed |= child != newChild;
-            newChildren.add(newChild);
-        }
-        return changed ? compoundPredicate.withChildren(newChildren.build()) : compoundPredicate;
     }
 
     private static boolean canCompareDate(DataType t1, DataType t2) {

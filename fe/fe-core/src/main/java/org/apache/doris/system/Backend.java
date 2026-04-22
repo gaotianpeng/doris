@@ -26,6 +26,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.persist.gson.GsonUtils;
@@ -37,6 +38,7 @@ import org.apache.doris.thrift.TNetworkAddress;
 import org.apache.doris.thrift.TStorageMedium;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -51,6 +53,7 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -106,6 +109,8 @@ public class Backend implements Writable {
 
     private Long lastPublishTaskAccumulatedNum = 0L;
 
+    private Long runningTasks = 0L;
+
     private String heartbeatErrMsg = "";
 
     // This is used for the first time we init pathHashToDishInfo in SystemInfoService.
@@ -153,10 +158,6 @@ public class Backend implements Writable {
     // And once it back to alive, reset this counter.
     // No need to persist, because only master FE handle heartbeat.
     private int heartbeatFailureCounter = 0;
-
-    // Not need serialize this field. If fe restart the state is reset to false. Maybe fe will
-    // send some queries to this BE, it is not an important problem.
-    private AtomicBoolean isShutDown = new AtomicBoolean(false);
 
     private long nextForceEditlogHeartbeatTime = System.currentTimeMillis() + (new SecureRandom()).nextInt(60 * 1000);
 
@@ -222,12 +223,23 @@ public class Backend implements Writable {
         return tagMap.getOrDefault(Tag.CLOUD_UNIQUE_ID, "");
     }
 
-    public String getCloudPublicEndpoint() {
-        return tagMap.getOrDefault(Tag.CLOUD_CLUSTER_PUBLIC_ENDPOINT, "");
+    // This modification changes
+    // CLOUD_CLUSTER_PUBLIC_ENDPOINT/CLOUD_CLUSTER_PRIVATE_ENDPOINT to
+    // PUBLIC_ENDPOINT/PRIVATE_ENDPOINT, but backend information
+    // has been persisted in the edit log. For upgrade compatibility, the tag may
+    // not have public_endpoint/private_endpoint
+    // during initial upgrade, so we first try to get
+    // CLOUD_CLUSTER_PUBLIC_ENDPOINT/CLOUD_CLUSTER_PRIVATE_ENDPOINT, and later it
+    // will be
+    // synchronized from meta service to the public_endpoint/private_endpoint tag.
+    // CLOUD_CLUSTER_PUBLIC_ENDPOINT/CLOUD_CLUSTER_PRIVATE_ENDPOINT can be
+    // removed in future versions.
+    public String getPublicEndpoint() {
+        return tagMap.getOrDefault(Tag.PUBLIC_ENDPOINT, tagMap.getOrDefault(Tag.CLOUD_CLUSTER_PUBLIC_ENDPOINT, ""));
     }
 
-    public String getCloudPrivateEndpoint() {
-        return tagMap.getOrDefault(Tag.CLOUD_CLUSTER_PRIVATE_ENDPOINT, "");
+    public String getPrivateEndpoint() {
+        return tagMap.getOrDefault(Tag.PRIVATE_ENDPOINT, tagMap.getOrDefault(Tag.CLOUD_CLUSTER_PRIVATE_ENDPOINT, ""));
     }
 
     public long getId() {
@@ -283,20 +295,38 @@ public class Backend implements Writable {
         this.backendStatus.lastStreamLoadTime = lastStreamLoadTime;
     }
 
+    // ATTN: This method only return the value of "isQueryDisabled",
+    // it does not determine the backend IS queryable or not, use isQueryAvailable instead.
     public boolean isQueryDisabled() {
         return backendStatus.isQueryDisabled;
     }
 
-    public void setQueryDisabled(boolean isQueryDisabled) {
-        this.backendStatus.isQueryDisabled = isQueryDisabled;
+    // return true if be status is changed
+    public boolean setQueryDisabled(boolean isQueryDisabled) {
+        if (this.backendStatus.isQueryDisabled != isQueryDisabled) {
+            this.backendStatus.isQueryDisabled = isQueryDisabled;
+            return true;
+        }
+        return false;
     }
 
+    // ATTN: This method only return the value of "isLoadDisabled",
+    // it does not determine the backend IS loadable or not, use isLoadAvailable instead.
     public boolean isLoadDisabled() {
         return backendStatus.isLoadDisabled;
     }
 
-    public void setLoadDisabled(boolean isLoadDisabled) {
-        this.backendStatus.isLoadDisabled = isLoadDisabled;
+    // return true if be status is changed
+    public boolean setLoadDisabled(boolean isLoadDisabled) {
+        if (this.backendStatus.isLoadDisabled != isLoadDisabled) {
+            this.backendStatus.isLoadDisabled = isLoadDisabled;
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isShutDown() {
+        return backendStatus.isShutdown;
     }
 
     public void setActive(boolean isActive) {
@@ -510,15 +540,21 @@ public class Backend implements Writable {
     }
 
     public boolean isQueryAvailable() {
-        return isAlive() && !isQueryDisabled() && !isShutDown.get();
+        String debugDeadBeIds = DebugPointUtil.getDebugParamOrDefault(
+                "Backend.isQueryAvailable", "unavailableBeIds", "");
+        if (!Strings.isNullOrEmpty(debugDeadBeIds)
+                && Arrays.stream(debugDeadBeIds.split(",")).anyMatch(id -> Long.parseLong(id) == this.id)) {
+            return false;
+        }
+        return isAlive() && !isQueryDisabled() && !isShutDown();
     }
 
     public boolean isScheduleAvailable() {
-        return isAlive() && !isDecommissioned();
+        return isAlive() && !isDecommissioned() && !isShutDown();
     }
 
     public boolean isLoadAvailable() {
-        return isAlive() && !isLoadDisabled();
+        return isAlive() && !isLoadDisabled() && !isShutDown();
     }
 
     public void setDisks(ImmutableMap<String, DiskInfo> disks) {
@@ -858,10 +894,10 @@ public class Backend implements Writable {
                 this.arrowFlightSqlPort = hbResponse.getArrowFlightSqlPort();
             }
 
-            if (this.isShutDown.get() != hbResponse.isShutDown()) {
+            if (this.backendStatus.isShutdown != hbResponse.isShutDown()) {
                 isChanged = true;
                 LOG.info("{} shutdown state is changed", this.toString());
-                this.isShutDown.set(hbResponse.isShutDown());
+                this.backendStatus.isShutdown = hbResponse.isShutDown();
             }
 
             if (!this.getNodeRoleTag().value.equals(hbResponse.getNodeRole()) && Tag.validNodeRoleTag(
@@ -948,6 +984,14 @@ public class Backend implements Writable {
         return disksRef.size();
     }
 
+    public Long getRunningTasks() {
+        return runningTasks;
+    }
+
+    public void setRunningTasks(Long runningTasks) {
+        this.runningTasks = runningTasks;
+    }
+
     /**
      * Note: This class must be a POJO in order to display in JSON format
      * Add additional information in the class to show in `show backends`
@@ -967,6 +1011,8 @@ public class Backend implements Writable {
         public volatile boolean isLoadDisabled = false;
         @SerializedName("isActive")
         public volatile boolean isActive = true;
+        @SerializedName("isShutdown")
+        public volatile boolean isShutdown = false;
 
         // cloud mode, cloud control just query master, so not need SerializedName
         public volatile long currentFragmentNum = 0;
@@ -1028,12 +1074,9 @@ public class Backend implements Writable {
         Map<String, String> displayTagMap = Maps.newHashMap();
         displayTagMap.putAll(tagMap);
 
-        if (displayTagMap.containsKey("cloud_cluster_public_endpoint")) {
-            displayTagMap.put("public_endpoint", displayTagMap.remove("cloud_cluster_public_endpoint"));
-        }
-        if (displayTagMap.containsKey("cloud_cluster_private_endpoint")) {
-            displayTagMap.put("private_endpoint", displayTagMap.remove("cloud_cluster_private_endpoint"));
-        }
+        // Migrate old cloud endpoint tags to new endpoint tags for backward compatibility
+        migrateEndpointTag(displayTagMap, "cloud_cluster_public_endpoint", "public_endpoint");
+        migrateEndpointTag(displayTagMap, "cloud_cluster_private_endpoint", "private_endpoint");
         if (displayTagMap.containsKey("cloud_cluster_status")) {
             displayTagMap.put("compute_group_status", displayTagMap.remove("cloud_cluster_status"));
         }
@@ -1087,4 +1130,22 @@ public class Backend implements Writable {
         return !Collections.disjoint(wgTagSet, beTagSet);
     }
 
+    /**
+     * Migrate endpoint tag from old name to new name for backward compatibility.
+     * If new tag already exists, just remove the old tag.
+     * If new tag doesn't exist, rename old tag to new tag.
+     */
+    private void migrateEndpointTag(Map<String, String> tagMap, String oldTagName, String newTagName) {
+        if (tagMap.containsKey(oldTagName)) {
+            if (tagMap.containsKey(newTagName)) {
+                // New tag exists, just remove the old one
+                tagMap.remove(oldTagName);
+            } else {
+                // New tag doesn't exist, migrate old tag to new tag
+                tagMap.put(newTagName, tagMap.remove(oldTagName));
+            }
+        }
+    }
+
 }
+

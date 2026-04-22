@@ -37,7 +37,6 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.datasource.CatalogIf;
-import org.apache.doris.datasource.CatalogMgr;
 import org.apache.doris.datasource.ExternalCatalog;
 import org.apache.doris.nereids.types.DataType;
 import org.apache.doris.policy.Policy;
@@ -45,6 +44,7 @@ import org.apache.doris.policy.StoragePolicy;
 import org.apache.doris.resource.Tag;
 import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TCompressionType;
+import org.apache.doris.thrift.TEncryptionAlgorithm;
 import org.apache.doris.thrift.TInvertedIndexFileStorageFormat;
 import org.apache.doris.thrift.TSortType;
 import org.apache.doris.thrift.TStorageFormat;
@@ -58,6 +58,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import lombok.val;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -106,6 +107,9 @@ public class PropertyAnalyzer {
 
     public static final String PROPERTIES_STORAGE_PAGE_SIZE = "storage_page_size";
     public static final long STORAGE_PAGE_SIZE_DEFAULT_VALUE = 65536L;
+
+    public static final String PROPERTIES_STORAGE_DICT_PAGE_SIZE = "storage_dict_page_size";
+    public static final long STORAGE_DICT_PAGE_SIZE_DEFAULT_VALUE = 262144L;
 
     public static final String PROPERTIES_ENABLE_LIGHT_SCHEMA_CHANGE = "light_schema_change";
 
@@ -212,6 +216,7 @@ public class PropertyAnalyzer {
     // For the detail design, see the [DISP-018](https://cwiki.apache.org/confluence/
     // display/DORIS/DSIP-018%3A+Support+Merge-On-Write+implementation+for+UNIQUE+KEY+data+model)
     public static final String ENABLE_UNIQUE_KEY_MERGE_ON_WRITE = "enable_unique_key_merge_on_write";
+    public static final String ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN = "enable_unique_key_skip_bitmap_column";
     private static final Logger LOG = LogManager.getLogger(PropertyAnalyzer.class);
     public static final String COMMA_SEPARATOR = ",";
     private static final double MAX_FPP = 0.05;
@@ -243,6 +248,18 @@ public class PropertyAnalyzer {
     public static final long TIME_SERIES_COMPACTION_TIME_THRESHOLD_SECONDS_DEFAULT_VALUE = 3600;
     public static final long TIME_SERIES_COMPACTION_EMPTY_ROWSETS_THRESHOLD_DEFAULT_VALUE = 5;
     public static final long TIME_SERIES_COMPACTION_LEVEL_THRESHOLD_DEFAULT_VALUE = 1;
+
+    public static final String PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT = "variant_max_subcolumns_count";
+    public static final int VARIANT_MAX_SUBCOLUMNS_COUNT_DEFAULT_VALUE = 0;
+
+    public static final String PROPERTIES_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE = "variant_enable_typed_paths_to_sparse";
+    public static final String PROPERTIES_TDE_ALGORITHM = "tde_algorithm";
+    public static final String AES256 = "AES256";
+    public static final String SM4 = "SM4";
+    public static final String PLAINTEXT = "PLAINTEXT";
+
+    public static final String PROPERTIES_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE =
+            "variant_max_sparse_column_statistics_size";
 
     public enum RewriteType {
         PUT,      // always put property
@@ -1039,16 +1056,7 @@ public class PropertyAnalyzer {
         return goalSizeMbytes;
     }
 
-    // analyzeCompressionType will parse the compression type from properties
-    public static TCompressionType analyzeCompressionType(Map<String, String> properties) throws AnalysisException {
-        String compressionType = "";
-        if (properties != null && properties.containsKey(PROPERTIES_COMPRESSION)) {
-            compressionType = properties.get(PROPERTIES_COMPRESSION);
-            properties.remove(PROPERTIES_COMPRESSION);
-        } else {
-            return TCompressionType.LZ4F;
-        }
-
+    public static TCompressionType stringToCompressionType(String compressionType) throws AnalysisException {
         if (compressionType.equalsIgnoreCase("no_compression")) {
             return TCompressionType.NO_COMPRESSION;
         } else if (compressionType.equalsIgnoreCase("lz4")) {
@@ -1063,11 +1071,34 @@ public class PropertyAnalyzer {
             return TCompressionType.ZSTD;
         } else if (compressionType.equalsIgnoreCase("snappy")) {
             return TCompressionType.SNAPPY;
+        } else if (compressionType.equalsIgnoreCase("default_compression")
+                && !Config.default_compression_type.equalsIgnoreCase("default_compression")) {
+            return TCompressionType.valueOf(Config.default_compression_type);
         } else if (compressionType.equalsIgnoreCase("default_compression")) {
             return TCompressionType.LZ4F;
         } else {
             throw new AnalysisException("unknown compression type: " + compressionType);
         }
+    }
+
+    // analyzeCompressionType will parse the compression type from properties
+    public static TCompressionType getCompressionTypeFromProperties(Map<String, String> properties)
+            throws AnalysisException {
+        String compressionType = "";
+        if (properties != null && properties.containsKey(PROPERTIES_COMPRESSION)) {
+            compressionType = properties.get(PROPERTIES_COMPRESSION);
+        } else {
+            return stringToCompressionType(Config.default_compression_type);
+        }
+
+        return stringToCompressionType(compressionType);
+    }
+
+    // analyzeCompressionType will parse the compression type from properties
+    public static TCompressionType analyzeCompressionType(Map<String, String> properties) throws AnalysisException {
+        TCompressionType compressionType = getCompressionTypeFromProperties(properties);
+        properties.remove(PROPERTIES_COMPRESSION);
+        return compressionType;
     }
 
     public static long alignTo4K(long size) {
@@ -1113,6 +1144,24 @@ public class PropertyAnalyzer {
         return storagePageSize;
     }
 
+    public static long analyzeStorageDictPageSize(Map<String, String> properties) throws AnalysisException {
+        long storageDictPageSize = STORAGE_DICT_PAGE_SIZE_DEFAULT_VALUE;
+        if (properties != null && properties.containsKey(PROPERTIES_STORAGE_DICT_PAGE_SIZE)) {
+            String storageDictPageSizeStr = properties.get(PROPERTIES_STORAGE_DICT_PAGE_SIZE);
+            try {
+                storageDictPageSize = Long.parseLong(storageDictPageSizeStr);
+            } catch (NumberFormatException e) {
+                throw new AnalysisException("Invalid storage dict page size: " + storageDictPageSizeStr);
+            }
+            if (storageDictPageSize < 0 || storageDictPageSize > 104857600) {
+                throw new AnalysisException("Storage dict page size must be between 0 and 100MB.");
+            }
+            storageDictPageSize = alignTo4K(storageDictPageSize);
+            properties.remove(PROPERTIES_STORAGE_DICT_PAGE_SIZE);
+        }
+        return storageDictPageSize;
+    }
+
     // analyzeStorageFormat will parse the storage format from properties
     // sql: alter table tablet_name set ("storage_format" = "v2")
     // Use this sql to convert all tablets(base and rollup index) to a new format segment
@@ -1146,6 +1195,8 @@ public class PropertyAnalyzer {
         } else {
             if (Config.inverted_index_storage_format.equalsIgnoreCase("V1")) {
                 return TInvertedIndexFileStorageFormat.V1;
+            } else if (Config.inverted_index_storage_format.equalsIgnoreCase("V3")) {
+                return TInvertedIndexFileStorageFormat.V3;
             } else {
                 return TInvertedIndexFileStorageFormat.V2;
             }
@@ -1155,9 +1206,13 @@ public class PropertyAnalyzer {
             return TInvertedIndexFileStorageFormat.V1;
         } else if (invertedIndexFileStorageFormat.equalsIgnoreCase("v2")) {
             return TInvertedIndexFileStorageFormat.V2;
+        } else if (invertedIndexFileStorageFormat.equalsIgnoreCase("v3")) {
+            return TInvertedIndexFileStorageFormat.V3;
         } else if (invertedIndexFileStorageFormat.equalsIgnoreCase("default")) {
             if (Config.inverted_index_storage_format.equalsIgnoreCase("V1")) {
                 return TInvertedIndexFileStorageFormat.V1;
+            } else if (Config.inverted_index_storage_format.equalsIgnoreCase("V3")) {
+                return TInvertedIndexFileStorageFormat.V3;
             } else {
                 return TInvertedIndexFileStorageFormat.V2;
             }
@@ -1585,6 +1640,24 @@ public class PropertyAnalyzer {
         throw new AnalysisException(PropertyAnalyzer.ENABLE_UNIQUE_KEY_MERGE_ON_WRITE + " must be `true` or `false`");
     }
 
+    public static boolean analyzeUniqueKeySkipBitmapColumn(Map<String, String> properties) throws AnalysisException {
+        if (properties == null || properties.isEmpty()) {
+            return false;
+        }
+        String value = properties.get(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN);
+        if (value == null) {
+            return false;
+        }
+        properties.remove(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN);
+        if (value.equals("true")) {
+            return true;
+        } else if (value.equals("false")) {
+            return false;
+        }
+        throw new AnalysisException(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN
+                + " must be `true` or `false`");
+    }
+
     public static boolean analyzeEnableDeleteOnDeletePredicate(Map<String, String> properties,
             boolean enableUniqueKeyMergeOnWrite)
             throws AnalysisException {
@@ -1670,16 +1743,6 @@ public class PropertyAnalyzer {
         // "access_controller.properties.prop2" = "yyy",
         // )
         // 1. get access controller class
-        String acClass = properties.getOrDefault(CatalogMgr.ACCESS_CONTROLLER_CLASS_PROP, "");
-        if (!Strings.isNullOrEmpty(acClass)) {
-            // 2. check if class exists
-            try {
-                Class.forName(acClass);
-            } catch (ClassNotFoundException e) {
-                throw new AnalysisException("failed to find class " + acClass, e);
-            }
-        }
-
         if (isAlter) {
             // The 'use_meta_cache' property can not be modified
             if (properties.containsKey(ExternalCatalog.USE_META_CACHE)) {
@@ -1786,5 +1849,96 @@ public class PropertyAnalyzer {
             properties.put(PropertyAnalyzer.ENABLE_UNIQUE_KEY_MERGE_ON_WRITE, "true");
         }
         return properties;
+    }
+
+    public static Map<String, String> addEnableUniqueKeySkipBitmapPropertyIfNotExists(Map<String, String> properties) {
+        if (properties != null && !properties.containsKey(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN)) {
+            properties.put(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN,
+                    Boolean.toString(Config.enable_skip_bitmap_column_by_default));
+        }
+        return properties;
+    }
+
+    public static int analyzeVariantMaxSubcolumnsCount(Map<String, String> properties, int defuatValue)
+                                                                                throws AnalysisException {
+        int maxSubcoumnsCount = defuatValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT)) {
+            String maxSubcoumnsCountStr = properties.get(PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT);
+            try {
+                maxSubcoumnsCount = Integer.parseInt(maxSubcoumnsCountStr);
+                if (maxSubcoumnsCount < 0 || maxSubcoumnsCount > 100000) {
+                    throw new AnalysisException("varaint max counts count must between 10 and 100000 ");
+                }
+            } catch (Exception e) {
+                throw new AnalysisException("varaint max counts count format error");
+            }
+
+            properties.remove(PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT);
+        }
+        return maxSubcoumnsCount;
+    }
+
+    public static boolean analyzeEnableTypedPathsToSparse(Map<String, String> properties,
+                        boolean defaultValue) throws AnalysisException {
+        boolean enableTypedPathsToSparse = defaultValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE)) {
+            String enableTypedPathsToSparseStr = properties.get(PROPERTIES_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE);
+            try {
+                enableTypedPathsToSparse = Boolean.parseBoolean(enableTypedPathsToSparseStr);
+            } catch (Exception e) {
+                throw new AnalysisException("variant_enable_typed_paths_to_sparse must be `true` or `false`");
+            }
+            properties.remove(PROPERTIES_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE);
+        }
+        return enableTypedPathsToSparse;
+    }
+
+    public static int analyzeVariantMaxSparseColumnStatisticsSize(Map<String, String> properties, int defuatValue)
+                                                                                throws AnalysisException {
+        int maxSparseColumnStatisticsSize = defuatValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE)) {
+            String maxSparseColumnStatisticsSizeStr =
+                    properties.get(PROPERTIES_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE);
+            try {
+                maxSparseColumnStatisticsSize = Integer.parseInt(maxSparseColumnStatisticsSizeStr);
+                if (maxSparseColumnStatisticsSize < 0 || maxSparseColumnStatisticsSize > 50000) {
+                    throw new AnalysisException("variant_max_sparse_column_statistics_size must between 0 and 50000 ");
+                }
+            } catch (Exception e) {
+                throw new AnalysisException("variant_max_sparse_column_statistics_size format error:" + e.getMessage());
+            }
+
+            properties.remove(PROPERTIES_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE);
+        }
+        return maxSparseColumnStatisticsSize;
+    }
+
+    public static TEncryptionAlgorithm analyzeTDEAlgorithm(Map<String, String> properties) throws AnalysisException {
+        String name;
+        //if (properties == null || !properties.containsKey(PROPERTIES_TDE_ALGORITHM)) {
+        //    name = Config.doris_tde_algorithm;
+        //} else if (!PLAINTEXT.equals(Config.doris_tde_algorithm)) {
+        //    throw new AnalysisException("Cannot create a table on encrypted FE,"
+        //            + " please set Config.doris_tde_algorithm to PLAINTEXT");
+        //} else {
+        //    name = properties.remove(PROPERTIES_TDE_ALGORITHM);
+        //}
+        //
+        if (properties == null || !properties.containsKey(PROPERTIES_TDE_ALGORITHM)) {
+            name = Config.doris_tde_algorithm;
+        } else {
+            throw new AnalysisException("Do not support tde_algorithm property currently");
+        }
+
+        if (AES256.equalsIgnoreCase(name)) {
+            return TEncryptionAlgorithm.AES256;
+        }
+        if (SM4.equalsIgnoreCase(name)) {
+            return TEncryptionAlgorithm.SM4;
+        }
+        if (PLAINTEXT.equalsIgnoreCase(name)) {
+            return TEncryptionAlgorithm.PLAINTEXT;
+        }
+        throw new AnalysisException("Invalid tde algorithm: " + name + ", only support AES256 and SM4 currently");
     }
 }

@@ -52,6 +52,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -110,17 +111,14 @@ public class ExportMgr {
         } finally {
             writeUnlock();
         }
-        // delete existing files
-        if (Config.enable_delete_existing_files && Boolean.parseBoolean(job.getDeleteExistingFiles())) {
-            if (job.getBrokerDesc() == null) {
-                throw new AnalysisException("Local file system does not support delete existing files");
-            }
-            String fullPath = job.getExportPath();
-            BrokerUtil.deleteDirectoryWithFileSystem(fullPath.substring(0, fullPath.lastIndexOf('/') + 1),
-                    job.getBrokerDesc());
-        }
-        // ATTN: Must add task after edit log, otherwise the job may finish before adding job.
         try {
+            // delete existing files
+            if (Boolean.parseBoolean(job.getDeleteExistingFiles())) {
+                String fullPath = job.getExportPath();
+                BrokerUtil.deleteDirectoryWithFileSystem(fullPath.substring(0, fullPath.lastIndexOf('/') + 1),
+                        job.getBrokerDesc());
+            }
+            // ATTN: Must add task after edit log, otherwise the job may finish before adding job.
             for (int i = 0; i < job.getCopiedTaskExecutors().size(); i++) {
                 Env.getCurrentEnv().getTransientTaskManager().addMemoryTask(job.getCopiedTaskExecutors().get(i));
             }
@@ -462,6 +460,23 @@ public class ExportMgr {
                     }
                 }
             }
+
+            if (exportIdToJob.size() > Config.max_export_history_job_num) {
+                List<Map.Entry<Long, ExportJob>> jobList = new ArrayList<>(exportIdToJob.entrySet());
+                jobList.sort(Comparator.comparingLong(entry -> entry.getValue().getCreateTimeMs()));
+                while (exportIdToJob.size() > Config.max_export_history_job_num) {
+                    // Remove the oldest job
+                    Map.Entry<Long, ExportJob> oldestEntry = jobList.remove(0);
+                    exportIdToJob.remove(oldestEntry.getKey());
+                    Map<String, Long> labelJobs = dbTolabelToExportJobId.get(oldestEntry.getValue().getDbId());
+                    if (labelJobs != null) {
+                        labelJobs.remove(oldestEntry.getValue().getLabel());
+                        if (labelJobs.isEmpty()) {
+                            dbTolabelToExportJobId.remove(oldestEntry.getValue().getDbId());
+                        }
+                    }
+                }
+            }
         } finally {
             writeUnlock();
         }
@@ -528,3 +543,4 @@ public class ExportMgr {
         return size;
     }
 }
+

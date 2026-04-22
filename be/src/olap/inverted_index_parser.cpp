@@ -17,7 +17,6 @@
 
 #include "olap/inverted_index_parser.h"
 
-#include "olap/rowset/segment_v2/inverted_index/char_filter/char_filter_factory.h"
 #include "util/string_util.h"
 
 namespace doris {
@@ -34,6 +33,12 @@ std::string inverted_index_parser_type_to_string(InvertedIndexParserType parser_
         return INVERTED_INDEX_PARSER_ENGLISH;
     case InvertedIndexParserType::PARSER_CHINESE:
         return INVERTED_INDEX_PARSER_CHINESE;
+    case InvertedIndexParserType::PARSER_ICU:
+        return INVERTED_INDEX_PARSER_ICU;
+    case InvertedIndexParserType::PARSER_BASIC:
+        return INVERTED_INDEX_PARSER_BASIC;
+    case InvertedIndexParserType::PARSER_IK:
+        return INVERTED_INDEX_PARSER_IK;
     default:
         return INVERTED_INDEX_PARSER_UNKNOWN;
     }
@@ -51,6 +56,12 @@ InvertedIndexParserType get_inverted_index_parser_type_from_string(const std::st
         return InvertedIndexParserType::PARSER_ENGLISH;
     } else if (parser_str_lower == INVERTED_INDEX_PARSER_CHINESE) {
         return InvertedIndexParserType::PARSER_CHINESE;
+    } else if (parser_str_lower == INVERTED_INDEX_PARSER_ICU) {
+        return InvertedIndexParserType::PARSER_ICU;
+    } else if (parser_str_lower == INVERTED_INDEX_PARSER_BASIC) {
+        return InvertedIndexParserType::PARSER_BASIC;
+    } else if (parser_str_lower == INVERTED_INDEX_PARSER_IK) {
+        return InvertedIndexParserType::PARSER_IK;
     }
 
     return InvertedIndexParserType::PARSER_UNKNOWN;
@@ -58,11 +69,15 @@ InvertedIndexParserType get_inverted_index_parser_type_from_string(const std::st
 
 std::string get_parser_string_from_properties(
         const std::map<std::string, std::string>& properties) {
-    if (properties.find(INVERTED_INDEX_PARSER_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_PARSER_KEY);
-    } else {
-        return INVERTED_INDEX_PARSER_NONE;
+    auto it = properties.find(INVERTED_INDEX_PARSER_KEY);
+    if (it != properties.end()) {
+        return it->second;
     }
+    it = properties.find(INVERTED_INDEX_PARSER_KEY_ALIAS);
+    if (it != properties.end()) {
+        return it->second;
+    }
+    return INVERTED_INDEX_PARSER_NONE;
 }
 
 std::string get_parser_mode_string_from_properties(
@@ -70,6 +85,13 @@ std::string get_parser_mode_string_from_properties(
     if (properties.find(INVERTED_INDEX_PARSER_MODE_KEY) != properties.end()) {
         return properties.at(INVERTED_INDEX_PARSER_MODE_KEY);
     } else {
+        auto parser_it = properties.find(INVERTED_INDEX_PARSER_KEY);
+        if (parser_it == properties.end()) {
+            parser_it = properties.find(INVERTED_INDEX_PARSER_KEY_ALIAS);
+        }
+        if (parser_it != properties.end() && parser_it->second == INVERTED_INDEX_PARSER_IK) {
+            return INVERTED_INDEX_PARSER_SMART;
+        }
         return INVERTED_INDEX_PARSER_COARSE_GRANULARITY;
     }
 }
@@ -131,6 +153,24 @@ std::string get_parser_stopwords_from_properties(
     DBUG_EXECUTE_IF("inverted_index_parser.get_parser_stopwords_from_properties", { return ""; })
     if (properties.find(INVERTED_INDEX_PARSER_STOPWORDS_KEY) != properties.end()) {
         return properties.at(INVERTED_INDEX_PARSER_STOPWORDS_KEY);
+    } else {
+        return "";
+    }
+}
+
+std::string get_parser_dict_compression_from_properties(
+        const std::map<std::string, std::string>& properties) {
+    if (properties.find(INVERTED_INDEX_PARSER_DICT_COMPRESSION_KEY) != properties.end()) {
+        return properties.at(INVERTED_INDEX_PARSER_DICT_COMPRESSION_KEY);
+    } else {
+        return "";
+    }
+}
+
+std::string get_custom_analyzer_string_from_properties(
+        const std::map<std::string, std::string>& properties) {
+    if (properties.find(INVERTED_INDEX_CUSTOM_ANALYZER_KEY) != properties.end()) {
+        return properties.at(INVERTED_INDEX_CUSTOM_ANALYZER_KEY);
     } else {
         return "";
     }

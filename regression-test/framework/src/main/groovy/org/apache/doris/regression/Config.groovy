@@ -70,6 +70,7 @@ class Config {
     public String cloudUniqueId
     public String metaServiceHttpAddress
     public String recycleServiceHttpAddress
+    public String recycleBeforeTest
 
     public RunMode runMode = RunMode.UNKNOWN
 
@@ -125,6 +126,7 @@ class Config {
     public boolean withOutLoadData
     public boolean runNonConcurrent
     public String caseNamePrefix
+    public String validateBackupPrefix
     public boolean isSmokeTest
     public String multiClusterBes
     public String metaServiceToken
@@ -167,11 +169,20 @@ class Config {
     public String regressionAwsBucket
     public String regressionAwsPrefix
 
+    public String tdeAk
+    public String tdeSk
+    public String tdeKeyEndpoint
+    public String tdeKeyRegion
+    public String tdeKeyProvider
+    public String tdeAlgorithm
+    public String tdeKeyId
+
     Config() {}
 
     Config(
             String s3Source,
             String caseNamePrefix,
+            String validateBackupPrefix,
             String defaultDb, 
             String jdbcUrl, 
             String jdbcUser,
@@ -191,6 +202,7 @@ class Config {
             String cloudUniqueId,
             String metaServiceHttpAddress,
             String recycleServiceHttpAddress,
+            String recycleBeforeTest,
             String suitePath,
             String dataPath,
             String realDataPath,
@@ -223,9 +235,17 @@ class Config {
             String stageIamUserId,
             String clusterDir, 
             String kafkaBrokerList, 
-            String cloudVersion) {
+            String cloudVersion,
+            String tdeAk,
+            String tdeSk,
+            String tdeKeyEndpoint,
+            String tdeKeyRegion,
+            String tdeKeyProvider,
+            String tdeAlgorithm,
+            String tdeKeyId) {
         this.s3Source = s3Source
         this.caseNamePrefix = caseNamePrefix
+        this.validateBackupPrefix = validateBackupPrefix
         this.defaultDb = defaultDb
         this.jdbcUrl = jdbcUrl
         this.jdbcUser = jdbcUser
@@ -245,6 +265,7 @@ class Config {
         this.cloudUniqueId = cloudUniqueId
         this.metaServiceHttpAddress = metaServiceHttpAddress
         this.recycleServiceHttpAddress = recycleServiceHttpAddress
+        this.recycleBeforeTest = recycleBeforeTest
         this.suitePath = suitePath
         this.dataPath = dataPath
         this.realDataPath = realDataPath
@@ -278,6 +299,13 @@ class Config {
         this.clusterDir = clusterDir
         this.kafkaBrokerList = kafkaBrokerList
         this.cloudVersion = cloudVersion
+        this.tdeAk = tdeAk
+        this.tdeSk = tdeSk
+        this.tdeKeyEndpoint = tdeKeyEndpoint
+        this.tdeKeyRegion = tdeKeyRegion
+        this.tdeKeyProvider = tdeKeyProvider
+        this.tdeAlgorithm = tdeAlgorithm
+        this.tdeKeyId = tdeKeyId
     }
 
     static String removeDirectoryPrefix(String str) {
@@ -479,6 +507,21 @@ class Config {
         config.cloudVersion = cmd.getOptionValue(cloudVersionOpt, config.cloudVersion)
         log.info("cloudVersion is ${config.cloudVersion}".toString())
 
+        config.tdeAk = cmd.getOptionValue(tdeAkOpt, config.tdeAk)
+        log.info("tdeAk is ${config.tdeAk}".toString())
+        config.tdeSk = cmd.getOptionValue(tdeSkOpt, config.tdeSk)
+        log.info("tdeSk is ${config.tdeSk}".toString())
+        config.tdeKeyEndpoint = cmd.getOptionValue(tdeKeyEndpointOpt, config.tdeKeyEndpoint)
+        log.info("tdeKeyEndpoint is ${config.tdeKeyEndpoint}".toString())
+        config.tdeKeyRegion = cmd.getOptionValue(tdeKeyRegionOpt, config.tdeKeyRegion)
+        log.info("tdeKeyRegion is ${config.tdeKeyRegion}".toString())
+        config.tdeKeyProvider = cmd.getOptionValue(tdeKeyProviderOpt, config.tdeKeyProvider)
+        log.info("tdeKeyProvider is ${config.tdeKeyProvider}".toString())
+        config.tdeAlgorithm = cmd.getOptionValue(tdeAlgorithmOpt, config.tdeAlgorithm)
+        log.info("tdeAlgorithm is ${config.tdeAlgorithm}".toString())
+        config.tdeKeyId = cmd.getOptionValue(tdeKeyIdOpt, config.tdeKeyId)
+        log.info("tdeKeyId is ${config.tdeKeyId}".toString())
+
         config.kafkaBrokerList = cmd.getOptionValue(kafkaBrokerListOpt, config.kafkaBrokerList)
 
         config.recycleServiceHttpAddress = cmd.getOptionValue(recycleServiceHttpAddressOpt, config.recycleServiceHttpAddress)
@@ -513,6 +556,7 @@ class Config {
         config.withOutLoadData = cmd.hasOption(withOutLoadDataOpt)
         config.runNonConcurrent = Boolean.parseBoolean(cmd.getOptionValue(runNonConcurrentOpt, "True"))
         config.caseNamePrefix = cmd.getOptionValue(caseNamePrefixOpt, config.caseNamePrefix)
+        config.validateBackupPrefix = cmd.getOptionValue(validateBackupPrefixOpt, config.validateBackupPrefix)
         config.dryRun = cmd.hasOption(dryRunOpt)
         config.isSmokeTest = cmd.hasOption(isSmokeTestOpt)
 
@@ -521,6 +565,7 @@ class Config {
         log.info("withOutLoadData is ${config.withOutLoadData}".toString())
         log.info("runNonConcurrent is ${config.runNonConcurrent}".toString())
         log.info("caseNamePrefix is ${config.caseNamePrefix}".toString())
+        log.info("validateBackupPrefix is ${config.validateBackupPrefix}".toString())
         log.info("dryRun is ${config.dryRun}".toString())
         def s3SourceList = ["aliyun", "aliyun-internal", "tencent", "huawei", "azure", "gcp"]
         if (s3SourceList.contains(config.s3Source)) {
@@ -553,6 +598,7 @@ class Config {
         def config = new Config(
             configToString(obj.s3Source),
             configToString(obj.caseNamePrefix),
+            configToString(obj.validateBackupPrefix),
             configToString(obj.defaultDb),
             configToString(obj.jdbcUrl),
             configToString(obj.jdbcUser),
@@ -572,6 +618,7 @@ class Config {
             configToString(obj.cloudUniqueId),
             configToString(obj.metaServiceHttpAddress),
             configToString(obj.recycleServiceHttpAddress),
+            configToString(obj.recycleBeforeTest),
             configToString(obj.suitePath),
             configToString(obj.dataPath),
             configToString(obj.realDataPath),
@@ -604,7 +651,14 @@ class Config {
             configToString(obj.stageIamUserId),
             configToString(obj.clusterDir),
             configToString(obj.kafkaBrokerList),
-            configToString(obj.cloudVersion)
+            configToString(obj.cloudVersion),
+            configToString(obj.tdeAk),
+            configToString(obj.tdeSk),
+            configToString(obj.tdeKeyEndpoint),
+            configToString(obj.tdeKeyRegion),
+            configToString(obj.tdeKeyProvider),
+            configToString(obj.tdeAlgorithm),
+            configToString(obj.tdeKeyId)
         )
 
         config.ccrDownstreamUrl = configToString(obj.ccrDownstreamUrl)
@@ -763,6 +817,11 @@ class Config {
             log.info("set caseNamePrefix to '' because not specify.".toString())
         }
 
+        if (config.validateBackupPrefix == null) {
+            config.validateBackupPrefix = "doris_validate_backup"
+            log.info("set validateBackupPrefix to 'doris_validate_backup' because not specify.".toString())
+        }
+
         if (config.defaultDb == null) {
             config.defaultDb = "regression_test"
             log.info("Set defaultDb to '${config.defaultDb}' because not specify.".toString())
@@ -817,6 +876,11 @@ class Config {
         if (config.recycleServiceHttpAddress == null) {
             config.recycleServiceHttpAddress = "127.0.0.1:5001"
             log.info("Set recycleServiceHttpAddress to '${config.recycleServiceHttpAddress}' because not specify.".toString())
+        }
+
+        if (config.recycleBeforeTest == null) {
+            config.recycleBeforeTest = "false"
+            log.info("Set recycleBeforeTest to '${config.recycleBeforeTest}' because not specify.".toString())
         }
 
         if (config.feSyncerUser == null) {
@@ -989,7 +1053,24 @@ class Config {
     }
 
     void createDefaultDb() {
+        boolean enableTLS = (otherConfigs.get("enableTLS")?.toString()?.equalsIgnoreCase("true")) ?: false
+
+        def buildUrl = { String db ->
+            enableTLS ?
+                    buildUrlWithDb(
+                            jdbcUrl, db,
+                            otherConfigs.get("keyStorePath").toString(),
+                            otherConfigs.get("keyStorePassword").toString(),
+                            otherConfigs.get("trustStorePath").toString(),
+                            otherConfigs.get("trustStorePassword").toString()
+                    )
+                    : buildUrlWithDb(jdbcUrl, db)
+        }
+
+        // init URL without dbName
         String dbName = null
+        jdbcUrl = buildUrl(dbName)
+
         try {
             tryCreateDbIfNotExist(defaultDb)
             dbName = defaultDb
@@ -999,11 +1080,13 @@ class Config {
             // Infact, only mainly auth_xxx cases use defaultDb, and they just use jdbcUrl in connect function.
             // And they can avoid using defaultDb too. But modify all these cases take a lot work.
             // We better delete all the usage of defaultDb in suites later, and all suites should use their own db, not the defaultDb.
-            log.warn("create default db failed ${defaultDb}".toString())
+            log.warn("create default db failed ${defaultDb}")
         }
 
-        jdbcUrl = buildUrlWithDb(jdbcUrl, dbName)
-        log.info("Reset jdbcUrl to ${jdbcUrl}".toString())
+        //  final URL with dbName
+        jdbcUrl = buildUrl(dbName)
+
+        log.info("Reset jdbcUrl to ${jdbcUrl}")
     }
 
     void tryCreateDbIfNotExist(String dbName) {
@@ -1058,6 +1141,18 @@ class Config {
 
     Connection getRootConnection() {
         return DriverManager.getConnection(jdbcUrl, 'root', '')
+    }
+
+    Connection getConnectionByDbName(String dbName) {
+        String dbUrl = getConnectionUrlByDbName(dbName)
+        tryCreateDbIfNotExist(dbName)
+        log.info("connect to ${dbUrl}".toString())
+        return DriverManager.getConnection(dbUrl, jdbcUser, jdbcPassword)
+    }
+
+    String getConnectionUrlByDbName(String dbName) {
+        def connection = buildUrlWithDb(jdbcUrl, dbName)
+        return connection
     }
 
     Connection getConnectionByArrowFlightSqlDbName(String dbName) {
@@ -1173,6 +1268,13 @@ class Config {
         return urlWithDb
     }
 
+    public static String buildUrlWithDb (String jdbcUrl, String dbName, String keyStorePath, String keyStorePassword, String trustStorePath, String trustStorePassword) {
+        String urlWithDb = buildUrlWithDbImpl(jdbcUrl, dbName);
+        urlWithDb = addTlsUrl(urlWithDb, keyStorePath, keyStorePassword, trustStorePath, trustStorePassword);
+        urlWithDb = addTimeoutUrl(urlWithDb);
+        return urlWithDb
+    }
+
     public static String buildUrlWithDb(String host, int queryPort, String dbName) {
         def url = String.format(
             "jdbc:mysql://%s:%s/?useLocalSessionState=true&allowLoadLocalInfile=false",
@@ -1200,6 +1302,28 @@ class Config {
             // e.g: jdbc:mysql://locahost:8080/dbname
         } else {
             return url + '?' + sslUrl
+        }
+    }
+
+    private static String addTlsUrl(String url, String keyStorePath, String keyStorePassword, String trustStorePath, String trustStorePassword) {
+        // ssl-mode = PREFERRED
+        String useSsl = "true"
+        String requireSsl = "true"
+        String useSslconfig = "useSSL=" + useSsl + "&requireSSL=" + requireSsl + "&verifyServerCertificate=true"
+        String clientCAKey = "clientCertificateKeyStoreUrl=file:" + keyStorePath
+        String clientCAPwd = "clientCertificateKeyStorePassword=" + keyStorePassword
+        String trustCAKey = "trustCertificateKeyStoreUrl=file:" + trustStorePath
+        String trustCAPwd = "trustCertificateKeyStorePassword=" + trustStorePassword
+        String tlsUrl = useSslconfig + "&" + clientCAKey + "&" + clientCAPwd + "&" +  trustCAKey + "&" + trustCAPwd
+        // e.g: jdbc:mysql://locahost:8080/dbname?
+        if (url.charAt(url.length() - 1) == '?') {
+            return url + tlsUrl
+            // e.g: jdbc:mysql://locahost:8080/dbname?a=b
+        } else if (url.contains('?')) {
+            return url + '&' + tlsUrl
+            // e.g: jdbc:mysql://locahost:8080/dbname
+        } else {
+            return url + '?' + tlsUrl
         }
     }
 

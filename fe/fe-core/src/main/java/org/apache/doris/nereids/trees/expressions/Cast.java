@@ -18,9 +18,12 @@
 package org.apache.doris.nereids.trees.expressions;
 
 import org.apache.doris.nereids.exceptions.UnboundException;
+import org.apache.doris.nereids.trees.expressions.functions.Monotonic;
+import org.apache.doris.nereids.trees.expressions.literal.Literal;
 import org.apache.doris.nereids.trees.expressions.shape.UnaryExpression;
 import org.apache.doris.nereids.trees.expressions.visitor.ExpressionVisitor;
 import org.apache.doris.nereids.types.DataType;
+import org.apache.doris.nereids.types.coercion.DateLikeType;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -31,23 +34,19 @@ import java.util.Objects;
 /**
  * cast function.
  */
-public class Cast extends Expression implements UnaryExpression {
+public class Cast extends Expression implements UnaryExpression, Monotonic {
 
     // CAST can be from SQL Query or Type Coercion.
     private final boolean isExplicitType;
 
     private final DataType targetType;
 
-    public Cast(Expression child, DataType targetType, boolean isExplicitType) {
-        super(ImmutableList.of(child));
-        this.targetType = Objects.requireNonNull(targetType, "targetType can not be null");
-        this.isExplicitType = isExplicitType;
+    public Cast(Expression child, DataType targetType) {
+        this(child, targetType, false);
     }
 
-    public Cast(Expression child, DataType targetType) {
-        super(ImmutableList.of(child));
-        this.targetType = Objects.requireNonNull(targetType, "targetType can not be null");
-        this.isExplicitType = false;
+    public Cast(Expression child, DataType targetType, boolean isExplicitType) {
+        this(ImmutableList.of(child), targetType, isExplicitType);
     }
 
     private Cast(List<Expression> child, DataType targetType, boolean isExplicitType) {
@@ -105,6 +104,17 @@ public class Cast extends Expression implements UnaryExpression {
     }
 
     @Override
+    public String toDigest() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("cast(")
+                .append(child().toDigest())
+                .append(" as ")
+                .append(targetType)
+                .append(")");
+        return sb.toString();
+    }
+
+    @Override
     public boolean equals(Object o) {
         if (!super.equals(o)) {
             return false;
@@ -116,5 +126,29 @@ public class Cast extends Expression implements UnaryExpression {
     @Override
     public int computeHashCode() {
         return Objects.hash(super.computeHashCode(), targetType);
+    }
+
+    @Override
+    public boolean isPositive() {
+        return true;
+    }
+
+    @Override
+    public int getMonotonicFunctionChildIndex() {
+        return 0;
+    }
+
+    @Override
+    public Expression withConstantArgs(Expression literal) {
+        return new Cast(literal, targetType, isExplicitType);
+    }
+
+    @Override
+    public boolean isMonotonic(Literal lower, Literal upper) {
+        // Both upward and downward casting of date types satisfy monotonicity.
+        if (child().getDataType() instanceof DateLikeType && targetType instanceof DateLikeType) {
+            return true;
+        }
+        return false;
     }
 }

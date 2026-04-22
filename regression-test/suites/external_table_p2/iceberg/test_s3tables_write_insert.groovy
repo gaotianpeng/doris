@@ -16,14 +16,19 @@
 // under the License.
 
 suite("test_s3tables_write_insert", "p2,external,iceberg,external_remote,external_remote_iceberg") {
+    // disable this test by default, glue + s3table is recommended
+    def run_test = false;
+    if (!run_test) {
+        return;
+    }
     def format_compressions = ["parquet_zstd", "orc_zlib"]
 
     def q01 = { String format_compression, String catalog_name ->
         def parts = format_compression.split("_")
         def format = parts[0]
         def compression = parts[1]
-        def all_types_table = "iceberg_all_types_${format_compression}_branch30"
-        def all_types_partition_table = "iceberg_all_types_par_${format_compression}_branch30"
+        def all_types_table = "iceberg_all_types_${format_compression}_branch31"
+        def all_types_partition_table = "iceberg_all_types_par_${format_compression}_branch31"
         sql """ DROP TABLE IF EXISTS `${all_types_table}`; """
         sql """
         CREATE TABLE `${all_types_table}`(
@@ -322,8 +327,8 @@ suite("test_s3tables_write_insert", "p2,external,iceberg,external_remote,externa
         def parts = format_compression.split("_")
         def format = parts[0]
         def compression = parts[1]
-        def all_types_table = "iceberg_all_types_${format_compression}_branch30"
-        def all_types_partition_table = "iceberg_all_types_par_${format_compression}_branch30"
+        def all_types_table = "iceberg_all_types_${format_compression}_branch31"
+        def all_types_partition_table = "iceberg_all_types_par_${format_compression}_branch31"
         sql """ DROP TABLE IF EXISTS `${all_types_partition_table}`; """
         sql """
         CREATE TABLE `${all_types_partition_table}`(
@@ -615,6 +620,23 @@ suite("test_s3tables_write_insert", "p2,external,iceberg,external_remote,externa
         );
         """
         order_qt_q03 """ select * from ${all_types_partition_table};
+        """
+
+        // just test
+        sql """
+            SELECT
+              CASE
+                WHEN file_size_in_bytes BETWEEN 0 AND 8 * 1024 * 1024 THEN '0-8M'
+                WHEN file_size_in_bytes BETWEEN 8 * 1024 * 1024 + 1 AND 32 * 1024 * 1024 THEN '8-32M'
+                WHEN file_size_in_bytes BETWEEN 2 * 1024 * 1024 + 1 AND 128 * 1024 * 1024 THEN '32-128M'
+                WHEN file_size_in_bytes BETWEEN 128 * 1024 * 1024 + 1 AND 512 * 1024 * 1024 THEN '128-512M'
+                WHEN file_size_in_bytes > 512 * 1024 * 1024 THEN '> 512M'
+                ELSE 'Unknown'
+              END AS SizeRange,
+              COUNT(*) AS FileNum
+            FROM ${all_types_partition_table}\$data_files
+            GROUP BY
+              SizeRange;
         """
 
         sql """ DROP TABLE ${all_types_partition_table}; """

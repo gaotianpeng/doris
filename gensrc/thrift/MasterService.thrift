@@ -120,6 +120,9 @@ struct TReportRequest {
     13: optional map<Types.TPartitionId, Types.TVersion> partitions_version
     // tablet num in be, in cloud num_tablets may not eq tablet_list.size()
     14: optional i64 num_tablets
+    15: optional list<AgentService.TIndexPolicy> index_policy
+    // Running query/loading tasks
+    16: optional i64 running_tasks
 }
 
 struct TMasterResult {

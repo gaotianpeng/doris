@@ -105,6 +105,9 @@ protected:
     int64_t _local_read_bytes_total {};
     int64_t _remote_read_bytes_total {};
 
+    int64_t _input_rowsets_cached_data_size {0};
+    int64_t _input_rowsets_cached_index_size {0};
+
     Merger::Statistics _stats;
 
     RowsetSharedPtr _output_rowset;
@@ -166,7 +169,7 @@ protected:
 private:
     Status execute_compact_impl(int64_t permits);
 
-    void build_basic_info();
+    Status build_basic_info();
 
     // Return true if do ordered data compaction successfully
     bool handle_ordered_data_compaction();
@@ -189,6 +192,8 @@ public:
 
     int64_t initiator() const;
 
+    int64_t num_input_rowsets() const;
+
 protected:
     CloudTablet* cloud_tablet() { return static_cast<CloudTablet*>(_tablet.get()); }
 
@@ -203,13 +208,17 @@ protected:
 private:
     Status construct_output_rowset_writer(RowsetWriterContext& ctx) override;
 
+    Status set_storage_resource_from_input_rowsets(RowsetWriterContext& ctx);
+
     Status execute_compact_impl(int64_t permits);
 
-    void build_basic_info();
+    Status build_basic_info();
 
     virtual Status modify_rowsets();
 
     int64_t get_compaction_permits();
+
+    bool should_cache_compaction_output();
 };
 
 } // namespace doris

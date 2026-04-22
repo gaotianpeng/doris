@@ -129,7 +129,7 @@ import java.util.UUID;
  * an example.
  * This class use {@link TestInstance} in JUnit5 to do initialization and cleanup stuff. Unlike
  * deprecated legacy combination-based implementation {@link UtFrameUtils}, we use an inherit-manner,
- * thus we could wrap common logic in this base class. It's more easy to use.
+ * thus we could wrap common logic in this base class. It's easier to use.
  * Note:
  * Unit-test method in derived classes must use the JUnit5 {@link org.junit.jupiter.api.Test}
  * annotation, rather than the old JUnit4 {@link org.junit.Test} or others.
@@ -160,6 +160,7 @@ public abstract class TestWithFeService {
         FeConstants.enableInternalSchemaDb = false;
         beforeCreatingConnectContext();
         connectContext = createDefaultCtx();
+        connectContext.getSessionVariable().feDebug = true;
         beforeCluster();
         createDorisCluster();
         runBeforeAll();
@@ -618,6 +619,24 @@ public abstract class TestWithFeService {
     public void executeSql(String queryStr) throws Exception {
         connectContext.getState().reset();
         StmtExecutor stmtExecutor = new StmtExecutor(connectContext, queryStr);
+        stmtExecutor.execute();
+        if (connectContext.getState().getStateType() == QueryState.MysqlStateType.ERR
+                || connectContext.getState().getErrorCode() != null) {
+            throw new IllegalStateException(connectContext.getState().getErrorMessage());
+        }
+    }
+
+    public void executeNereidsSql(String queryStr) throws Exception {
+        connectContext.getState().reset();
+
+        StatementContext statementContext = new StatementContext(connectContext, new OriginStatement(queryStr, 0));
+        connectContext.setStatementContext(statementContext);
+        statementContext.setConnectContext(connectContext);
+
+        LogicalPlan plan = new NereidsParser().parseSingle(queryStr);
+        LogicalPlanAdapter logicalPlanAdapter = new LogicalPlanAdapter(plan, statementContext);
+        logicalPlanAdapter.setOrigStmt(statementContext.getOriginStatement());
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, logicalPlanAdapter);
         stmtExecutor.execute();
         if (connectContext.getState().getStateType() == QueryState.MysqlStateType.ERR
                 || connectContext.getState().getErrorCode() != null) {

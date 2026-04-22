@@ -46,7 +46,6 @@ import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.StructType;
 import org.apache.doris.catalog.TableIf;
 import org.apache.doris.catalog.Type;
-import org.apache.doris.catalog.VariantType;
 import org.apache.doris.cloud.qe.ComputeGroupException;
 import org.apache.doris.cloud.system.CloudSystemInfoService;
 import org.apache.doris.common.AnalysisException;
@@ -84,7 +83,7 @@ import org.apache.doris.statistics.TableStatsMeta;
 import org.apache.doris.system.Frontend;
 
 import com.google.common.base.Preconditions;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.text.StringSubstitutor;
 import org.apache.iceberg.FileScanTask;
@@ -125,6 +124,8 @@ public class StatisticsUtil {
 
     private static final String TOTAL_SIZE = "totalSize";
     private static final String NUM_ROWS = "numRows";
+    private static final String SPARK_NUM_ROWS = "spark.sql.statistics.numRows";
+    private static final String SPARK_TOTAL_SIZE = "spark.sql.statistics.totalSize";
 
     private static final String DATE_FORMAT = "yyyy-MM-dd HH:mm:ss";
     public static final int UPDATED_PARTITION_THRESHOLD = 3;
@@ -160,7 +161,6 @@ public class StatisticsUtil {
                 }
             }
             StmtExecutor stmtExecutor = new StmtExecutor(r.connectContext, sql);
-            r.connectContext.setExecutor(stmtExecutor);
             return stmtExecutor.executeInternalQuery();
         }
     }
@@ -170,7 +170,6 @@ public class StatisticsUtil {
         AutoCloseConnectContext r = StatisticsUtil.buildConnectContext(false);
         try {
             stmtExecutor = new StmtExecutor(r.connectContext, sql);
-            r.connectContext.setExecutor(stmtExecutor);
             stmtExecutor.execute();
             QueryState state = r.connectContext.getState();
             if (state.getStateType().equals(QueryState.MysqlStateType.ERR)) {
@@ -207,8 +206,8 @@ public class StatisticsUtil {
 
     public static AutoCloseConnectContext buildConnectContext(boolean useFileCacheForStat) {
         ConnectContext connectContext = new ConnectContext();
+        connectContext.getState().setInternal(true);
         SessionVariable sessionVariable = connectContext.getSessionVariable();
-        sessionVariable.internalSession = true;
         sessionVariable.setMaxExecMemByte(Config.statistics_sql_mem_limit_in_bytes);
         sessionVariable.cpuResourceLimit = Config.cpu_resource_limit_per_analyze_task;
         sessionVariable.setEnableInsertStrict(true);
@@ -627,19 +626,17 @@ public class StatisticsUtil {
             return TableIf.UNKNOWN_ROW_COUNT;
         }
         // Table parameters contains row count, simply get and return it.
-        if (parameters.containsKey(NUM_ROWS)) {
-            long rows = Long.parseLong(parameters.get(NUM_ROWS));
-            // Sometimes, the NUM_ROWS in hms is 0 but actually is not. Need to check TOTAL_SIZE if NUM_ROWS is 0.
-            if (rows > 0) {
-                LOG.info("Get row count {} for hive table {} in table parameters.", rows, table.getName());
-                return rows;
-            }
+        long rows = getRowCountFromParameters(parameters);
+        if (rows > 0) {
+            LOG.info("Get row count {} for hive table {} in table parameters.", rows, table.getName());
+            return rows;
         }
-        if (!parameters.containsKey(TOTAL_SIZE)) {
+        if (!parameters.containsKey(TOTAL_SIZE) && !parameters.containsKey(SPARK_TOTAL_SIZE)) {
             return TableIf.UNKNOWN_ROW_COUNT;
         }
         // Table parameters doesn't contain row count but contain total size. Estimate row count : totalSize/rowSize
-        long totalSize = Long.parseLong(parameters.get(TOTAL_SIZE));
+        long totalSize = parameters.containsKey(TOTAL_SIZE) ? Long.parseLong(parameters.get(TOTAL_SIZE))
+                : Long.parseLong(parameters.get(SPARK_TOTAL_SIZE));
         long estimatedRowSize = 0;
         for (Column column : table.getFullSchema()) {
             estimatedRowSize += column.getDataType().getSlotSize();
@@ -648,10 +645,28 @@ public class StatisticsUtil {
             LOG.warn("Hive table {} estimated row size is invalid {}", table.getName(), estimatedRowSize);
             return TableIf.UNKNOWN_ROW_COUNT;
         }
-        long rows = totalSize / estimatedRowSize;
+        rows = totalSize / estimatedRowSize;
         LOG.info("Get row count {} for hive table {} by total size {} and row size {}",
                 rows, table.getName(), totalSize, estimatedRowSize);
         return rows;
+    }
+
+    public static long getRowCountFromParameters(Map<String, String> parameters) {
+        if (parameters == null) {
+            return TableIf.UNKNOWN_ROW_COUNT;
+        }
+        // Table parameters contains row count, simply get and return it.
+        if (parameters.containsKey(NUM_ROWS)) {
+            long rows = Long.parseLong(parameters.get(NUM_ROWS));
+            if (rows <= 0 && parameters.containsKey(SPARK_NUM_ROWS)) {
+                rows = Long.parseLong(parameters.get(SPARK_NUM_ROWS));
+            }
+            // Sometimes, the NUM_ROWS in hms is 0 but actually is not. Need to check TOTAL_SIZE if NUM_ROWS is 0.
+            if (rows > 0) {
+                return rows;
+            }
+        }
+        return TableIf.UNKNOWN_ROW_COUNT;
     }
 
     /**
@@ -723,7 +738,7 @@ public class StatisticsUtil {
         return type instanceof ArrayType
                 || type instanceof StructType
                 || type instanceof MapType
-                || type instanceof VariantType
+                || type.isVariantType()
                 || type instanceof AggStateType;
     }
 

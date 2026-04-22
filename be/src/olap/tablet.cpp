@@ -310,8 +310,14 @@ Status Tablet::_init_once_action() {
     }
 
     // init stale rowset
+    int64_t now = ::time(nullptr);
     for (const auto& stale_rs_meta : _tablet_meta->all_stale_rs_metas()) {
         Version version = stale_rs_meta->version();
+
+        if (!stale_rs_meta->has_stale_at()) {
+            stale_rs_meta->set_stale_at(now);
+        }
+
         RowsetSharedPtr rowset;
         res = create_rowset(stale_rs_meta, &rowset);
         if (!res.ok()) {
@@ -571,11 +577,13 @@ Status Tablet::modify_rowsets(std::vector<RowsetSharedPtr>& to_add,
     }
 
     std::vector<RowsetMetaSharedPtr> rs_metas_to_delete;
+    int64_t now = ::time(nullptr);
     for (auto& rs : to_delete) {
         rs_metas_to_delete.push_back(rs->rowset_meta());
         _rs_version_map.erase(rs->version());
 
         if (!same_version) {
+            rs->rowset_meta()->set_stale_at(now);
             // put compaction rowsets in _stale_rs_version_map.
             _stale_rs_version_map[rs->version()] = rs;
         }
@@ -631,7 +639,11 @@ Status Tablet::delete_rowsets(const std::vector<RowsetSharedPtr>& to_delete, boo
     }
     std::vector<RowsetMetaSharedPtr> rs_metas;
     rs_metas.reserve(to_delete.size());
+    int64_t now = ::time(nullptr);
     for (const auto& rs : to_delete) {
+        if (move_to_stale) {
+            rs->rowset_meta()->set_stale_at(now);
+        }
         rs_metas.push_back(rs->rowset_meta());
         _rs_version_map.erase(rs->version());
     }
@@ -702,6 +714,7 @@ void Tablet::delete_expired_stale_rowset() {
         LOG_INFO("begin delete_expired_stale_rowset for tablet={}", tablet_id());
     }
     int64_t now = UnixSeconds();
+    std::vector<std::pair<Version, std::vector<RowsetId>>> deleted_stale_rowsets;
     // hold write lock while processing stable rowset
     {
         std::lock_guard<std::shared_mutex> wrlock(_meta_lock);
@@ -819,6 +832,9 @@ void Tablet::delete_expired_stale_rowset() {
         while (to_delete_iter != stale_version_path_map.end()) {
             std::vector<TimestampedVersionSharedPtr>& to_delete_version =
                     to_delete_iter->second->timestamped_versions();
+            int64_t start_version = -1;
+            int64_t end_version = -1;
+            std::vector<RowsetId> remove_rowset_ids;
             for (auto& timestampedVersion : to_delete_version) {
                 auto it = _stale_rs_version_map.find(timestampedVersion->version());
                 if (it != _stale_rs_version_map.end()) {
@@ -826,6 +842,10 @@ void Tablet::delete_expired_stale_rowset() {
                     // delete rowset
                     if (it->second->is_local()) {
                         _engine.add_unused_rowset(it->second);
+                        if (keys_type() == UNIQUE_KEYS && enable_unique_key_merge_on_write()) {
+                            // mow does not support cold data in object storage
+                            remove_rowset_ids.emplace_back(it->second->rowset_id());
+                        }
                     }
                     _stale_rs_version_map.erase(it);
                     VLOG_NOTICE << "delete stale rowset tablet=" << tablet_id() << " version["
@@ -839,9 +859,17 @@ void Tablet::delete_expired_stale_rowset() {
                                  << timestampedVersion->version().second
                                  << "] not find in stale rs version map";
                 }
+                if (start_version < 0) {
+                    start_version = timestampedVersion->version().first;
+                }
+                end_version = timestampedVersion->version().second;
                 _delete_stale_rowset_by_version(timestampedVersion->version());
             }
+            Version version(start_version, end_version);
             to_delete_iter++;
+            if (!remove_rowset_ids.empty()) {
+                deleted_stale_rowsets.emplace_back(version, remove_rowset_ids);
+            }
         }
 
         bool reconstructed = _reconstruct_version_tracker_if_necessary();
@@ -851,6 +879,23 @@ void Tablet::delete_expired_stale_rowset() {
                     << " current_meta_size=" << _tablet_meta->all_stale_rs_metas().size()
                     << " old_meta_size=" << old_meta_size << " sweep endtime " << std::fixed
                     << expired_stale_sweep_endtime << ", reconstructed=" << reconstructed;
+    }
+    if (config::enable_agg_and_remove_pre_rowsets_delete_bitmap && !deleted_stale_rowsets.empty()) {
+        // agg delete bitmap for pre rowsets; record unused delete bitmap key ranges
+        OlapStopWatch watch;
+        for (const auto& [version, remove_rowset_ids] : deleted_stale_rowsets) {
+            // agg delete bitmap for pre rowset
+            DeleteBitmapKeyRanges remove_delete_bitmap_key_ranges;
+            agg_delete_bitmap_for_stale_rowsets(version, remove_delete_bitmap_key_ranges);
+            // add remove delete bitmap
+            if (!remove_delete_bitmap_key_ranges.empty()) {
+                _engine.add_unused_delete_bitmap_key_ranges(tablet_id(), remove_rowset_ids,
+                                                            remove_delete_bitmap_key_ranges);
+            }
+        }
+        LOG(INFO) << "agg pre rowsets delete bitmap. tablet_id=" << tablet_id()
+                  << ", size=" << deleted_stale_rowsets.size()
+                  << ", cost(us)=" << watch.get_elapse_time_us();
     }
 #ifndef BE_TEST
     {
@@ -900,11 +945,11 @@ void Tablet::acquire_version_and_rowsets(
 }
 
 Status Tablet::capture_rs_readers(const Version& spec_version, std::vector<RowSetSplits>* rs_splits,
-                                  bool skip_missing_version) {
+                                  const CaptureRowsetOps& opts) {
     std::shared_lock rlock(_meta_lock);
     std::vector<Version> version_path;
     *rs_splits = DORIS_TRY(capture_rs_readers_unlocked(
-            spec_version, CaptureRowsetOps {.skip_missing_versions = skip_missing_version}));
+            spec_version, CaptureRowsetOps {.skip_missing_versions = opts.skip_missing_versions}));
     return Status::OK();
 }
 
@@ -1924,6 +1969,8 @@ void Tablet::_init_context_common_fields(RowsetWriterContext& context) {
 
     context.data_dir = data_dir();
     context.enable_unique_key_merge_on_write = enable_unique_key_merge_on_write();
+
+    context.encrypt_algorithm = tablet_meta()->encryption_algorithm();
 }
 
 Status Tablet::create_rowset(const RowsetMetaSharedPtr& rowset_meta, RowsetSharedPtr* rowset) {

@@ -600,6 +600,22 @@ public class SchemaTable extends Table {
                                     .column("METRIC_VALUE", ScalarType.createStringType())
                                     .build())
             )
+            .put("backend_kerberos_ticket_cache",
+                    new SchemaTable(SystemIdGenerator.getNextId(), "backend_kerberos_ticket_cache", TableType.SCHEMA,
+                            builder().column("BE_ID", ScalarType.createType(PrimitiveType.BIGINT))
+                                    .column("BE_IP", ScalarType.createStringType())
+                                    .column("PRINCIPAL", ScalarType.createStringType())
+                                    .column("KEYTAB", ScalarType.createStringType())
+                                    .column("SERVICE_PRINCIPAL", ScalarType.createStringType())
+                                    .column("TICKET_CACHE_PATH", ScalarType.createStringType())
+                                    .column("HASH_CODE", ScalarType.createStringType())
+                                    .column("START_TIME", ScalarType.createType(PrimitiveType.DATETIME))
+                                    .column("EXPIRE_TIME", ScalarType.createType(PrimitiveType.DATETIME))
+                                    .column("AUTH_TIME", ScalarType.createType(PrimitiveType.DATETIME))
+                                    .column("REF_COUNT", ScalarType.createType(PrimitiveType.BIGINT))
+                                    .column("REFRESH_INTERVAL_SECOND", ScalarType.createType(PrimitiveType.BIGINT))
+                                    .build())
+            )
             .put("routine_load_jobs",
                     new SchemaTable(SystemIdGenerator.getNextId(), "routine_load_jobs", TableType.SCHEMA,
                             builder().column("JOB_ID", ScalarType.createStringType())
@@ -645,6 +661,20 @@ public class SchemaTable extends Table {
                             .column("IS_OVERLAP", ScalarType.createType(PrimitiveType.BOOLEAN))
                             .build())
             )
+            .put("encryption_keys",
+                    new SchemaTable(SystemIdGenerator.getNextId(), "encryption_keys", TableType.SCHEMA,
+                        builder().column("ID", ScalarType.createStringType())
+                            .column("VERSION", ScalarType.createType(PrimitiveType.INT))
+                            .column("PARENT_ID", ScalarType.createStringType())
+                            .column("PARENT_VERSION", ScalarType.createType(PrimitiveType.INT))
+                            .column("TYPE", ScalarType.createStringType())
+                            .column("ALGORITHM", ScalarType.createStringType())
+                            .column("CIPHER", ScalarType.createStringType())
+                            .column("IV", ScalarType.createStringType())
+                            .column("CRC", ScalarType.createType(PrimitiveType.BIGINT))
+                            .column("CTIME", ScalarType.createType(PrimitiveType.DATETIMEV2))
+                            .column("MTIME", ScalarType.createType(PrimitiveType.DATETIMEV2))
+                            .build()))
             .build();
 
     private boolean fetchAllFe = false;

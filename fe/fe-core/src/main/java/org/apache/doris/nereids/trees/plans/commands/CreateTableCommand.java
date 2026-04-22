@@ -70,7 +70,7 @@ import java.util.stream.Collectors;
  * create table command
  */
 @Developing
-public class CreateTableCommand extends Command implements ForwardWithSync {
+public class CreateTableCommand extends Command implements NeedAuditEncryption, ForwardWithSync {
     public static final Logger LOG = LogManager.getLogger(CreateTableCommand.class);
 
     private final Optional<LogicalPlan> ctasQuery;
@@ -123,8 +123,8 @@ public class CreateTableCommand extends Command implements ForwardWithSync {
                 dataType = TypeCoercionUtils.replaceSpecifiedType(dataType,
                         DecimalV2Type.class, DecimalV2Type.SYSTEM_DEFAULT);
                 if (s.isColumnFromTable()) {
-                    if ((!((SlotReference) s).getTable().isPresent()
-                            || !((SlotReference) s).getTable().get().isManagedTable())) {
+                    if ((!((SlotReference) s).getOriginalTable().isPresent()
+                            || !((SlotReference) s).getOriginalTable().get().isManagedTable())) {
                         if (createTableInfo.getPartitionTableInfo().inIdentifierPartitions(s.getName())
                                 || (createTableInfo.getDistribution() != null
                                 && createTableInfo.getDistribution().inDistributionColumns(s.getName()))) {
@@ -176,8 +176,8 @@ public class CreateTableCommand extends Command implements ForwardWithSync {
                 ImmutableList.of(), ImmutableList.of(), ImmutableList.of(), query);
         try {
             if (!FeConstants.runningUnitTest) {
-                new InsertIntoTableCommand(query, Optional.empty(), Optional.empty(), Optional.empty()).run(
-                        ctx, executor);
+                new InsertIntoTableCommand(query, Optional.empty(), Optional.empty(),
+                        Optional.empty(), true, Optional.empty()).run(ctx, executor);
             }
             if (ctx.getState().getStateType() == MysqlStateType.ERR) {
                 handleFallbackFailedCtas(ctx);
@@ -190,7 +190,7 @@ public class CreateTableCommand extends Command implements ForwardWithSync {
 
     void handleFallbackFailedCtas(ConnectContext ctx) {
         try {
-            Env.getCurrentEnv().dropTable(new DropTableStmt(false,
+            Env.getCurrentEnv().dropTable(new DropTableStmt(false, false,
                     new TableName(createTableInfo.getCtlName(),
                             createTableInfo.getDbName(), createTableInfo.getTableName()), true));
         } catch (Exception e) {
@@ -220,6 +220,11 @@ public class CreateTableCommand extends Command implements ForwardWithSync {
     @Override
     public StmtType stmtType() {
         return StmtType.CREATE;
+    }
+
+    @Override
+    public boolean needAuditEncryption() {
+        return !createTableInfo.getEngineName().equalsIgnoreCase(CreateTableInfo.ENGINE_OLAP);
     }
 }
 

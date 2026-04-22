@@ -24,16 +24,20 @@ import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.TableIf;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.datasource.ExternalTable;
 import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.datasource.hive.HMSExternalCatalog;
 import org.apache.doris.datasource.hive.HMSExternalDatabase;
 import org.apache.doris.datasource.hive.HMSExternalTable;
 import org.apache.doris.datasource.hive.HMSExternalTable.DLAType;
+import org.apache.doris.datasource.jdbc.JdbcExternalCatalog;
 import org.apache.doris.datasource.jdbc.JdbcExternalDatabase;
 import org.apache.doris.datasource.jdbc.JdbcExternalTable;
 import org.apache.doris.statistics.AnalysisInfo.AnalysisMethod;
 
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import mockit.Mock;
 import mockit.MockUp;
@@ -116,7 +120,7 @@ public class StatisticsAutoCollectorTest {
     }
 
     @Test
-    public void testSupportAutoAnalyze() {
+    public void testSupportAutoAnalyze() throws DdlException {
         StatisticsAutoCollector collector = new StatisticsAutoCollector();
         Assertions.assertFalse(collector.supportAutoAnalyze(null));
         Column column1 = new Column("placeholder", PrimitiveType.INT);
@@ -126,7 +130,9 @@ public class StatisticsAutoCollectorTest {
         Assertions.assertTrue(collector.supportAutoAnalyze(table1));
 
         JdbcExternalDatabase jdbcExternalDatabase = new JdbcExternalDatabase(null, 1L, "jdbcdb", "jdbcdb");
-        ExternalTable externalTable = new JdbcExternalTable(1, "jdbctable", "jdbctable", null, jdbcExternalDatabase);
+        JdbcExternalCatalog jdbcCatalog = new JdbcExternalCatalog(0, "jdbc_ctl", null, Maps.newHashMap(), "");
+        ExternalTable externalTable = new JdbcExternalTable(1, "jdbctable", "jdbctable", jdbcCatalog,
+                jdbcExternalDatabase);
         Assertions.assertFalse(collector.supportAutoAnalyze(externalTable));
 
         new MockUp<HMSExternalTable>() {
@@ -136,7 +142,9 @@ public class StatisticsAutoCollectorTest {
             }
         };
         HMSExternalDatabase hmsExternalDatabase = new HMSExternalDatabase(null, 1L, "hmsDb", "hmsDb");
-        ExternalTable icebergExternalTable = new HMSExternalTable(1, "hmsTable", "hmsDb", null, hmsExternalDatabase);
+        HMSExternalCatalog hmsCatalog = new HMSExternalCatalog(0, "jdbc_ctl", null, Maps.newHashMap(), "");
+        ExternalTable icebergExternalTable = new HMSExternalTable(1, "hmsTable", "hmsDb", hmsCatalog,
+                hmsExternalDatabase);
         Assertions.assertFalse(collector.supportAutoAnalyze(icebergExternalTable));
 
         new MockUp<HMSExternalTable>() {
@@ -145,7 +153,7 @@ public class StatisticsAutoCollectorTest {
                 return DLAType.HIVE;
             }
         };
-        ExternalTable hiveExternalTable = new HMSExternalTable(1, "hmsTable", "hmsDb", null, hmsExternalDatabase);
+        ExternalTable hiveExternalTable = new HMSExternalTable(1, "hmsTable", "hmsDb", hmsCatalog, hmsExternalDatabase);
         Assertions.assertTrue(collector.supportAutoAnalyze(hiveExternalTable));
     }
 

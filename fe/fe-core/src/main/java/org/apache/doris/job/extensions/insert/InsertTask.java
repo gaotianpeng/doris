@@ -156,6 +156,7 @@ public class InsertTask extends AbstractTask {
         ctx.setQualifiedUser(userIdentity.getQualifiedUser());
         ctx.setCurrentUserIdentity(userIdentity);
         ctx.getState().reset();
+        ctx.getState().setInternal(true);
         ctx.getState().setNereids(true);
         ctx.setThreadLocalInfo();
         if (StringUtils.isNotEmpty(currentDb)) {
@@ -213,18 +214,18 @@ public class InsertTask extends AbstractTask {
     }
 
     @Override
-    public void onFail() throws JobException {
+    public boolean onFail() throws JobException {
         if (isCanceled.get()) {
-            return;
+            return false;
         }
         isFinished.set(true);
-        super.onFail();
+        return super.onFail();
     }
 
     @Override
-    public void onSuccess() throws JobException {
+    public boolean onSuccess() throws JobException {
         isFinished.set(true);
-        super.onSuccess();
+        return super.onSuccess();
     }
 
     @Override

@@ -30,6 +30,7 @@
 #include "common/config.h"
 #include "common/stats.h"
 #include "cpp/sync_point.h"
+#include "meta-service/delete_bitmap_lock_white_list.h"
 #include "meta-service/txn_lazy_committer.h"
 #include "meta-store/txn_kv.h"
 #include "rate-limiter/rate_limiter.h"
@@ -42,6 +43,7 @@ class Transaction;
 constexpr std::string_view BUILT_IN_STORAGE_VAULT_NAME = "built_in_storage_vault";
 static constexpr int COMPACTION_DELETE_BITMAP_LOCK_ID = -1;
 static constexpr int SCHEMA_CHANGE_DELETE_BITMAP_LOCK_ID = -2;
+static constexpr int COMPACTION_WITHOUT_LOCK_DELETE_BITMAP_LOCK_ID = -3;
 
 void internal_get_rowset(Transaction* txn, int64_t start, int64_t end,
                          const std::string& instance_id, int64_t tablet_id, MetaServiceCode& code,
@@ -54,6 +56,16 @@ static void* run_bthread_work(void* arg) {
     delete f;
     return nullptr;
 }
+
+[[maybe_unused]] inline static bool is_job_delete_bitmap_lock_id(int64_t lock_id) {
+    return lock_id == COMPACTION_DELETE_BITMAP_LOCK_ID ||
+           lock_id == SCHEMA_CHANGE_DELETE_BITMAP_LOCK_ID;
+}
+
+[[maybe_unused]] void record_txn_commit_stats(doris::cloud::Transaction* txn,
+                                              const std::string& instance_id,
+                                              int64_t partition_count, int64_t tablet_count,
+                                              int64_t txn_id);
 
 class MetaServiceImpl : public cloud::MetaService {
 public:
@@ -134,11 +146,6 @@ public:
                        const UpdateTabletRequest* request, UpdateTabletResponse* response,
                        ::google::protobuf::Closure* done) override;
 
-    void update_tablet_schema(::google::protobuf::RpcController* controller,
-                              const UpdateTabletSchemaRequest* request,
-                              UpdateTabletSchemaResponse* response,
-                              ::google::protobuf::Closure* done) override;
-
     void get_tablet(::google::protobuf::RpcController* controller, const GetTabletRequest* request,
                     GetTabletResponse* response, ::google::protobuf::Closure* done) override;
 
@@ -180,6 +187,18 @@ public:
     void drop_partition(::google::protobuf::RpcController* controller,
                         const PartitionRequest* request, PartitionResponse* response,
                         ::google::protobuf::Closure* done) override;
+
+    void prepare_restore_job(::google::protobuf::RpcController* controller,
+                             const RestoreJobRequest* request, RestoreJobResponse* response,
+                             ::google::protobuf::Closure* done) override;
+
+    void commit_restore_job(::google::protobuf::RpcController* controller,
+                            const RestoreJobRequest* request, RestoreJobResponse* response,
+                            ::google::protobuf::Closure* done) override;
+
+    void finish_restore_job(::google::protobuf::RpcController* controller,
+                            const RestoreJobRequest* request, RestoreJobResponse* response,
+                            ::google::protobuf::Closure* done) override;
 
     void get_tablet_stats(::google::protobuf::RpcController* controller,
                           const GetTabletStatsRequest* request, GetTabletStatsResponse* response,
@@ -325,6 +344,8 @@ public:
     MetaServiceResponseStatus fix_tablet_stats(std::string cloud_unique_id_str,
                                                std::string table_id_str);
 
+    void get_delete_bitmap_lock_version(std::string& use_version, std::string& instance_id);
+
 private:
     std::pair<MetaServiceCode, std::string> alter_instance(
             const AlterInstanceRequest* request,
@@ -334,12 +355,43 @@ private:
                                        const GetDeleteBitmapUpdateLockRequest* request,
                                        GetDeleteBitmapUpdateLockResponse* response,
                                        std::string& instance_id, std::string& lock_key,
-                                       KVStats& stats);
+                                       std::string lock_use_version, KVStats& stats);
+
+    void get_delete_bitmap_update_lock_v2(google::protobuf::RpcController* controller,
+                                          const GetDeleteBitmapUpdateLockRequest* request,
+                                          GetDeleteBitmapUpdateLockResponse* response,
+                                          ::google::protobuf::Closure* done,
+                                          std::string& instance_id, MetaServiceCode& code,
+                                          std::string& msg, std::stringstream& ss, KVStats& stats);
+
+    void get_delete_bitmap_update_lock_v1(google::protobuf::RpcController* controller,
+                                          const GetDeleteBitmapUpdateLockRequest* request,
+                                          GetDeleteBitmapUpdateLockResponse* response,
+                                          ::google::protobuf::Closure* done,
+                                          std::string& instance_id, MetaServiceCode& code,
+                                          std::string& msg, std::stringstream& ss, KVStats& stats);
+
+    void remove_delete_bitmap_update_lock_v2(google::protobuf::RpcController* controller,
+                                             const RemoveDeleteBitmapUpdateLockRequest* request,
+                                             RemoveDeleteBitmapUpdateLockResponse* response,
+                                             ::google::protobuf::Closure* done,
+                                             std::string& instance_id, MetaServiceCode& code,
+                                             std::string& msg, std::stringstream& ss,
+                                             KVStats& stats);
+
+    void remove_delete_bitmap_update_lock_v1(google::protobuf::RpcController* controller,
+                                             const RemoveDeleteBitmapUpdateLockRequest* request,
+                                             RemoveDeleteBitmapUpdateLockResponse* response,
+                                             ::google::protobuf::Closure* done,
+                                             std::string& instance_id, MetaServiceCode& code,
+                                             std::string& msg, std::stringstream& ss,
+                                             KVStats& stats);
 
     std::shared_ptr<TxnKv> txn_kv_;
     std::shared_ptr<ResourceManager> resource_mgr_;
     std::shared_ptr<RateLimiter> rate_limiter_;
     std::shared_ptr<TxnLazyCommitter> txn_lazy_committer_;
+    std::shared_ptr<DeleteBitmapLockWhiteList> delete_bitmap_lock_white_list_;
 };
 
 class MetaServiceProxy final : public MetaService {
@@ -441,13 +493,6 @@ public:
         call_impl(&cloud::MetaService::update_tablet, controller, request, response, done);
     }
 
-    void update_tablet_schema(::google::protobuf::RpcController* controller,
-                              const UpdateTabletSchemaRequest* request,
-                              UpdateTabletSchemaResponse* response,
-                              ::google::protobuf::Closure* done) override {
-        call_impl(&cloud::MetaService::update_tablet_schema, controller, request, response, done);
-    }
-
     void get_tablet(::google::protobuf::RpcController* controller, const GetTabletRequest* request,
                     GetTabletResponse* response, ::google::protobuf::Closure* done) override {
         call_impl(&cloud::MetaService::get_tablet, controller, request, response, done);
@@ -512,6 +557,24 @@ public:
                         const PartitionRequest* request, PartitionResponse* response,
                         ::google::protobuf::Closure* done) override {
         call_impl(&cloud::MetaService::drop_partition, controller, request, response, done);
+    }
+
+    void prepare_restore_job(::google::protobuf::RpcController* controller,
+                             const RestoreJobRequest* request, RestoreJobResponse* response,
+                             ::google::protobuf::Closure* done) override {
+        call_impl(&cloud::MetaService::prepare_restore_job, controller, request, response, done);
+    }
+
+    void commit_restore_job(::google::protobuf::RpcController* controller,
+                            const RestoreJobRequest* request, RestoreJobResponse* response,
+                            ::google::protobuf::Closure* done) override {
+        call_impl(&cloud::MetaService::commit_restore_job, controller, request, response, done);
+    }
+
+    void finish_restore_job(::google::protobuf::RpcController* controller,
+                            const RestoreJobRequest* request, RestoreJobResponse* response,
+                            ::google::protobuf::Closure* done) override {
+        call_impl(&cloud::MetaService::finish_restore_job, controller, request, response, done);
     }
 
     void get_tablet_stats(::google::protobuf::RpcController* controller,
@@ -721,6 +784,10 @@ public:
         call_impl(&cloud::MetaService::get_schema_dict, controller, request, response, done);
     }
 
+    void get_delete_bitmap_lock_version(std::string& use_version, std::string& instance_id) {
+        impl_->get_delete_bitmap_lock_version(use_version, instance_id);
+    }
+
 private:
     template <typename Request, typename Response>
     using MetaServiceMethod = void (cloud::MetaService::*)(::google::protobuf::RpcController*,
@@ -827,6 +894,15 @@ private:
             auto dist = std::uniform_int_distribution(-config::idempotent_request_replay_delay_range_ms,
                                                       config::idempotent_request_replay_delay_range_ms);
             int64_t sleep_ms = config::idempotent_request_replay_delay_base_ms + dist(rng);
+            std::string debug_string = req.ShortDebugString();
+            if constexpr (std::is_same_v<Request, GetTabletStatsRequest>) {
+                auto short_req = req;
+                if (short_req.tablet_idx_size() > 10) {
+                    short_req.mutable_tablet_idx()->DeleteSubrange(10, req.tablet_idx_size() - 10);
+                }
+                debug_string = short_req.ShortDebugString();
+                TEST_SYNC_POINT_CALLBACK("idempotent_injection_short_debug_string_for_get_stats", &short_req);
+            }
             LOG(INFO) << " request_name=" << req.GetDescriptor()->name()
                       << " response_name=" << res.GetDescriptor()->name()
                       << " queue_ts=" << duration_cast<milliseconds>(s.time_since_epoch()).count()
@@ -834,7 +910,7 @@ private:
                       << " idempotent_request_replay_delay_base_ms=" << config::idempotent_request_replay_delay_base_ms
                       << " idempotent_request_replay_delay_range_ms=" << config::idempotent_request_replay_delay_range_ms
                       << " idempotent_request_replay_delay_ms=" << sleep_ms
-                      << " request=" << req.ShortDebugString();
+                      << " request=" << debug_string;
             if (sleep_ms < 0 || exclusion.count(req.GetDescriptor()->name())) return;
             brpc::Controller ctrl;
             bthread_usleep(sleep_ms * 1000);

@@ -28,7 +28,7 @@ import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
-import org.apache.doris.load.DppConfig;
+import org.apache.doris.mysql.authenticate.AuthenticateType;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.resource.Tag;
 
@@ -55,9 +55,9 @@ public class UserPropertyMgr implements Writable {
     protected Map<String, UserProperty> propertyMap = Maps.newHashMap();
     public static final String ROOT_USER = "root";
     public static final String SYSTEM_RESOURCE_USER = "system";
-    public static final String LDAP_RESOURCE_USER = "ldap";
-
-    private static final UserProperty LDAP_PROPERTY = new UserProperty(LDAP_RESOURCE_USER);
+    public static final String DEFAULT_RESOURCE_USER = Config.authentication_type;
+    // When using a non-internal authentication plugin, the user property information uses the default configuration.
+    private static final UserProperty DEFAULT_USER_PROPERTY = new UserProperty(DEFAULT_RESOURCE_USER);
     @SerializedName(value = "resourceVersion")
     private AtomicLong resourceVersion = new AtomicLong(0);
 
@@ -93,7 +93,7 @@ public class UserPropertyMgr implements Writable {
 
     public int getQueryTimeout(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return 0;
         }
@@ -102,7 +102,7 @@ public class UserPropertyMgr implements Writable {
 
     public int getInsertTimeout(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return 0;
         }
@@ -111,7 +111,7 @@ public class UserPropertyMgr implements Writable {
 
     public long getMaxConn(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return 0;
         }
@@ -120,7 +120,7 @@ public class UserPropertyMgr implements Writable {
 
     public long getMaxQueryInstances(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return Config.default_max_query_instances;
         }
@@ -139,21 +139,21 @@ public class UserPropertyMgr implements Writable {
         List<String> ret = new ArrayList<>();
         users.forEach(
                 u -> {
-                UserProperty userProperty = propertyMap.get(u);
-                if (userProperty == null) {
-                    return;
+                    UserProperty userProperty = propertyMap.get(u);
+                    if (userProperty == null) {
+                        return;
+                    }
+                    if (clusterName.equals(userProperty.getDefaultCloudCluster())) {
+                        ret.add(ClusterNamespace.getNameFromFullName(u));
+                    }
                 }
-                if (clusterName.equals(userProperty.getDefaultCloudCluster())) {
-                    ret.add(ClusterNamespace.getNameFromFullName(u));
-                }
-            }
         );
         return ret;
     }
 
     public int getParallelFragmentExecInstanceNum(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return -1;
         }
@@ -162,7 +162,7 @@ public class UserPropertyMgr implements Writable {
 
     public Set<Tag> getResourceTags(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return UserProperty.INVALID_RESOURCE_TAGS;
         }
@@ -178,21 +178,9 @@ public class UserPropertyMgr implements Writable {
         return tags;
     }
 
-    public Pair<String, DppConfig> getLoadClusterInfo(String qualifiedUser, String cluster) throws DdlException {
-        Pair<String, DppConfig> loadClusterInfo = null;
-
-        UserProperty property = propertyMap.get(qualifiedUser);
-        property = getLdapPropertyIfNull(qualifiedUser, property);
-        if (property == null) {
-            throw new DdlException("User " + qualifiedUser + " does not exist");
-        }
-        loadClusterInfo = property.getLoadClusterInfo(cluster);
-        return loadClusterInfo;
-    }
-
     public List<List<String>> fetchUserProperty(String qualifiedUser) throws AnalysisException {
         UserProperty property = propertyMap.get(qualifiedUser);
-        property = getLdapPropertyIfNull(qualifiedUser, property);
+        property = getPropertyIfNull(qualifiedUser, property);
         if (property == null) {
             throw new AnalysisException("User " + qualifiedUser + " does not exist");
         }
@@ -201,16 +189,16 @@ public class UserPropertyMgr implements Writable {
 
     public String[] getSqlBlockRules(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
-            return new String[] {};
+            return new String[]{};
         }
         return existProperty.getSqlBlockRules();
     }
 
     public int getCpuResourceLimit(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return -1;
         }
@@ -219,16 +207,25 @@ public class UserPropertyMgr implements Writable {
 
     public long getExecMemLimit(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return -1;
         }
         return existProperty.getExecMemLimit();
     }
 
+    public String getInitCatalog(String qualifiedUser) {
+        UserProperty existProperty = propertyMap.get(qualifiedUser);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
+        if (existProperty == null) {
+            return null;
+        }
+        return existProperty.getInitCatalog();
+    }
+
     public String getWorkloadGroup(String qualifiedUser) {
         UserProperty existProperty = propertyMap.get(qualifiedUser);
-        existProperty = getLdapPropertyIfNull(qualifiedUser, existProperty);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
         if (existProperty == null) {
             return null;
         }
@@ -244,9 +241,42 @@ public class UserPropertyMgr implements Writable {
         return Pair.of(false, "");
     }
 
-    private UserProperty getLdapPropertyIfNull(String qualifiedUser, UserProperty existProperty) {
-        if (existProperty == null && Env.getCurrentEnv().getAuth().getLdapManager().doesUserExist(qualifiedUser)) {
-            return LDAP_PROPERTY;
+    public boolean getEnablePreferCachedRowset(String qualifiedUser) {
+        UserProperty existProperty = propertyMap.get(qualifiedUser);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
+        if (existProperty == null) {
+            return false;
+        }
+        return existProperty.getEnablePreferCachedRowset();
+    }
+
+    public long getQueryFreshnessToleranceMs(String qualifiedUser) {
+        UserProperty existProperty = propertyMap.get(qualifiedUser);
+        existProperty = getPropertyIfNull(qualifiedUser, existProperty);
+        if (existProperty == null) {
+            return -1;
+        }
+        return existProperty.getQueryFreshnessToleranceMs();
+    }
+
+    /**
+     * The method determines which user property to return based on the existProperty parameter
+     * and system configuration:
+     * If existProperty is not null, return it directly.
+     * If the authentication type is LDAP and the user exists in LDAP, return DEFAULT_USER_PROPERTY.
+     * If the authentication type is not the default type, return DEFAULT_USER_PROPERTY.
+     * Otherwise, return existProperty.
+     */
+    private UserProperty getPropertyIfNull(String qualifiedUser, UserProperty existProperty) {
+        if (null != existProperty) {
+            return existProperty;
+        }
+        if (AuthenticateType.LDAP.name().equalsIgnoreCase(Config.authentication_type)
+                && Env.getCurrentEnv().getAuth().getLdapManager().doesUserExist(qualifiedUser)) {
+            return DEFAULT_USER_PROPERTY;
+        }
+        if (!Config.authentication_type.equalsIgnoreCase(AuthenticateType.DEFAULT.name())) {
+            return DEFAULT_USER_PROPERTY;
         }
         return existProperty;
     }

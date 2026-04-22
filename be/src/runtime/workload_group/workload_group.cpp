@@ -47,7 +47,6 @@ namespace doris {
 
 const static std::string MEMORY_LIMIT_DEFAULT_VALUE = "0%";
 const static bool ENABLE_MEMORY_OVERCOMMIT_DEFAULT_VALUE = true;
-const static int CPU_HARD_LIMIT_DEFAULT_VALUE = -1;
 const static int SPILL_LOW_WATERMARK_DEFAULT_VALUE = 50;
 const static int SPILL_HIGH_WATERMARK_DEFAULT_VALUE = 80;
 
@@ -343,7 +342,12 @@ WorkloadGroupInfo WorkloadGroupInfo::parse_topic_info(
     }
 
     // 5 cpu hard limit
-    int cpu_hard_limit = CPU_HARD_LIMIT_DEFAULT_VALUE;
+    // cgroup v1 and v2 has different default cpu quota value,
+    // v1's default value is -1,
+    // v2's default value is 'max 100000',
+    // it's hard to unify them, so set -1 here means it's an invalid value,
+    // it could be replaced to default value when write value to cpu file, refer modify_cg_cpu_hard_limit_no_lock
+    int cpu_hard_limit = -1;
     if (tworkload_group_info.__isset.cpu_hard_limit && tworkload_group_info.cpu_hard_limit > 0) {
         cpu_hard_limit = tworkload_group_info.cpu_hard_limit;
     }
@@ -364,7 +368,7 @@ WorkloadGroupInfo WorkloadGroupInfo::parse_topic_info(
     }
 
     // 9 scan thread num
-    int scan_thread_num = config::doris_scanner_thread_pool_thread_num;
+    int scan_thread_num = config::dynamic::doris_scanner_thread_pool_thread_num();
     if (tworkload_group_info.__isset.scan_thread_num && tworkload_group_info.scan_thread_num > 0) {
         scan_thread_num = tworkload_group_info.scan_thread_num;
     }
@@ -474,8 +478,8 @@ void WorkloadGroup::upsert_task_scheduler(WorkloadGroupInfo* tg_info, ExecEnv* e
         std::unique_ptr<vectorized::SimplifiedScanScheduler> scan_scheduler =
                 std::make_unique<vectorized::SimplifiedScanScheduler>("Scan_" + tg_name,
                                                                       cg_cpu_ctl_ptr, tg_name);
-        Status ret = scan_scheduler->start(config::doris_scanner_thread_pool_thread_num,
-                                           config::doris_scanner_thread_pool_thread_num,
+        Status ret = scan_scheduler->start(config::dynamic::doris_scanner_thread_pool_thread_num(),
+                                           config::dynamic::doris_scanner_thread_pool_thread_num(),
                                            config::doris_scanner_thread_pool_queue_size);
         if (ret.ok()) {
             _scan_task_sched = std::move(scan_scheduler);

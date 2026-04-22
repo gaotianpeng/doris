@@ -127,10 +127,10 @@ static std::string read_columns_to_string(TabletSchemaSPtr tablet_schema,
 }
 
 Status NewOlapScanner::init() {
-    _is_init = true;
     auto* local_state = static_cast<pipeline::OlapScanLocalState*>(_local_state);
     auto& tablet = _tablet_reader_params.tablet;
     auto& tablet_schema = _tablet_reader_params.tablet_schema;
+
     DBUG_EXECUTE_IF("CloudTablet.capture_rs_readers.return.e-230", {
         LOG_WARNING("CloudTablet.capture_rs_readers.return e-230 init")
                 .tag("tablet_id", tablet->tablet_id());
@@ -200,11 +200,16 @@ Status NewOlapScanner::init() {
                 ExecEnv::GetInstance()->storage_engine().to_cloud().tablet_hotspot().count(*tablet);
             }
 
-            auto maybe_read_source = tablet->capture_read_source(
-                    _tablet_reader_params.version,
-                    {.skip_missing_versions = _state->skip_missing_version(),
-                     .enable_fetch_rowsets_from_peers =
-                             config::enable_fetch_rowsets_from_peer_replicas});
+            CaptureRowsetOps opts {
+                    .skip_missing_versions = _state->skip_missing_version(),
+                    .enable_fetch_rowsets_from_peers =
+                            config::enable_fetch_rowsets_from_peer_replicas,
+                    .enable_prefer_cached_rowset =
+                            config::is_cloud_mode() ? _state->enable_prefer_cached_rowset() : false,
+                    .query_freshness_tolerance_ms =
+                            config::is_cloud_mode() ? _state->query_freshness_tolerance_ms() : -1};
+            auto maybe_read_source =
+                    tablet->capture_read_source(_tablet_reader_params.version, opts);
             if (!maybe_read_source) {
                 LOG(WARNING) << "fail to init reader. res=" << maybe_read_source.error();
                 return maybe_read_source.error();
@@ -236,6 +241,7 @@ Status NewOlapScanner::init() {
         SchemaCache::instance()->insert_schema(schema_key, tablet_schema);
     }
 
+    _is_init = true;
     return Status::OK();
 }
 
@@ -442,7 +448,8 @@ Status NewOlapScanner::_init_variant_columns() {
             // add them into tablet_schema for later column indexing.
             TabletColumn subcol = TabletColumn::create_materialized_variant_column(
                     tablet_schema->column_by_uid(slot->col_unique_id()).name_lower_case(),
-                    slot->column_paths(), slot->col_unique_id());
+                    slot->column_paths(), slot->col_unique_id(),
+                    slot->type().max_subcolumns_count());
             if (tablet_schema->field_index(*subcol.path_info_ptr()) < 0) {
                 tablet_schema->append_column(subcol, TabletSchema::ColumnType::VARIANT);
             }
@@ -527,12 +534,11 @@ Status NewOlapScanner::_get_block_impl(RuntimeState* state, Block* block, bool* 
         _tablet_reader_params.tablet->read_block_count.fetch_add(1, std::memory_order_relaxed);
         *eof = false;
     }
-    _update_realtime_counters();
     return Status::OK();
 }
 
 Status NewOlapScanner::close(RuntimeState* state) {
-    if (_is_closed) {
+    if (!_try_close()) {
         return Status::OK();
     }
 
@@ -540,17 +546,54 @@ Status NewOlapScanner::close(RuntimeState* state) {
     return Status::OK();
 }
 
-void NewOlapScanner::_update_realtime_counters() {
+void NewOlapScanner::update_realtime_counters() {
     pipeline::OlapScanLocalState* local_state =
             static_cast<pipeline::OlapScanLocalState*>(_local_state);
     const OlapReaderStatistics& stats = _tablet_reader->stats();
     COUNTER_UPDATE(local_state->_read_compressed_counter, stats.compressed_bytes_read);
-    COUNTER_UPDATE(local_state->_scan_bytes, stats.compressed_bytes_read);
-    _tablet_reader->mutable_stats()->compressed_bytes_read = 0;
-
+    COUNTER_UPDATE(local_state->_scan_bytes, stats.uncompressed_bytes_read);
     COUNTER_UPDATE(local_state->_scan_rows, stats.raw_rows_read);
-    // if raw_rows_read is reset, scanNode will scan all table rows which may cause BE crash
+
+    // Make sure the scan bytes and scan rows counter in audit log is the same as the counter in
+    // doris metrics.
+    // ScanBytes is the uncompressed bytes read from local + remote
+    // bytes_read_from_local is the compressed bytes read from local
+    // bytes_read_from_remote is the compressed bytes read from remote
+    // scan bytes > bytes_read_from_local + bytes_read_from_remote
+    if (_query_statistics) {
+        _query_statistics->add_scan_rows(stats.raw_rows_read);
+        _query_statistics->add_scan_bytes(stats.uncompressed_bytes_read);
+    }
+
+    // In case of no cache, we still need to update the IO stats. uncompressed bytes read == local + remote
+    if (stats.file_cache_stats.bytes_read_from_local == 0 &&
+        stats.file_cache_stats.bytes_read_from_remote == 0) {
+        if (_query_statistics) {
+            _query_statistics->add_scan_bytes_from_local_storage(stats.compressed_bytes_read);
+        }
+        DorisMetrics::instance()->query_scan_bytes_from_local->increment(
+                stats.compressed_bytes_read);
+    } else {
+        if (_query_statistics) {
+            _query_statistics->add_scan_bytes_from_local_storage(
+                    stats.file_cache_stats.bytes_read_from_local);
+            _query_statistics->add_scan_bytes_from_remote_storage(
+                    stats.file_cache_stats.bytes_read_from_remote);
+        }
+
+        io::FileCacheProfileReporter cache_profile(local_state->_segment_profile.get());
+        cache_profile.update(&stats.file_cache_stats);
+        DorisMetrics::instance()->query_scan_bytes_from_local->increment(
+                stats.file_cache_stats.bytes_read_from_local);
+        DorisMetrics::instance()->query_scan_bytes_from_remote->increment(
+                stats.file_cache_stats.bytes_read_from_remote);
+    }
+
+    _tablet_reader->mutable_stats()->compressed_bytes_read = 0;
+    _tablet_reader->mutable_stats()->uncompressed_bytes_read = 0;
     _tablet_reader->mutable_stats()->raw_rows_read = 0;
+    _tablet_reader->mutable_stats()->file_cache_stats.bytes_read_from_local = 0;
+    _tablet_reader->mutable_stats()->file_cache_stats.bytes_read_from_remote = 0;
 }
 
 void NewOlapScanner::_collect_profile_before_close() {
@@ -563,103 +606,119 @@ void NewOlapScanner::_collect_profile_before_close() {
     VScanner::_collect_profile_before_close();
 
 #ifndef INCR_COUNTER
-#define INCR_COUNTER(Parent)                                                                    \
-    COUNTER_UPDATE(Parent->_io_timer, stats.io_ns);                                             \
-    COUNTER_UPDATE(Parent->_read_compressed_counter, stats.compressed_bytes_read);              \
-    COUNTER_UPDATE(Parent->_scan_bytes, stats.compressed_bytes_read);                           \
-    COUNTER_UPDATE(Parent->_decompressor_timer, stats.decompress_ns);                           \
-    COUNTER_UPDATE(Parent->_read_uncompressed_counter, stats.uncompressed_bytes_read);          \
-    COUNTER_UPDATE(Parent->_block_load_timer, stats.block_load_ns);                             \
-    COUNTER_UPDATE(Parent->_block_load_counter, stats.blocks_load);                             \
-    COUNTER_UPDATE(Parent->_block_fetch_timer, stats.block_fetch_ns);                           \
-    COUNTER_UPDATE(Parent->_delete_bitmap_get_agg_timer, stats.delete_bitmap_get_agg_ns);       \
-    COUNTER_UPDATE(Parent->_scan_rows, stats.raw_rows_read);                                    \
-    COUNTER_UPDATE(Parent->_vec_cond_timer, stats.vec_cond_ns);                                 \
-    COUNTER_UPDATE(Parent->_short_cond_timer, stats.short_cond_ns);                             \
-    COUNTER_UPDATE(Parent->_expr_filter_timer, stats.expr_filter_ns);                           \
-    COUNTER_UPDATE(Parent->_block_init_timer, stats.block_init_ns);                             \
-    COUNTER_UPDATE(Parent->_block_init_seek_timer, stats.block_init_seek_ns);                   \
-    COUNTER_UPDATE(Parent->_block_init_seek_counter, stats.block_init_seek_num);                \
-    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_keys_timer,                           \
-                   stats.generate_row_ranges_by_keys_ns);                                       \
-    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_column_conditions_timer,              \
-                   stats.generate_row_ranges_by_column_conditions_ns);                          \
-    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_bf_timer,                             \
-                   stats.generate_row_ranges_by_bf_ns);                                         \
-    COUNTER_UPDATE(Parent->_collect_iterator_merge_next_timer,                                  \
-                   stats.collect_iterator_merge_next_timer);                                    \
-    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_zonemap_timer,                        \
-                   stats.generate_row_ranges_by_zonemap_ns);                                    \
-    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_dict_timer,                           \
-                   stats.generate_row_ranges_by_dict_ns);                                       \
-    COUNTER_UPDATE(Parent->_predicate_column_read_timer, stats.predicate_column_read_ns);       \
-    COUNTER_UPDATE(Parent->_non_predicate_column_read_timer, stats.non_predicate_read_ns);      \
-    COUNTER_UPDATE(Parent->_predicate_column_read_seek_timer,                                   \
-                   stats.predicate_column_read_seek_ns);                                        \
-    COUNTER_UPDATE(Parent->_predicate_column_read_seek_counter,                                 \
-                   stats.predicate_column_read_seek_num);                                       \
-    COUNTER_UPDATE(Parent->_lazy_read_timer, stats.lazy_read_ns);                               \
-    COUNTER_UPDATE(Parent->_lazy_read_seek_timer, stats.block_lazy_read_seek_ns);               \
-    COUNTER_UPDATE(Parent->_lazy_read_seek_counter, stats.block_lazy_read_seek_num);            \
-    COUNTER_UPDATE(Parent->_output_col_timer, stats.output_col_ns);                             \
-    COUNTER_UPDATE(Parent->_rows_vec_cond_filtered_counter, stats.rows_vec_cond_filtered);      \
-    COUNTER_UPDATE(Parent->_rows_short_circuit_cond_filtered_counter,                           \
-                   stats.rows_short_circuit_cond_filtered);                                     \
-    COUNTER_UPDATE(Parent->_rows_vec_cond_input_counter, stats.vec_cond_input_rows);            \
-    COUNTER_UPDATE(Parent->_rows_short_circuit_cond_input_counter,                              \
-                   stats.short_circuit_cond_input_rows);                                        \
-    for (auto& [id, info] : stats.filter_info) {                                                \
-        Parent->add_filter_info(id, info);                                                      \
-    }                                                                                           \
-    COUNTER_UPDATE(Parent->_stats_filtered_counter, stats.rows_stats_filtered);                 \
-    COUNTER_UPDATE(Parent->_stats_rp_filtered_counter, stats.rows_stats_rp_filtered);           \
-    COUNTER_UPDATE(Parent->_dict_filtered_counter, stats.rows_dict_filtered);                   \
-    COUNTER_UPDATE(Parent->_bf_filtered_counter, stats.rows_bf_filtered);                       \
-    COUNTER_UPDATE(Parent->_del_filtered_counter, stats.rows_del_filtered);                     \
-    COUNTER_UPDATE(Parent->_del_filtered_counter, stats.rows_del_by_bitmap);                    \
-    COUNTER_UPDATE(Parent->_del_filtered_counter, stats.rows_vec_del_cond_filtered);            \
-    COUNTER_UPDATE(Parent->_conditions_filtered_counter, stats.rows_conditions_filtered);       \
-    COUNTER_UPDATE(Parent->_key_range_filtered_counter, stats.rows_key_range_filtered);         \
-    COUNTER_UPDATE(Parent->_total_pages_num_counter, stats.total_pages_num);                    \
-    COUNTER_UPDATE(Parent->_cached_pages_num_counter, stats.cached_pages_num);                  \
-    COUNTER_UPDATE(Parent->_bitmap_index_filter_counter, stats.rows_bitmap_index_filtered);     \
-    COUNTER_UPDATE(Parent->_bitmap_index_filter_timer, stats.bitmap_index_filter_timer);        \
-    COUNTER_UPDATE(Parent->_inverted_index_filter_counter, stats.rows_inverted_index_filtered); \
-    COUNTER_UPDATE(Parent->_inverted_index_filter_timer, stats.inverted_index_filter_timer);    \
-    COUNTER_UPDATE(Parent->_inverted_index_query_cache_hit_counter,                             \
-                   stats.inverted_index_query_cache_hit);                                       \
-    COUNTER_UPDATE(Parent->_inverted_index_query_cache_miss_counter,                            \
-                   stats.inverted_index_query_cache_miss);                                      \
-    COUNTER_UPDATE(Parent->_inverted_index_query_timer, stats.inverted_index_query_timer);      \
-    COUNTER_UPDATE(Parent->_inverted_index_query_null_bitmap_timer,                             \
-                   stats.inverted_index_query_null_bitmap_timer);                               \
-    COUNTER_UPDATE(Parent->_inverted_index_query_bitmap_copy_timer,                             \
-                   stats.inverted_index_query_bitmap_copy_timer);                               \
-    COUNTER_UPDATE(Parent->_inverted_index_searcher_open_timer,                                 \
-                   stats.inverted_index_searcher_open_timer);                                   \
-    COUNTER_UPDATE(Parent->_inverted_index_searcher_search_timer,                               \
-                   stats.inverted_index_searcher_search_timer);                                 \
-    COUNTER_UPDATE(Parent->_inverted_index_searcher_search_init_timer,                          \
-                   stats.inverted_index_searcher_search_init_timer);                            \
-    COUNTER_UPDATE(Parent->_inverted_index_searcher_search_exec_timer,                          \
-                   stats.inverted_index_searcher_search_exec_timer);                            \
-    COUNTER_UPDATE(Parent->_inverted_index_searcher_cache_hit_counter,                          \
-                   stats.inverted_index_searcher_cache_hit);                                    \
-    COUNTER_UPDATE(Parent->_inverted_index_searcher_cache_miss_counter,                         \
-                   stats.inverted_index_searcher_cache_miss);                                   \
-    COUNTER_UPDATE(Parent->_inverted_index_downgrade_count_counter,                             \
-                   stats.inverted_index_downgrade_count);                                       \
-    InvertedIndexProfileReporter inverted_index_profile;                                        \
-    inverted_index_profile.update(Parent->_index_filter_profile.get(),                          \
-                                  &stats.inverted_index_stats);                                 \
-    if (config::enable_file_cache) {                                                            \
-        io::FileCacheProfileReporter cache_profile(Parent->_segment_profile.get());             \
-        cache_profile.update(&stats.file_cache_stats);                                          \
-    }                                                                                           \
-    COUNTER_UPDATE(Parent->_output_index_result_column_timer,                                   \
-                   stats.output_index_result_column_timer);                                     \
-    COUNTER_UPDATE(Parent->_filtered_segment_counter, stats.filtered_segment_number);           \
-    COUNTER_UPDATE(Parent->_total_segment_counter, stats.total_segment_number);
+#define INCR_COUNTER(Parent)                                                                     \
+    COUNTER_UPDATE(Parent->_io_timer, stats.io_ns);                                              \
+    COUNTER_UPDATE(Parent->_read_compressed_counter, stats.compressed_bytes_read);               \
+    COUNTER_UPDATE(Parent->_scan_bytes, stats.uncompressed_bytes_read);                          \
+    COUNTER_UPDATE(Parent->_decompressor_timer, stats.decompress_ns);                            \
+    COUNTER_UPDATE(Parent->_read_uncompressed_counter, stats.uncompressed_bytes_read);           \
+    COUNTER_UPDATE(Parent->_block_load_timer, stats.block_load_ns);                              \
+    COUNTER_UPDATE(Parent->_block_load_counter, stats.blocks_load);                              \
+    COUNTER_UPDATE(Parent->_block_fetch_timer, stats.block_fetch_ns);                            \
+    COUNTER_UPDATE(Parent->_delete_bitmap_get_agg_timer, stats.delete_bitmap_get_agg_ns);        \
+    COUNTER_UPDATE(Parent->_scan_rows, stats.raw_rows_read);                                     \
+    COUNTER_UPDATE(Parent->_vec_cond_timer, stats.vec_cond_ns);                                  \
+    COUNTER_UPDATE(Parent->_short_cond_timer, stats.short_cond_ns);                              \
+    COUNTER_UPDATE(Parent->_expr_filter_timer, stats.expr_filter_ns);                            \
+    COUNTER_UPDATE(Parent->_block_init_timer, stats.block_init_ns);                              \
+    COUNTER_UPDATE(Parent->_block_init_seek_timer, stats.block_init_seek_ns);                    \
+    COUNTER_UPDATE(Parent->_block_init_seek_counter, stats.block_init_seek_num);                 \
+    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_keys_timer,                            \
+                   stats.generate_row_ranges_by_keys_ns);                                        \
+    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_column_conditions_timer,               \
+                   stats.generate_row_ranges_by_column_conditions_ns);                           \
+    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_bf_timer,                              \
+                   stats.generate_row_ranges_by_bf_ns);                                          \
+    COUNTER_UPDATE(Parent->_collect_iterator_merge_next_timer,                                   \
+                   stats.collect_iterator_merge_next_timer);                                     \
+    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_zonemap_timer,                         \
+                   stats.generate_row_ranges_by_zonemap_ns);                                     \
+    COUNTER_UPDATE(Parent->_segment_generate_row_range_by_dict_timer,                            \
+                   stats.generate_row_ranges_by_dict_ns);                                        \
+    COUNTER_UPDATE(Parent->_predicate_column_read_timer, stats.predicate_column_read_ns);        \
+    COUNTER_UPDATE(Parent->_non_predicate_column_read_timer, stats.non_predicate_read_ns);       \
+    COUNTER_UPDATE(Parent->_predicate_column_read_seek_timer,                                    \
+                   stats.predicate_column_read_seek_ns);                                         \
+    COUNTER_UPDATE(Parent->_predicate_column_read_seek_counter,                                  \
+                   stats.predicate_column_read_seek_num);                                        \
+    COUNTER_UPDATE(Parent->_lazy_read_timer, stats.lazy_read_ns);                                \
+    COUNTER_UPDATE(Parent->_lazy_read_seek_timer, stats.block_lazy_read_seek_ns);                \
+    COUNTER_UPDATE(Parent->_lazy_read_seek_counter, stats.block_lazy_read_seek_num);             \
+    COUNTER_UPDATE(Parent->_output_col_timer, stats.output_col_ns);                              \
+    COUNTER_UPDATE(Parent->_rows_vec_cond_filtered_counter, stats.rows_vec_cond_filtered);       \
+    COUNTER_UPDATE(Parent->_rows_short_circuit_cond_filtered_counter,                            \
+                   stats.rows_short_circuit_cond_filtered);                                      \
+    COUNTER_UPDATE(Parent->_rows_vec_cond_input_counter, stats.vec_cond_input_rows);             \
+    COUNTER_UPDATE(Parent->_rows_short_circuit_cond_input_counter,                               \
+                   stats.short_circuit_cond_input_rows);                                         \
+    for (auto& [id, info] : stats.filter_info) {                                                 \
+        Parent->add_filter_info(id, info);                                                       \
+    }                                                                                            \
+    COUNTER_UPDATE(Parent->_stats_filtered_counter, stats.rows_stats_filtered);                  \
+    COUNTER_UPDATE(Parent->_stats_rp_filtered_counter, stats.rows_stats_rp_filtered);            \
+    COUNTER_UPDATE(Parent->_dict_filtered_counter, stats.rows_dict_filtered);                    \
+    COUNTER_UPDATE(Parent->_bf_filtered_counter, stats.rows_bf_filtered);                        \
+    COUNTER_UPDATE(Parent->_del_filtered_counter, stats.rows_del_filtered);                      \
+    COUNTER_UPDATE(Parent->_del_filtered_counter, stats.rows_del_by_bitmap);                     \
+    COUNTER_UPDATE(Parent->_del_filtered_counter, stats.rows_vec_del_cond_filtered);             \
+    COUNTER_UPDATE(Parent->_conditions_filtered_counter, stats.rows_conditions_filtered);        \
+    COUNTER_UPDATE(Parent->_key_range_filtered_counter, stats.rows_key_range_filtered);          \
+    COUNTER_UPDATE(Parent->_total_pages_num_counter, stats.total_pages_num);                     \
+    COUNTER_UPDATE(Parent->_cached_pages_num_counter, stats.cached_pages_num);                   \
+    COUNTER_UPDATE(Parent->_bitmap_index_filter_counter, stats.rows_bitmap_index_filtered);      \
+    COUNTER_UPDATE(Parent->_bitmap_index_filter_timer, stats.bitmap_index_filter_timer);         \
+    COUNTER_UPDATE(Parent->_inverted_index_filter_counter, stats.rows_inverted_index_filtered);  \
+    COUNTER_UPDATE(Parent->_inverted_index_filter_timer, stats.inverted_index_filter_timer);     \
+    COUNTER_UPDATE(Parent->_inverted_index_query_cache_hit_counter,                              \
+                   stats.inverted_index_query_cache_hit);                                        \
+    COUNTER_UPDATE(Parent->_inverted_index_query_cache_miss_counter,                             \
+                   stats.inverted_index_query_cache_miss);                                       \
+    COUNTER_UPDATE(Parent->_inverted_index_query_timer, stats.inverted_index_query_timer);       \
+    COUNTER_UPDATE(Parent->_inverted_index_query_null_bitmap_timer,                              \
+                   stats.inverted_index_query_null_bitmap_timer);                                \
+    COUNTER_UPDATE(Parent->_inverted_index_query_bitmap_copy_timer,                              \
+                   stats.inverted_index_query_bitmap_copy_timer);                                \
+    COUNTER_UPDATE(Parent->_inverted_index_searcher_open_timer,                                  \
+                   stats.inverted_index_searcher_open_timer);                                    \
+    COUNTER_UPDATE(Parent->_inverted_index_searcher_search_timer,                                \
+                   stats.inverted_index_searcher_search_timer);                                  \
+    COUNTER_UPDATE(Parent->_inverted_index_searcher_search_init_timer,                           \
+                   stats.inverted_index_searcher_search_init_timer);                             \
+    COUNTER_UPDATE(Parent->_inverted_index_searcher_search_exec_timer,                           \
+                   stats.inverted_index_searcher_search_exec_timer);                             \
+    COUNTER_UPDATE(Parent->_inverted_index_searcher_cache_hit_counter,                           \
+                   stats.inverted_index_searcher_cache_hit);                                     \
+    COUNTER_UPDATE(Parent->_inverted_index_searcher_cache_miss_counter,                          \
+                   stats.inverted_index_searcher_cache_miss);                                    \
+    COUNTER_UPDATE(Parent->_inverted_index_downgrade_count_counter,                              \
+                   stats.inverted_index_downgrade_count);                                        \
+    COUNTER_UPDATE(Parent->_inverted_index_analyzer_timer, stats.inverted_index_analyzer_timer); \
+    COUNTER_UPDATE(Parent->_inverted_index_lookup_timer, stats.inverted_index_lookup_timer);     \
+    InvertedIndexProfileReporter inverted_index_profile;                                         \
+    inverted_index_profile.update(Parent->_index_filter_profile.get(),                           \
+                                  &stats.inverted_index_stats);                                  \
+    if (config::enable_file_cache) {                                                             \
+        io::FileCacheProfileReporter cache_profile(Parent->_segment_profile.get());              \
+        cache_profile.update(&stats.file_cache_stats);                                           \
+    }                                                                                            \
+    COUNTER_UPDATE(Parent->_output_index_result_column_timer,                                    \
+                   stats.output_index_result_column_timer);                                      \
+    COUNTER_UPDATE(Parent->_filtered_segment_counter, stats.filtered_segment_number);            \
+    COUNTER_UPDATE(Parent->_total_segment_counter, stats.total_segment_number);                  \
+    COUNTER_UPDATE(Parent->_variant_scan_sparse_column_timer,                                    \
+                   stats.variant_scan_sparse_column_timer_ns);                                   \
+    COUNTER_UPDATE(Parent->_variant_scan_sparse_column_bytes,                                    \
+                   stats.variant_scan_sparse_column_bytes);                                      \
+    COUNTER_UPDATE(Parent->_variant_fill_path_from_sparse_column_timer,                          \
+                   stats.variant_fill_path_from_sparse_column_timer_ns);                         \
+    COUNTER_UPDATE(Parent->_variant_subtree_default_iter_count,                                  \
+                   stats.variant_subtree_default_iter_count);                                    \
+    COUNTER_UPDATE(Parent->_variant_subtree_leaf_iter_count,                                     \
+                   stats.variant_subtree_leaf_iter_count);                                       \
+    COUNTER_UPDATE(Parent->_variant_subtree_hierarchical_iter_count,                             \
+                   stats.variant_subtree_hierarchical_iter_count);                               \
+    COUNTER_UPDATE(Parent->_variant_subtree_sparse_iter_count,                                   \
+                   stats.variant_subtree_sparse_iter_count);
 
     // Update counters for NewOlapScanner
     // Update counters from tablet reader's stats
@@ -713,10 +772,10 @@ void NewOlapScanner::_collect_profile_before_close() {
 
     // Update metrics
     DorisMetrics::instance()->query_scan_bytes->increment(
-            local_state->_read_compressed_counter->value());
+            local_state->_read_uncompressed_counter->value());
     DorisMetrics::instance()->query_scan_rows->increment(local_state->_scan_rows->value());
     auto& tablet = _tablet_reader_params.tablet;
-    tablet->query_scan_bytes->increment(local_state->_read_compressed_counter->value());
+    tablet->query_scan_bytes->increment(local_state->_read_uncompressed_counter->value());
     tablet->query_scan_rows->increment(local_state->_scan_rows->value());
     tablet->query_scan_count->increment(1);
     if (_query_statistics) {

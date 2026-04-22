@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -49,6 +50,7 @@ class CloudFullCompaction;
 class TabletHotspot;
 class CloudWarmUpManager;
 class CloudCompactionStopToken;
+class CloudSnapshotMgr;
 
 class CloudStorageEngine final : public BaseStorageEngine {
 public:
@@ -61,7 +63,7 @@ public:
     bool stopped() override;
 
     Result<BaseTabletSPtr> get_tablet(int64_t tablet_id, SyncRowsetStats* sync_stats = nullptr,
-                                      bool force_use_cache = false) override;
+                                      bool force_use_only_cached = false) override;
 
     Status start_bg_threads() override;
 
@@ -70,6 +72,8 @@ public:
     cloud::CloudMetaMgr& meta_mgr() const { return *_meta_mgr; }
 
     CloudTabletMgr& tablet_mgr() const { return *_tablet_mgr; }
+
+    CloudSnapshotMgr& cloud_snapshot_mgr() { return *_cloud_snapshot_mgr; }
 
     CloudTxnDeleteBitmapCache& txn_delete_bitmap_cache() const { return *_txn_delete_bitmap_cache; }
     SchemaCloudDictionaryCache& get_schema_cloud_dictionary_cache() {
@@ -153,6 +157,16 @@ public:
 
     Status unregister_compaction_stop_token(CloudTabletSPtr tablet, bool clear_ms);
 
+    std::chrono::time_point<std::chrono::system_clock> startup_timepoint() const {
+        return _startup_timepoint;
+    }
+
+#ifdef BE_TEST
+    void set_startup_timepoint(const std::chrono::time_point<std::chrono::system_clock>& tp) {
+        _startup_timepoint = tp;
+    }
+#endif
+
 private:
     void _refresh_storage_vault_info_thread_callback();
     void _vacuum_stale_rowsets_thread_callback();
@@ -185,6 +199,7 @@ private:
     std::unique_ptr<CloudWarmUpManager> _cloud_warm_up_manager;
     std::unique_ptr<TabletHotspot> _tablet_hotspot;
     std::unique_ptr<ThreadPool> _sync_load_for_tablets_thread_pool;
+    std::unique_ptr<CloudSnapshotMgr> _cloud_snapshot_mgr;
 
     // FileSystem with latest shared storage info, new data will be written to this fs.
     mutable std::mutex _latest_fs_mtx;
@@ -223,6 +238,8 @@ private:
 
     EngineOptions _options;
     std::mutex _store_lock;
+
+    std::chrono::time_point<std::chrono::system_clock> _startup_timepoint;
 };
 
 } // namespace doris

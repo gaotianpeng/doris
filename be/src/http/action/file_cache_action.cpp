@@ -54,6 +54,7 @@ constexpr static std::string_view CAPACITY = "capacity";
 constexpr static std::string_view RELEASE = "release";
 constexpr static std::string_view BASE_PATH = "base_path";
 constexpr static std::string_view RELEASED_ELEMENTS = "released_elements";
+constexpr static std::string_view DUMP = "dump";
 constexpr static std::string_view VALUE = "value";
 
 Status FileCacheAction::_handle_header(HttpRequest* req, std::string* json_metrics) {
@@ -72,6 +73,11 @@ Status FileCacheAction::_handle_header(HttpRequest* req, std::string* json_metri
         json[RELEASED_ELEMENTS.data()] = released;
         *json_metrics = json.ToString();
     } else if (operation == CLEAR) {
+        DBUG_EXECUTE_IF("FileCacheAction._handle_header.ignore_clear", {
+            LOG_WARNING("debug point FileCacheAction._handle_header.ignore_clear");
+            st = Status::OK();
+            return st;
+        });
         const std::string& sync = req->param(SYNC.data());
         const std::string& segment_path = req->param(VALUE.data());
         if (segment_path.empty()) {
@@ -127,6 +133,8 @@ Status FileCacheAction::_handle_header(HttpRequest* req, std::string* json_metri
                 *json_metrics = json.ToString();
             }
         }
+    } else if (operation == DUMP) {
+        io::FileCacheFactory::instance()->dump_all_caches();
     } else {
         st = Status::InternalError("invalid operation: {}", operation);
     }

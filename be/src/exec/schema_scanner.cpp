@@ -29,11 +29,13 @@
 #include "exec/schema_scanner/schema_active_queries_scanner.h"
 #include "exec/schema_scanner/schema_backend_active_tasks.h"
 #include "exec/schema_scanner/schema_backend_configuration_scanner.h"
+#include "exec/schema_scanner/schema_backend_kerberos_ticket_cache.h"
 #include "exec/schema_scanner/schema_catalog_meta_cache_stats_scanner.h"
 #include "exec/schema_scanner/schema_charsets_scanner.h"
 #include "exec/schema_scanner/schema_collations_scanner.h"
 #include "exec/schema_scanner/schema_columns_scanner.h"
 #include "exec/schema_scanner/schema_dummy_scanner.h"
+#include "exec/schema_scanner/schema_encryption_keys_scanner.h"
 #include "exec/schema_scanner/schema_file_cache_statistics.h"
 #include "exec/schema_scanner/schema_files_scanner.h"
 #include "exec/schema_scanner/schema_metadata_name_ids_scanner.h"
@@ -162,7 +164,7 @@ Status SchemaScanner::get_next_block_internal(vectorized::Block* block, bool* eo
     return Status::OK();
 }
 
-Status SchemaScanner::init(SchemaScannerParam* param, ObjectPool* pool) {
+Status SchemaScanner::init(RuntimeState* state, SchemaScannerParam* param, ObjectPool* pool) {
     if (_is_init) {
         return Status::OK();
     }
@@ -171,6 +173,8 @@ Status SchemaScanner::init(SchemaScannerParam* param, ObjectPool* pool) {
     }
 
     _param = param;
+    _timezone = state->timezone();
+    _timezone_obj = state->timezone_obj();
     _is_init = true;
 
     if (_param->profile) {
@@ -248,8 +252,12 @@ std::unique_ptr<SchemaScanner> SchemaScanner::create(TSchemaTableType::type type
         return SchemaCatalogMetaCacheStatsScanner::create_unique();
     case TSchemaTableType::SCH_ROUTINE_LOAD_JOBS:
         return SchemaRoutineLoadJobScanner::create_unique();
+    case TSchemaTableType::SCH_BACKEND_KERBEROS_TICKET_CACHE:
+        return SchemaBackendKerberosTicketCacheScanner::create_unique();
     case TSchemaTableType::SCH_BACKEND_TABLETS:
         return SchemaTabletsScanner::create_unique();
+    case TSchemaTableType::SCH_ENCRYPTION_KEYS:
+        return SchemaEncryptionKeysScanner::create_unique();
     default:
         return SchemaDummyScanner::create_unique();
         break;

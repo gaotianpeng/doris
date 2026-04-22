@@ -18,7 +18,7 @@
 package org.apache.doris.common;
 
 
-import org.apache.doris.common.security.authentication.PreExecutionAuthenticator;
+import org.apache.doris.common.security.authentication.ExecutionAuthenticator;
 import org.apache.doris.metric.Metric;
 import org.apache.doris.metric.Metric.MetricUnit;
 import org.apache.doris.metric.MetricLabel;
@@ -71,7 +71,6 @@ import java.util.function.Supplier;
 
 public class ThreadPoolManager {
     private static final Logger LOG = LogManager.getLogger(ThreadPoolManager.class);
-
     private static Map<String, ThreadPoolExecutor> nameToThreadPoolMap = Maps.newConcurrentMap();
 
     private static String[] poolMetricTypes = {"pool_size", "active_thread_num", "task_in_queue"};
@@ -122,50 +121,6 @@ public class ThreadPoolManager {
                 new LogDiscardPolicy(poolName), poolName, needRegisterMetric);
     }
 
-    public static ThreadPoolExecutor newDaemonFixedThreadPoolWithPreAuth(
-            int numThread,
-            int queueSize,
-            String poolName,
-            boolean needRegisterMetric,
-            PreExecutionAuthenticator preAuth) {
-        return newDaemonThreadPoolWithPreAuth(numThread, numThread, KEEP_ALIVE_TIME, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(queueSize), new BlockedPolicy(poolName, 60),
-                poolName, needRegisterMetric, preAuth);
-    }
-
-    public static ThreadPoolExecutor newDaemonThreadPoolWithPreAuth(
-            int corePoolSize,
-            int maximumPoolSize,
-            long keepAliveTime,
-            TimeUnit unit,
-            BlockingQueue<Runnable> workQueue,
-            RejectedExecutionHandler handler,
-            String poolName,
-            boolean needRegisterMetric,
-            PreExecutionAuthenticator preAuth) {
-        ThreadFactory threadFactory = namedThreadFactoryWithPreAuth(poolName, preAuth);
-        ThreadPoolExecutor threadPool = new ThreadPoolExecutor(corePoolSize, maximumPoolSize,
-                keepAliveTime, unit, workQueue, threadFactory, handler);
-        if (needRegisterMetric) {
-            nameToThreadPoolMap.put(poolName, threadPool);
-        }
-        return threadPool;
-    }
-
-    private static ThreadFactory namedThreadFactoryWithPreAuth(String poolName, PreExecutionAuthenticator preAuth) {
-        return new ThreadFactoryBuilder()
-                .setDaemon(true)
-                .setNameFormat(poolName + "-%d")
-                .setThreadFactory(runnable -> new Thread(() -> {
-                    try {
-                        preAuth.execute(runnable);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                }))
-                .build();
-    }
-
     public static ThreadPoolExecutor newDaemonCacheThreadPoolUseBlockedPolicy(int maxNumThread,
                                                               String poolName, boolean needRegisterMetric) {
         return newDaemonThreadPool(0, maxNumThread, KEEP_ALIVE_TIME,
@@ -185,6 +140,17 @@ public class ThreadPoolManager {
         return newDaemonThreadPool(numThread, numThread, KEEP_ALIVE_TIME, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(queueSize), new BlockedPolicy(poolName, 60),
                 poolName, needRegisterMetric);
+    }
+
+    public static ThreadPoolExecutor newDaemonFixedThreadPoolWithPreAuth(
+            int numThread,
+            int queueSize,
+            String poolName,
+            boolean needRegisterMetric,
+            ExecutionAuthenticator preAuth) {
+        return newDaemonThreadPoolWithPreAuth(numThread, numThread, KEEP_ALIVE_TIME, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(queueSize), new BlockedPolicy(poolName, 60),
+            poolName, needRegisterMetric, preAuth);
     }
 
     public static ThreadPoolExecutor newDaemonFixedThreadPool(int numThread, int queueSize,
@@ -274,6 +240,40 @@ public class ThreadPoolManager {
      */
     private static ThreadFactory namedThreadFactory(String poolName) {
         return new ThreadFactoryBuilder().setDaemon(true).setNameFormat(poolName + "-%d").build();
+    }
+
+
+    public static ThreadPoolExecutor newDaemonThreadPoolWithPreAuth(
+            int corePoolSize,
+            int maximumPoolSize,
+            long keepAliveTime,
+            TimeUnit unit,
+            BlockingQueue<Runnable> workQueue,
+            RejectedExecutionHandler handler,
+            String poolName,
+            boolean needRegisterMetric,
+            ExecutionAuthenticator preAuth) {
+        ThreadFactory threadFactory = namedThreadFactoryWithPreAuth(poolName, preAuth);
+        ThreadPoolExecutor threadPool = new ThreadPoolExecutor(corePoolSize, maximumPoolSize,
+                keepAliveTime, unit, workQueue, threadFactory, handler);
+        if (needRegisterMetric) {
+            nameToThreadPoolMap.put(poolName, threadPool);
+        }
+        return threadPool;
+    }
+
+    private static ThreadFactory namedThreadFactoryWithPreAuth(String poolName, ExecutionAuthenticator preAuth) {
+        return new ThreadFactoryBuilder()
+            .setDaemon(true)
+            .setNameFormat(poolName + "-%d")
+            .setThreadFactory(runnable -> new Thread(() -> {
+                try {
+                    preAuth.execute(runnable);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }))
+            .build();
     }
 
     private static class PriorityThreadPoolExecutor<T> extends ThreadPoolExecutor {

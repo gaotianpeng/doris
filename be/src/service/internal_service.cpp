@@ -136,6 +136,7 @@
 #include "vec/exec/format/json/new_json_reader.h"
 #include "vec/exec/format/orc/vorc_reader.h"
 #include "vec/exec/format/parquet/vparquet_reader.h"
+#include "vec/exec/format/text/text_reader.h"
 #include "vec/jsonb/serialize.h"
 #include "vec/runtime/vdata_stream_mgr.h"
 
@@ -824,6 +825,10 @@ void PInternalService::fetch_table_schema(google::protobuf::RpcController* contr
         io::IOContext io_ctx;
         io::FileCacheStatistics file_cache_statis;
         io_ctx.file_cache_stats = &file_cache_statis;
+        io::FileReaderStats file_reader_stats;
+        io_ctx.file_reader_stats = &file_reader_stats;
+        // file_slots is no use, but the lifetime should be longer than reader
+        std::vector<SlotDescriptor*> file_slots;
         switch (params.format_type) {
         case TFileFormatType::FORMAT_CSV_PLAIN:
         case TFileFormatType::FORMAT_CSV_GZ:
@@ -833,10 +838,13 @@ void PInternalService::fetch_table_schema(google::protobuf::RpcController* contr
         case TFileFormatType::FORMAT_CSV_SNAPPYBLOCK:
         case TFileFormatType::FORMAT_CSV_LZOP:
         case TFileFormatType::FORMAT_CSV_DEFLATE: {
-            // file_slots is no use
-            std::vector<SlotDescriptor*> file_slots;
-            reader = vectorized::CsvReader::create_unique(profile.get(), params, range, file_slots,
-                                                          &io_ctx);
+            reader = vectorized::CsvReader::create_unique(nullptr, profile.get(), nullptr, params,
+                                                          range, file_slots, &io_ctx);
+            break;
+        }
+        case TFileFormatType::FORMAT_TEXT: {
+            reader = vectorized::TextReader::create_unique(nullptr, profile.get(), nullptr, params,
+                                                           range, file_slots, &io_ctx);
             break;
         }
         case TFileFormatType::FORMAT_PARQUET: {
@@ -848,17 +856,13 @@ void PInternalService::fetch_table_schema(google::protobuf::RpcController* contr
             break;
         }
         case TFileFormatType::FORMAT_JSON: {
-            std::vector<SlotDescriptor*> file_slots;
             reader = vectorized::NewJsonReader::create_unique(profile.get(), params, range,
                                                               file_slots, &io_ctx);
             break;
         }
         case TFileFormatType::FORMAT_AVRO: {
-            // file_slots is no use
-            std::vector<SlotDescriptor*> file_slots;
             reader = vectorized::AvroJNIReader::create_unique(profile.get(), params, range,
                                                               file_slots);
-            st = ((vectorized::AvroJNIReader*)(reader.get()))->init_fetch_table_schema_reader();
             break;
         }
         default:
@@ -867,6 +871,12 @@ void PInternalService::fetch_table_schema(google::protobuf::RpcController* contr
             st.to_protobuf(result->mutable_status());
             return;
         }
+        if (!st.ok()) {
+            LOG(WARNING) << "failed to create reader, errmsg=" << st;
+            st.to_protobuf(result->mutable_status());
+            return;
+        }
+        st = reader->init_schema_reader();
         if (!st.ok()) {
             LOG(WARNING) << "failed to init reader, errmsg=" << st;
             st.to_protobuf(result->mutable_status());
@@ -962,6 +972,10 @@ void PInternalService::test_jdbc_connection(google::protobuf::RpcController* con
     bool ret = _heavy_work_pool.try_offer([request, result, done]() {
         VLOG_RPC << "test jdbc connection";
         brpc::ClosureGuard closure_guard(done);
+        std::shared_ptr<MemTrackerLimiter> mem_tracker = MemTrackerLimiter::create_shared(
+                MemTrackerLimiter::Type::OTHER,
+                fmt::format("InternalService::test_jdbc_connection"));
+        SCOPED_ATTACH_TASK(mem_tracker);
         TTableDescriptor table_desc;
         vectorized::JdbcConnectorParam jdbc_param;
         Status st = Status::OK();
@@ -1209,7 +1223,12 @@ void PInternalService::fetch_remote_tablet_schema(google::protobuf::RpcControlle
                     }
                     auto schema = res.value()->merged_tablet_schema();
                     if (schema != nullptr) {
-                        tablet_schemas.push_back(schema);
+                        if (!schema->need_record_variant_extended_schema()) {
+                            schema = res.value()->calculate_variant_extended_schema();
+                        }
+                        if (schema != nullptr) {
+                            tablet_schemas.push_back(schema);
+                        }
                     }
                 }
                 if (!tablet_schemas.empty()) {

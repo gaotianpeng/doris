@@ -33,7 +33,6 @@ import org.apache.doris.nereids.trees.TableSample;
 import org.apache.doris.nereids.trees.expressions.ComparisonPredicate;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.GreaterThan;
-import org.apache.doris.nereids.trees.expressions.GreaterThanEqual;
 import org.apache.doris.nereids.trees.expressions.LessThanEqual;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
@@ -49,6 +48,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -62,7 +62,6 @@ public class LogicalHudiScan extends LogicalFileScan {
     private static final Logger LOG = LogManager.getLogger(LogicalHudiScan.class);
 
     // for hudi incremental read
-    private final Optional<TableScanParams> scanParams;
     private final Optional<IncrementalRelation> incrementalRelation;
 
     /**
@@ -74,22 +73,18 @@ public class LogicalHudiScan extends LogicalFileScan {
             Optional<TableSnapshot> tableSnapshot,
             Optional<TableScanParams> scanParams, Optional<IncrementalRelation> incrementalRelation) {
         super(id, table, qualifier, groupExpression, logicalProperties,
-                selectedPartitions, tableSample, tableSnapshot);
+                selectedPartitions, tableSample, tableSnapshot, scanParams);
         Objects.requireNonNull(scanParams, "scanParams should not null");
         Objects.requireNonNull(incrementalRelation, "incrementalRelation should not null");
-        this.scanParams = scanParams;
         this.incrementalRelation = incrementalRelation;
     }
 
     public LogicalHudiScan(RelationId id, ExternalTable table, List<String> qualifier,
-            Optional<TableSample> tableSample, Optional<TableSnapshot> tableSnapshot) {
+            Optional<TableSample> tableSample, Optional<TableSnapshot> tableSnapshot,
+            Optional<TableScanParams> scanParams) {
         this(id, table, qualifier, Optional.empty(), Optional.empty(),
                 ((HMSExternalTable) table).initHudiSelectedPartitions(tableSnapshot), tableSample, tableSnapshot,
-                Optional.empty(), Optional.empty());
-    }
-
-    public Optional<TableScanParams> getScanParams() {
-        return scanParams;
+                scanParams, Optional.empty());
     }
 
     public Optional<IncrementalRelation> getIncrementalRelation() {
@@ -99,7 +94,7 @@ public class LogicalHudiScan extends LogicalFileScan {
     /**
      * replace incremental params as AND expression
      * incr('beginTime'='20240308110257169', 'endTime'='20240308110677278') =>
-     * _hoodie_commit_time >= 20240308110257169 and _hoodie_commit_time <= '20240308110677278'
+     * _hoodie_commit_time > 20240308110257169 and _hoodie_commit_time <= '20240308110677278'
      */
     public Set<Expression> generateIncrementalExpression(List<Slot> slots) {
         if (!incrementalRelation.isPresent()) {
@@ -118,9 +113,7 @@ public class LogicalHudiScan extends LogicalFileScan {
         StringLiteral upperValue = new StringLiteral(incrementalRelation.get().getEndTs());
         StringLiteral lowerValue = new StringLiteral(incrementalRelation.get().getStartTs());
         ComparisonPredicate less = new LessThanEqual(timeField, upperValue);
-        ComparisonPredicate great = incrementalRelation.get().isIncludeStartTime()
-                ? new GreaterThanEqual(timeField, lowerValue)
-                : new GreaterThan(timeField, lowerValue);
+        ComparisonPredicate great = new GreaterThan(timeField, lowerValue);
         return ImmutableSet.of(great, less);
     }
 
@@ -169,20 +162,20 @@ public class LogicalHudiScan extends LogicalFileScan {
      * Set scan params for incremental read
      *
      * @param table should be hudi table
-     * @param scanParams including incremental read params
      */
-    public LogicalHudiScan withScanParams(HMSExternalTable table, TableScanParams scanParams) {
+    public LogicalHudiScan withScanParams(HMSExternalTable table, Optional<TableScanParams> optScanParams) {
         Optional<IncrementalRelation> newIncrementalRelation = Optional.empty();
-        Optional<TableScanParams> newScanParams = Optional.empty();
-        if (scanParams != null && scanParams.incrementalRead()) {
-            Map<String, String> optParams = table.getHadoopProperties();
-            if (scanParams.getParams().containsKey("beginTime")) {
-                optParams.put("hoodie.datasource.read.begin.instanttime", scanParams.getParams().get("beginTime"));
+        if (optScanParams.isPresent() && optScanParams.get().incrementalRead()) {
+            TableScanParams scanParams = optScanParams.get();
+            // Clone the getBackendStorageProperties, because we need to modify it for the incremental read
+            Map<String, String> optParams = new HashMap<>(table.getBackendStorageProperties());
+            if (scanParams.getMapParams().containsKey("beginTime")) {
+                optParams.put("hoodie.datasource.read.begin.instanttime", scanParams.getMapParams().get("beginTime"));
             }
-            if (scanParams.getParams().containsKey("endTime")) {
-                optParams.put("hoodie.datasource.read.end.instanttime", scanParams.getParams().get("endTime"));
+            if (scanParams.getMapParams().containsKey("endTime")) {
+                optParams.put("hoodie.datasource.read.end.instanttime", scanParams.getMapParams().get("endTime"));
             }
-            scanParams.getParams().forEach((k, v) -> {
+            scanParams.getMapParams().forEach((k, v) -> {
                 if (k.startsWith("hoodie.")) {
                     optParams.put(k, v);
                 }
@@ -203,19 +196,18 @@ public class LogicalHudiScan extends LogicalFileScan {
                     newIncrementalRelation = Optional.of(new EmptyIncrementalRelation(optParams));
                 } else if (isCowOrRoTable) {
                     newIncrementalRelation = Optional.of(new COWIncrementalRelation(
-                            optParams, HiveMetaStoreClientHelper.getConfiguration(table), hudiClient));
+                        optParams, HiveMetaStoreClientHelper.getConfiguration(table), hudiClient));
                 } else {
                     newIncrementalRelation = Optional.of(new MORIncrementalRelation(
-                            optParams, HiveMetaStoreClientHelper.getConfiguration(table), hudiClient));
+                        optParams, HiveMetaStoreClientHelper.getConfiguration(table), hudiClient));
                 }
             } catch (Exception e) {
                 throw new AnalysisException(
-                        "Failed to create incremental relation for table: " + table.getFullQualifiers(), e);
+                    "Failed to create incremental relation for table: " + table.getFullQualifiers(), e);
             }
         }
-        newScanParams = Optional.ofNullable(scanParams);
         return new LogicalHudiScan(relationId, table, qualifier, Optional.empty(),
-                Optional.empty(), selectedPartitions, tableSample, tableSnapshot,
-                newScanParams, newIncrementalRelation);
+            Optional.empty(), selectedPartitions, tableSample, tableSnapshot,
+            optScanParams, newIncrementalRelation);
     }
 }

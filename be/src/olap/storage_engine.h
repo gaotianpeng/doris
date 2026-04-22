@@ -83,6 +83,9 @@ using CumuCompactionPolicyTable =
 class StorageEngine;
 class CloudStorageEngine;
 
+extern bvar::Status<int64_t> g_max_rowsets_with_useless_delete_bitmap;
+extern bvar::Status<int64_t> g_max_rowsets_with_useless_delete_bitmap_version;
+
 // StorageEngine singleton to manage all Table pointers.
 // Providing add/drop/get operations.
 // StorageEngine instance doesn't own the Table resources, just hold the pointer,
@@ -111,7 +114,7 @@ public:
 
     virtual Result<BaseTabletSPtr> get_tablet(int64_t tablet_id,
                                               SyncRowsetStats* sync_stats = nullptr,
-                                              bool force_use_cache = false) = 0;
+                                              bool force_use_only_cached = false) = 0;
 
     void register_report_listener(ReportWorker* listener);
     void deregister_report_listener(ReportWorker* listener);
@@ -230,7 +233,7 @@ public:
     Status create_tablet(const TCreateTabletReq& request, RuntimeProfile* profile);
 
     Result<BaseTabletSPtr> get_tablet(int64_t tablet_id, SyncRowsetStats* sync_stats = nullptr,
-                                      bool force_use_cache = false) override;
+                                      bool force_use_only_cached = false) override;
 
     void clear_transaction_task(const TTransactionId transaction_id);
     void clear_transaction_task(const TTransactionId transaction_id,
@@ -258,6 +261,11 @@ public:
 
     void start_delete_unused_rowset();
     void add_unused_rowset(RowsetSharedPtr rowset);
+    using DeleteBitmapKeyRanges =
+            std::vector<std::tuple<DeleteBitmap::BitmapKey, DeleteBitmap::BitmapKey>>;
+    void add_unused_delete_bitmap_key_ranges(int64_t tablet_id,
+                                             const std::vector<RowsetId>& rowsets,
+                                             const DeleteBitmapKeyRanges& key_ranges);
 
     // Obtain shard path for new tablet.
     //
@@ -469,6 +477,9 @@ private:
 
     std::mutex _gc_mutex;
     std::unordered_map<RowsetId, RowsetSharedPtr> _unused_rowsets;
+    // tablet_id, unused_rowsets, [start_version, end_version]
+    std::vector<std::tuple<int64_t, std::vector<RowsetId>, DeleteBitmapKeyRanges>>
+            _unused_delete_bitmap;
     PendingRowsetSet _pending_local_rowsets;
     PendingRowsetSet _pending_remote_rowsets;
 

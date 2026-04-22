@@ -17,21 +17,18 @@
 
 package org.apache.doris.datasource.iceberg;
 
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ThreadPoolManager;
-import org.apache.doris.common.security.authentication.PreExecutionAuthenticator;
 import org.apache.doris.datasource.ExternalCatalog;
 import org.apache.doris.datasource.InitCatalogLog;
 import org.apache.doris.datasource.SessionContext;
 import org.apache.doris.datasource.operations.ExternalMetadataOperations;
-import org.apache.doris.datasource.property.PropertyConverter;
+import org.apache.doris.datasource.property.metastore.AbstractIcebergProperties;
 import org.apache.doris.transaction.TransactionManagerFactory;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.iceberg.catalog.Catalog;
 
 import java.util.List;
-import java.util.Map;
 
 public abstract class IcebergExternalCatalog extends ExternalCatalog {
 
@@ -46,24 +43,44 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
     protected String icebergCatalogType;
     protected Catalog catalog;
 
+    private AbstractIcebergProperties msProperties;
+
     public IcebergExternalCatalog(long catalogId, String name, String comment) {
         super(catalogId, name, InitCatalogLog.Type.ICEBERG, comment);
     }
 
     // Create catalog based on catalog type
-    protected abstract void initCatalog();
+    protected void initCatalog() {
+        try {
+            msProperties = (AbstractIcebergProperties) catalogProperty.getMetastoreProperties();
+            this.catalog = msProperties.initializeCatalog(getName(), catalogProperty
+                    .getOrderedStoragePropertiesList());
+
+            this.icebergCatalogType = msProperties.getIcebergCatalogType();
+        } catch (ClassCastException e) {
+            throw new RuntimeException("Invalid properties for Iceberg catalog: " + getProperties(), e);
+        } catch (Exception e) {
+            throw new RuntimeException("Unexpected error while initializing Iceberg catalog: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public void checkProperties() throws DdlException {
+        super.checkProperties();
+        catalogProperty.checkMetaStoreAndStorageProperties(AbstractIcebergProperties.class);
+    }
 
     @Override
     protected synchronized void initPreExecutionAuthenticator() {
-        if (preExecutionAuthenticator == null) {
-            preExecutionAuthenticator = new PreExecutionAuthenticator(getConfiguration());
+        if (executionAuthenticator == null) {
+            executionAuthenticator = msProperties.getExecutionAuthenticator();
         }
     }
 
     @Override
     protected void initLocalObjectsImpl() {
-        initPreExecutionAuthenticator();
         initCatalog();
+        initPreExecutionAuthenticator();
         IcebergMetadataOps ops = ExternalMetadataOperations.newIcebergMetadataOps(this, catalog);
         transactionManager = TransactionManagerFactory.createIcebergTransactionManager(ops);
         threadPoolWithPreAuth = ThreadPoolManager.newDaemonFixedThreadPoolWithPreAuth(
@@ -71,7 +88,7 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
                 Integer.MAX_VALUE,
                 String.format("iceberg_catalog_%s_executor_pool", name),
                 true,
-                preExecutionAuthenticator);
+                executionAuthenticator);
         metadataOps = ops;
     }
 
@@ -106,7 +123,12 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
     @Override
     public List<String> listTableNames(SessionContext ctx, String dbName) {
         makeSureInitialized();
-        return metadataOps.listTableNames(dbName);
+        // On the Doris side, the result of SHOW TABLES for Iceberg external tables includes both tables and views,
+        // so the combined set of tables and views is used here.
+        List<String> tableNames = metadataOps.listTableNames(dbName);
+        List<String> viewNames = metadataOps.listViewNames(dbName);
+        tableNames.addAll(viewNames);
+        return tableNames;
     }
 
     @Override
@@ -117,8 +139,8 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
         }
     }
 
-    protected void initS3Param(Configuration conf) {
-        Map<String, String> properties = catalogProperty.getHadoopProperties();
-        conf.set(Constants.AWS_CREDENTIALS_PROVIDER, PropertyConverter.getAWSCredentialsProviders(properties));
+    @Override
+    public boolean viewExists(String dbName, String viewName) {
+        return metadataOps.viewExists(dbName, viewName);
     }
 }

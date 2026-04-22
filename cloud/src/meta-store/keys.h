@@ -45,6 +45,7 @@
 // 0x01 "meta" ${instance_id} "delete_bitmap_pending" ${table_id}                                -> PendingDeleteBitmapPB 
 // 0x01 "meta" ${instance_id} "delete_bitmap" ${tablet_id} ${rowset_id} ${version} ${segment_id} -> roaringbitmap
 // 0x01 "meta" ${instance_id} "tablet_schema_pb_dict" ${index_id}                                -> SchemaCloudDictionary
+// 0x01 "meta" ${instance_id} "mow_tablet_job" ${table_id} ${initiator_id}                      -> MowTabletJobPB
 //
 // 0x01 "stats" ${instance_id} "tablet" ${table_id} ${index_id} ${partition_id} ${tablet_id}               -> TabletStatsPB
 // 0x01 "stats" ${instance_id} "tablet" ${table_id} ${index_id} ${partition_id} ${tablet_id} "data_size"   -> int64
@@ -68,6 +69,9 @@
 // 0x01 "copy" ${instance_id} "loading_file" ${stage_id} ${table_id} ${obj_name} ${etag}   -> CopyFilePB
 //
 // 0x01 "storage_vault" ${instance_id} "vault" ${resource_id}                              -> StorageVaultPB
+//
+// 0x01 "job" ${instance_id} "restore_tablet" ${tablet_id}                             -> RestoreJobCloudPB
+// 0x01 "job" ${instance_id} "restore_rowset" ${tablet_id} ${version}                  -> RowsetMetaCloudPB
 //
 // 0x02 "system" "meta-service" "registry"                                                 -> MetaServiceRegistryPB
 // 0x02 "system" "meta-service" "arn_info"                                                 -> RamUserPB
@@ -190,7 +194,13 @@ using StorageVaultKeyInfo = BasicKeyInfo<26, std::tuple<std::string, std::string
 using TableVersionKeyInfo = BasicKeyInfo<27, std::tuple<std::string, int64_t, int64_t>>;
 //                                                      0:instance_id  1:index_id
 using MetaSchemaPBDictionaryInfo = BasicKeyInfo<28 , std::tuple<std::string,  int64_t>>;
+//                                                        0:instance_id 1:table_id 2:initiator
+using MowTabletJobInfo = BasicKeyInfo<29 , std::tuple<std::string, int64_t, int64_t>>;
 
+//                                                      0:instance_id  1:tablet_id
+using JobRestoreTabletKeyInfo = BasicKeyInfo<30, std::tuple<std::string, int64_t>>;
+//                                                      0:instance_id  1:tablet_id  2:version
+using JobRestoreRowsetKeyInfo = BasicKeyInfo<31, std::tuple<std::string, int64_t,     int64_t>>;
 
 void instance_key(const InstanceKeyInfo& in, std::string* out);
 static inline std::string instance_key(const InstanceKeyInfo& in) { std::string s; instance_key(in, &s); return s; }
@@ -224,6 +234,7 @@ void meta_delete_bitmap_key(const MetaDeleteBitmapInfo& in, std::string* out);
 void meta_delete_bitmap_update_lock_key(const MetaDeleteBitmapUpdateLockInfo& in, std::string* out);
 void meta_pending_delete_bitmap_key(const MetaPendingDeleteBitmapInfo& in, std::string* out);
 void meta_schema_pb_dictionary_key(const MetaSchemaPBDictionaryInfo& in, std::string* out);
+void mow_tablet_job_key(const MowTabletJobInfo& in, std::string* out);
 static inline std::string meta_rowset_key(const MetaRowsetKeyInfo& in) { std::string s; meta_rowset_key(in, &s); return s; }
 static inline std::string meta_rowset_tmp_key(const MetaRowsetTmpKeyInfo& in) { std::string s; meta_rowset_tmp_key(in, &s); return s; }
 static inline std::string meta_tablet_idx_key(const MetaTabletIdxKeyInfo& in) { std::string s; meta_tablet_idx_key(in, &s); return s; }
@@ -233,6 +244,7 @@ static inline std::string meta_delete_bitmap_key(const MetaDeleteBitmapInfo& in)
 static inline std::string meta_delete_bitmap_update_lock_key(const MetaDeleteBitmapUpdateLockInfo& in) { std::string s; meta_delete_bitmap_update_lock_key(in, &s); return s; }
 static inline std::string meta_pending_delete_bitmap_key(const MetaPendingDeleteBitmapInfo& in) { std::string s; meta_pending_delete_bitmap_key(in, &s); return s; }
 static inline std::string meta_schema_pb_dictionary_key(const MetaSchemaPBDictionaryInfo& in) { std::string s; meta_schema_pb_dictionary_key(in, &s); return s; }
+static inline std::string mow_tablet_job_key(const MowTabletJobInfo& in) { std::string s; mow_tablet_job_key(in, &s); return s; }
 
 std::string recycle_key_prefix(std::string_view instance_id);
 void recycle_index_key(const RecycleIndexKeyInfo& in, std::string* out);
@@ -260,6 +272,11 @@ static inline std::string stats_tablet_num_rowsets_key(const StatsTabletKeyInfo&
 static inline std::string stats_tablet_num_segs_key(const StatsTabletKeyInfo& in) { std::string s; stats_tablet_num_segs_key(in, &s); return s; }
 static inline std::string stats_tablet_index_size_key(const StatsTabletKeyInfo& in) { std::string s; stats_tablet_index_size_key(in, &s); return s; }
 static inline std::string stats_tablet_segment_size_key(const StatsTabletKeyInfo& in) { std::string s; stats_tablet_segment_size_key(in, &s); return s; }
+
+void job_restore_tablet_key(const JobRestoreTabletKeyInfo& in, std::string* out);
+static inline std::string job_restore_tablet_key(const JobRestoreTabletKeyInfo& in) { std::string s; job_restore_tablet_key(in, &s); return s; }
+void job_restore_rowset_key(const JobRestoreRowsetKeyInfo& in, std::string* out);
+static inline std::string job_restore_rowset_key(const JobRestoreRowsetKeyInfo& in) { std::string s; job_restore_rowset_key(in, &s); return s; }
 
 void job_recycle_key(const JobRecycleKeyInfo& in, std::string* out);
 void job_check_key(const JobRecycleKeyInfo& in, std::string* out);

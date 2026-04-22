@@ -103,8 +103,6 @@ Status VScanner::get_block(RuntimeState* state, Block* block, bool* eof) {
         }
     }
 
-    int64_t old_scan_rows = _num_rows_read;
-    int64_t old_scan_bytes = _num_byte_read;
     {
         do {
             // if step 2 filter all rows of block, and block will be reused to get next rows,
@@ -134,11 +132,6 @@ Status VScanner::get_block(RuntimeState* state, Block* block, bool* eof) {
             _num_rows_return += block->rows();
         } while (!_should_stop && !state->is_cancelled() && block->rows() == 0 && !(*eof) &&
                  _num_rows_read < rows_read_threshold);
-    }
-
-    if (_query_statistics) {
-        _query_statistics->add_scan_rows(_num_rows_read - old_scan_rows);
-        _query_statistics->add_scan_bytes(_num_byte_read - old_scan_bytes);
     }
 
     if (state->is_cancelled()) {
@@ -239,13 +232,15 @@ Status VScanner::try_append_late_arrival_runtime_filter() {
 }
 
 Status VScanner::close(RuntimeState* state) {
-    if (_is_closed) {
-        return Status::OK();
-    }
-
+#ifndef BE_TEST
     COUNTER_UPDATE(_local_state->_scanner_wait_worker_timer, _scanner_wait_worker_timer);
-    _is_closed = true;
+#endif
     return Status::OK();
+}
+
+bool VScanner::_try_close() {
+    bool expected = false;
+    return _is_closed.compare_exchange_strong(expected, true);
 }
 
 void VScanner::_collect_profile_before_close() {

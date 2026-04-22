@@ -379,6 +379,8 @@ struct OlapReaderStatistics {
     int64_t inverted_index_searcher_cache_hit = 0;
     int64_t inverted_index_searcher_cache_miss = 0;
     int64_t inverted_index_downgrade_count = 0;
+    int64_t inverted_index_analyzer_timer = 0;
+    int64_t inverted_index_lookup_timer = 0;
     InvertedIndexStatistics inverted_index_stats;
 
     int64_t output_index_result_column_timer = 0;
@@ -417,6 +419,14 @@ struct OlapReaderStatistics {
 
     int64_t segment_create_column_readers_timer_ns = 0;
     int64_t segment_load_index_timer_ns = 0;
+
+    int64_t variant_scan_sparse_column_timer_ns = 0;
+    int64_t variant_scan_sparse_column_bytes = 0;
+    int64_t variant_fill_path_from_sparse_column_timer_ns = 0;
+    int64_t variant_subtree_default_iter_count = 0;
+    int64_t variant_subtree_leaf_iter_count = 0;
+    int64_t variant_subtree_hierarchical_iter_count = 0;
+    int64_t variant_subtree_sparse_iter_count = 0;
 };
 
 using ColumnId = uint32_t;
@@ -540,16 +550,16 @@ inline RowsetId extract_rowset_id(std::string_view filename) {
 class DeleteBitmap;
 // merge on write context
 struct MowContext {
-    MowContext(int64_t version, int64_t txnid, const RowsetIdUnorderedSet& ids,
+    MowContext(int64_t version, int64_t txnid, std::shared_ptr<RowsetIdUnorderedSet> ids,
                std::vector<RowsetSharedPtr> rowset_ptrs, std::shared_ptr<DeleteBitmap> db)
             : max_version(version),
               txn_id(txnid),
-              rowset_ids(ids),
+              rowset_ids(std::move(ids)),
               rowset_ptrs(std::move(rowset_ptrs)),
               delete_bitmap(std::move(db)) {}
     int64_t max_version;
     int64_t txn_id;
-    const RowsetIdUnorderedSet& rowset_ids;
+    std::shared_ptr<RowsetIdUnorderedSet> rowset_ids;
     std::vector<RowsetSharedPtr> rowset_ptrs;
     std::shared_ptr<DeleteBitmap> delete_bitmap;
 };

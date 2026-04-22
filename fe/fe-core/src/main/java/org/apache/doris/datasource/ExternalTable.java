@@ -33,6 +33,8 @@ import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.ExternalSchemaCache.SchemaCacheKey;
 import org.apache.doris.datasource.mvcc.MvccSnapshot;
+import org.apache.doris.nereids.rules.expression.rules.SortedPartitionRanges;
+import org.apache.doris.nereids.trees.plans.algebra.CatalogRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFileScan.SelectedPartitions;
 import org.apache.doris.persist.gson.GsonPostProcessable;
 import org.apache.doris.persist.gson.GsonUtils;
@@ -43,9 +45,10 @@ import org.apache.doris.statistics.util.StatisticsUtil;
 import org.apache.doris.thrift.TTableDescriptor;
 
 import com.google.common.base.Objects;
+import com.google.common.base.Strings;
 import com.google.common.collect.Sets;
 import com.google.gson.annotations.SerializedName;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -89,6 +92,9 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
     protected boolean objectCreated;
     protected ExternalCatalog catalog;
     protected ExternalDatabase db;
+    // Used to save the mapping between local and remote names.
+    // prebuild it for performance.
+    protected NameMapping nameMapping;
 
     /**
      * No args constructor for persist.
@@ -117,6 +123,7 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
         this.dbName = db.getFullName();
         this.type = type;
         this.objectCreated = false;
+        this.nameMapping = new NameMapping(catalog.getId(), dbName, name, db.getRemoteName(), getRemoteName());
     }
 
     public void setCatalog(ExternalCatalog catalog) {
@@ -135,7 +142,7 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
         return false;
     }
 
-    protected void makeSureInitialized() {
+    protected synchronized void makeSureInitialized() {
         try {
             // getDbOrAnalysisException will call makeSureInitialized in ExternalCatalog.
             ExternalDatabase db = catalog.getDbOrAnalysisException(dbName);
@@ -157,7 +164,7 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
     }
 
     public String getRemoteName() {
-        return remoteName;
+        return Strings.isNullOrEmpty(remoteName)  ? name : remoteName;
     }
 
     @Override
@@ -168,7 +175,7 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
     @Override
     public List<Column> getFullSchema() {
         ExternalSchemaCache cache = Env.getCurrentEnv().getExtMetaCacheMgr().getSchemaCache(catalog);
-        Optional<SchemaCacheValue> schemaCacheValue = cache.getSchemaValue(dbName, name);
+        Optional<SchemaCacheValue> schemaCacheValue = cache.getSchemaValue(new SchemaCacheKey(getOrBuildNameMapping()));
         return schemaCacheValue.map(SchemaCacheValue::getSchema).orElse(null);
     }
 
@@ -389,9 +396,9 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
         throw new NotImplementedException("getChunkSized not implemented");
     }
 
-    protected Optional<SchemaCacheValue> getSchemaCacheValue() {
+    public Optional<SchemaCacheValue> getSchemaCacheValue() {
         ExternalSchemaCache cache = Env.getCurrentEnv().getExtMetaCacheMgr().getSchemaCache(catalog);
-        return cache.getSchemaValue(dbName, name);
+        return cache.getSchemaValue(new SchemaCacheKey(getOrBuildNameMapping()));
     }
 
     @Override
@@ -448,6 +455,18 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
         return false;
     }
 
+    /**
+     * Get sorted partition ranges for binary search filtering.
+     * Subclasses can override this method to provide sorted partition ranges
+     * for efficient partition pruning.
+     *
+     * @param scan the catalog relation
+     * @return sorted partition ranges, or empty if not supported
+     */
+    public Optional<SortedPartitionRanges<String>> getSortedPartitionRanges(CatalogRelation scan) {
+        return Optional.empty();
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -493,7 +512,33 @@ public class ExternalTable implements TableIf, Writable, GsonPostProcessable {
         return dbName;
     }
 
+    public String getRemoteDbName() {
+        return db.getRemoteName();
+    }
+
     public TableAttributes getTableAttributes() {
         return tableAttributes;
+    }
+
+    /**
+     * Build the name mapping for this table.
+     * If "use_meta_cache" is true, the "nameMapping" should already be created in constructor.
+     * But if "use_meta_cache" is false, we can not create "nameMapping" in constructor because the catalog and db
+     * object may be null at that time.
+     * So we need to check and build the name mapping here, for both "use_meta_cache" true or false.
+     *
+     * @return
+     */
+    public NameMapping getOrBuildNameMapping() {
+        if (nameMapping != null) {
+            return nameMapping;
+        }
+        synchronized (this) {
+            if (nameMapping != null) {
+                return nameMapping;
+            }
+            nameMapping = new NameMapping(catalog.getId(), dbName, name, db.getRemoteName(), getRemoteName());
+            return nameMapping;
+        }
     }
 }

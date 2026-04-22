@@ -88,6 +88,9 @@ DECLARE_String(custom_config_dir);
 // Dir of jdbc drivers
 DECLARE_String(jdbc_drivers_dir);
 
+// Dir of java udf
+DECLARE_String(java_udf_dir);
+
 // cluster id
 DECLARE_Int32(cluster_id);
 // port on which BackendService is exported
@@ -306,6 +309,8 @@ DECLARE_mBool(enable_batch_download);
 DECLARE_mBool(enable_download_md5sum_check);
 // download binlog meta timeout
 DECLARE_mInt32(download_binlog_meta_timeout_ms);
+// the interval time(seconds) for agent report index policy to FE
+DECLARE_mInt32(report_index_policy_interval_seconds);
 
 // deprecated, use env var LOG_DIR in be.conf
 DECLARE_String(sys_log_dir);
@@ -454,7 +459,7 @@ DECLARE_mInt32(index_page_cache_stale_sweep_time_sec);
 // great impact on the performance of MOW, so it can be longer.
 DECLARE_mInt32(pk_index_page_cache_stale_sweep_time_sec);
 
-DECLARE_Bool(enable_low_cardinality_optimize);
+DECLARE_mBool(enable_low_cardinality_optimize);
 DECLARE_Bool(enable_low_cardinality_cache_code);
 
 // be policy
@@ -709,6 +714,10 @@ DECLARE_mInt32(memory_maintenance_sleep_time_ms);
 // After minor gc, no minor gc during sleep, but full gc is possible.
 DECLARE_mInt32(memory_gc_sleep_time_ms);
 
+// Small memory task threshold in bytes for memory tracker limiter
+// Tasks with memory consumption below this threshold will not be cancelled during memory pressure
+DECLARE_mInt64(mem_tracker_limit_small_memory_task_bytes);
+
 // max write buffer size before flush, default 200MB
 DECLARE_mInt64(write_buffer_size);
 // max buffer size used in memtable for the aggregated table, default 400MB
@@ -828,6 +837,8 @@ DECLARE_Int64(brpc_max_body_size);
 // Default, if the physical memory is less than or equal to 64G, the value is 1G
 //          if the physical memory is greater than 64G, the value is physical memory * mem_limit(0.8) / 1024 * 20
 DECLARE_Int64(brpc_socket_max_unwritten_bytes);
+// Whether to set FLAGS_usercode_in_pthread to true in brpc
+DECLARE_mBool(brpc_usercode_in_pthread);
 // TODO(zxy): expect to be true in v1.3
 // Whether to embed the ProtoBuf Request serialized string together with Tuple/Block data into
 // Controller Attachment and send it through http brpc when the length of the Tuple/Block data
@@ -1047,6 +1058,7 @@ DECLARE_mInt32(remove_unused_remote_files_interval_sec); // 6h
 DECLARE_mInt32(confirm_unused_remote_files_interval_sec);
 DECLARE_Int32(cold_data_compaction_thread_num);
 DECLARE_mInt32(cold_data_compaction_interval_sec);
+DECLARE_mInt32(cold_data_compaction_score_threshold);
 
 DECLARE_Int32(min_s3_file_system_thread_num);
 DECLARE_Int32(max_s3_file_system_thread_num);
@@ -1107,11 +1119,10 @@ DECLARE_mInt32(segcompaction_num_threads);
 // enable java udf and jdbc scannode
 DECLARE_Bool(enable_java_support);
 
-// enable prefetch tablets before opening
-DECLARE_mBool(enable_prefetch_tablet);
-
 // Set config randomly to check more issues in github workflow
 DECLARE_Bool(enable_fuzzy_mode);
+
+DECLARE_Bool(enable_graceful_exit_check);
 
 DECLARE_Bool(enable_debug_points);
 
@@ -1163,16 +1174,26 @@ DECLARE_mInt64(cache_lock_held_long_tail_threshold_us);
 // enable this option; otherwise, it is recommended to leave it disabled.
 DECLARE_mBool(enable_file_cache_keep_base_compaction_output);
 DECLARE_mBool(enable_file_cache_adaptive_write);
+DECLARE_mDouble(file_cache_keep_base_compaction_output_min_hit_ratio);
+DECLARE_mDouble(file_cache_meta_store_vs_file_system_diff_num_threshold);
+DECLARE_mDouble(file_cache_keep_schema_change_output_min_hit_ratio);
 DECLARE_mInt64(file_cache_remove_block_qps_limit);
 DECLARE_mInt64(file_cache_background_gc_interval_ms);
+DECLARE_mInt64(file_cache_background_block_lru_update_interval_ms);
+DECLARE_mInt64(file_cache_background_block_lru_update_qps_limit);
 DECLARE_mBool(enable_reader_dryrun_when_download_file_cache);
 DECLARE_mInt64(file_cache_background_monitor_interval_ms);
 DECLARE_mInt64(file_cache_background_ttl_gc_interval_ms);
 DECLARE_mInt64(file_cache_background_ttl_gc_batch);
 DECLARE_Int32(file_cache_downloader_thread_num_min);
 DECLARE_Int32(file_cache_downloader_thread_num_max);
-
-DECLARE_mBool(enable_reader_dryrun_when_download_file_cache);
+// used to persist lru information before be reboot and load the info back
+DECLARE_mInt64(file_cache_background_lru_dump_interval_ms);
+// dump queue only if the queue update specific times through several dump intervals
+DECLARE_mInt64(file_cache_background_lru_dump_update_cnt_threshold);
+DECLARE_mInt64(file_cache_background_lru_dump_tail_record_num);
+DECLARE_mInt64(file_cache_background_lru_log_replay_interval_ms);
+DECLARE_mBool(enable_evaluate_shadow_queue_diff);
 
 // inverted index searcher cache
 // cache entry stay time after lookup
@@ -1182,7 +1203,7 @@ DECLARE_mInt32(inverted_index_cache_stale_sweep_time_sec);
 // inverted index searcher cache size
 DECLARE_String(inverted_index_searcher_cache_limit);
 // set `true` to enable insert searcher into cache when write inverted index data
-DECLARE_Bool(enable_write_index_searcher_cache);
+DECLARE_mBool(enable_write_index_searcher_cache);
 DECLARE_Bool(enable_inverted_index_cache_check_timestamp);
 DECLARE_mBool(enable_inverted_index_correct_term_write);
 DECLARE_Int32(inverted_index_fd_number_limit_percent); // 50%
@@ -1205,6 +1226,8 @@ DECLARE_mBool(inverted_index_compaction_enable);
 DECLARE_mBool(debug_inverted_index_compaction);
 // index by RAM directory
 DECLARE_mBool(inverted_index_ram_dir_enable);
+// wheather index by RAM directory when base compaction
+DECLARE_mBool(inverted_index_ram_dir_enable_when_base_compaction);
 // use num_broadcast_buffer blocks as buffer to do broadcast
 DECLARE_Int32(num_broadcast_buffer);
 
@@ -1265,6 +1288,11 @@ DECLARE_mBool(allow_invalid_decimalv2_literal);
 DECLARE_mString(kerberos_ccache_path);
 // set krb5.conf path, use "/etc/krb5.conf" by default
 DECLARE_mString(kerberos_krb5_conf_path);
+// the interval for renew kerberos ticket cache
+DECLARE_mInt32(kerberos_refresh_interval_second);
+
+// JDK-8153057: avoid StackOverflowError thrown from the UncaughtExceptionHandler in thread "process reaper"
+DECLARE_mBool(jdk_process_reaper_use_default_stack_size);
 
 // Values include `none`, `glog`, `boost`, `glibc`, `libunwind`
 DECLARE_mString(get_stack_trace_tool);
@@ -1294,8 +1322,6 @@ DECLARE_mInt64(LZ4_HC_compression_level);
 DECLARE_mDouble(variant_ratio_of_defaults_as_sparse_column);
 DECLARE_mBool(variant_use_cloud_schema_dict_cache);
 // Threshold to estimate a column is sparsed
-// Notice: TEST ONLY
-DECLARE_mInt64(variant_threshold_rows_to_estimate_sparse_column);
 // Treat invalid json format str as string, instead of throwing exception if false
 DECLARE_mBool(variant_throw_exeception_on_invalid_json);
 
@@ -1318,9 +1344,11 @@ DECLARE_mInt32(publish_version_gap_logging_threshold);
 DECLARE_mBool(enable_mow_get_agg_by_cache);
 // get agg correctness check for mow table
 DECLARE_mBool(enable_mow_get_agg_correctness_check_core);
+DECLARE_mBool(enable_agg_and_remove_pre_rowsets_delete_bitmap);
+DECLARE_mBool(enable_check_agg_and_remove_pre_rowsets_delete_bitmap);
 
 // The secure path with user files, used in the `local` table function.
-DECLARE_mString(user_files_secure_path);
+DECLARE_String(user_files_secure_path);
 
 // If fe's frontend info has not been updated for more than fe_expire_duration_seconds, it will be regarded
 // as an abnormal fe, this will cause be to cancel this fe's related query.
@@ -1330,6 +1358,12 @@ DECLARE_Int32(fe_expire_duration_seconds);
 // , but if the waiting time exceed the limit, then be will exit directly.
 // During this period, FE will not send any queries to BE and waiting for all running queries to stop.
 DECLARE_Int32(grace_shutdown_wait_seconds);
+// When using the graceful stop feature, after the main process waits for
+// all currently running tasks to finish, it will continue to wait for
+// an additional period to ensure that queries still running on other nodes have also completed.
+// Since a BE node cannot detect the task execution status on other BE nodes,
+// you may need to increase this threshold to allow for a longer waiting time.
+DECLARE_Int32(grace_shutdown_post_delay_seconds);
 
 // BitmapValue serialize version.
 DECLARE_Int16(bitmap_serialize_version);
@@ -1531,6 +1565,9 @@ DECLARE_mBool(skip_loading_stale_rowset_meta);
 // Only works when starting BE with --console.
 DECLARE_Bool(enable_file_logger);
 
+// Enable partition column fallback when partition columns are missing from file
+DECLARE_Bool(enable_iceberg_partition_column_fallback);
+
 // The minimum row group size when exporting Parquet files.
 DECLARE_Int64(min_row_group_size);
 
@@ -1563,8 +1600,6 @@ DECLARE_mBool(enable_pipeline_task_leakage_detect);
 DECLARE_Int32(query_cache_size);
 DECLARE_Bool(force_regenerate_rowsetid_on_start_error);
 
-DECLARE_mBool(enable_delete_bitmap_merge_on_compaction);
-
 // Enable validation to check the correctness of table size.
 DECLARE_Bool(enable_table_size_correctness_check);
 // Enable sleep 5s between delete cumulative compaction.
@@ -1594,6 +1629,11 @@ DECLARE_mInt32(load_trigger_compaction_version_percent);
 DECLARE_mInt64(base_compaction_interval_seconds_since_last_operation);
 DECLARE_mBool(enable_compaction_pause_on_high_memory);
 
+DECLARE_mBool(enable_quorum_success_write);
+DECLARE_mDouble(quorum_success_max_wait_multiplier);
+DECLARE_mInt64(quorum_success_min_wait_seconds);
+DECLARE_mInt32(quorum_success_remaining_timeout_seconds);
+
 DECLARE_mBool(enable_calc_delete_bitmap_between_segments_concurrently);
 
 DECLARE_mBool(enable_fetch_rowsets_from_peer_replicas);
@@ -1606,6 +1646,20 @@ DECLARE_mBool(random_segments_key_bounds_truncation);
 DECLARE_mBool(enable_auto_clone_on_compaction_missing_version);
 
 DECLARE_mBool(enable_auto_clone_on_mow_publish_missing_version);
+
+// The capacity of segment partial column cache, used to cache column readers for each segment.
+DECLARE_mInt32(max_segment_partial_column_cache_size);
+
+DECLARE_mBool(enable_wal_tde);
+
+DECLARE_mBool(enable_prefill_output_dbm_agg_cache_after_compaction);
+DECLARE_mBool(enable_prefill_all_dbm_agg_cache_after_compaction);
+
+DECLARE_mBool(print_stack_when_cache_miss);
+
+DECLARE_mBool(read_cluster_cache_opt_verbose_log);
+
+DECLARE_mString(aws_credentials_provider_version);
 
 #ifdef BE_TEST
 // test s3

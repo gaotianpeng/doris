@@ -83,8 +83,8 @@ public class StructInfo {
     public static final ScanPlanPatternChecker SCAN_PLAN_PATTERN_CHECKER = new ScanPlanPatternChecker();
     // struct info splitter
     public static final PlanSplitter PLAN_SPLITTER = new PlanSplitter();
-    private static final RelationCollector RELATION_COLLECTOR = new RelationCollector();
     private static final PredicateCollector PREDICATE_COLLECTOR = new PredicateCollector();
+    private static final RelationCollector RELATION_COLLECTOR = new RelationCollector();
     // source data
     private final Plan originalPlan;
     private final ObjectId originalPlanId;
@@ -263,7 +263,7 @@ public class StructInfo {
                 .collect(Collectors.toList());
         SplitPredicate splitPredicate = Predicates.splitPredicates(ExpressionUtils.and(shuttledExpression));
         EquivalenceClass equivalenceClass = new EquivalenceClass();
-        for (Expression expression : ExpressionUtils.extractConjunction(splitPredicate.getEqualPredicate())) {
+        for (Expression expression : splitPredicate.getEqualPredicateMap().keySet()) {
             if (expression instanceof Literal) {
                 continue;
             }
@@ -493,7 +493,9 @@ public class StructInfo {
             // Just collect the filter in top plan, if meet other node except project and filter, return
             if (!(plan instanceof LogicalProject)
                     && !(plan instanceof LogicalFilter)
-                    && !(plan instanceof LogicalAggregate)) {
+                    && !(plan instanceof LogicalAggregate)
+                    && !(plan instanceof LogicalSort)
+                    && !(plan instanceof LogicalRepeat)) {
                 return null;
             }
             if (plan instanceof LogicalFilter) {

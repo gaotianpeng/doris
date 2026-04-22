@@ -40,10 +40,10 @@ namespace vectorized {
 class IColumn;
 class Arena;
 
-inline void escape_string(const char* src, size_t& len, char escape_char) {
-    const char* start = src;
-    char* dest_ptr = const_cast<char*>(src);
-    const char* end = src + len;
+inline void escape_string(char* src, size_t* len, char escape_char) {
+    char* start = src;
+    char* dest_ptr = src;
+    const char* end = src + *len;
     bool escape_next_char = false;
 
     while (src < end) {
@@ -60,14 +60,14 @@ inline void escape_string(const char* src, size_t& len, char escape_char) {
         }
     }
 
-    len = dest_ptr - start;
+    *len = dest_ptr - start;
 }
 
 // specially escape quote with double quote
-inline void escape_string_for_csv(const char* src, size_t& len, char escape_char, char quote_char) {
-    const char* start = src;
-    char* dest_ptr = const_cast<char*>(src);
-    const char* end = src + len;
+inline void escape_string_for_csv(char* src, size_t* len, char escape_char, char quote_char) {
+    char* start = src;
+    char* dest_ptr = src;
+    const char* end = src + *len;
     bool escape_next_char = false;
 
     while (src < end) {
@@ -85,11 +85,57 @@ inline void escape_string_for_csv(const char* src, size_t& len, char escape_char
         }
     }
 
-    len = dest_ptr - start;
+    *len = dest_ptr - start;
 }
 
 template <typename ColumnType>
 class DataTypeStringSerDeBase : public DataTypeSerDe {
+private:
+    static bool need_unescape(StringRef value, char escape_char) {
+        for (size_t i = 0; i < value.size; ++i) {
+            if (value.data[i] == escape_char) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool need_unescape_for_csv(StringRef value, char escape_char, char quote_char) {
+        for (size_t i = 0; i < value.size; ++i) {
+            if (value.data[i] == escape_char) {
+                return true;
+            }
+            if (i + 1 < value.size && value.data[i] == quote_char &&
+                value.data[i + 1] == quote_char) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static StringRef maybe_unescape(StringRef value, char escape_char, String& scratch) {
+        if (!need_unescape(value, escape_char)) {
+            return value;
+        }
+        scratch.assign(value.data, value.size);
+        size_t len = scratch.size();
+        escape_string(scratch.data(), &len, escape_char);
+        scratch.resize(len);
+        return {scratch.data(), scratch.size()};
+    }
+
+    static StringRef maybe_unescape_for_csv(StringRef value, char escape_char, char quote_char,
+                                            String& scratch) {
+        if (!need_unescape_for_csv(value, escape_char, quote_char)) {
+            return value;
+        }
+        scratch.assign(value.data, value.size);
+        size_t len = scratch.size();
+        escape_string_for_csv(scratch.data(), &len, escape_char, quote_char);
+        scratch.resize(len);
+        return {scratch.data(), scratch.size()};
+    }
+
 public:
     DataTypeStringSerDeBase(int nesting_level = 1) : DataTypeSerDe(nesting_level) {};
 
@@ -204,34 +250,41 @@ public:
         if (_nesting_level >= 2) {
             slice.trim_quote();
         }
+        StringRef value(slice.data, slice.size);
+        String scratch;
         if (options.escape_char != 0) {
-            escape_string(slice.data, slice.size, options.escape_char);
+            value = maybe_unescape(value, options.escape_char, scratch);
         }
-        assert_cast<ColumnType&>(column).insert_data(slice.data, slice.size);
+        assert_cast<ColumnType&>(column).insert_data(value.data, value.size);
         return Status::OK();
     }
 
     Status deserialize_one_cell_from_csv(IColumn& column, Slice& slice,
                                          const FormatOptions& options) const override {
+        StringRef value(slice.data, slice.size);
+        String scratch;
         if (options.escape_char != 0) {
-            escape_string_for_csv(slice.data, slice.size, options.escape_char, options.quote_char);
+            value = maybe_unescape_for_csv(value, options.escape_char, options.quote_char,
+                                           scratch);
         }
-        assert_cast<ColumnType&>(column).insert_data(slice.data, slice.size);
+        assert_cast<ColumnType&>(column).insert_data(value.data, value.size);
         return Status::OK();
     }
 
     Status deserialize_one_cell_from_hive_text(
             IColumn& column, Slice& slice, const FormatOptions& options,
             int hive_text_complex_type_delimiter_level = 1) const override {
+        StringRef value(slice.data, slice.size);
+        String scratch;
         if (options.escape_char != 0) {
-            escape_string(slice.data, slice.size, options.escape_char);
+            value = maybe_unescape(value, options.escape_char, scratch);
         }
-        assert_cast<ColumnType&>(column).insert_data(slice.data, slice.size);
+        assert_cast<ColumnType&>(column).insert_data(value.data, value.size);
         return Status::OK();
     }
 
     Status deserialize_column_from_json_vector(IColumn& column, std::vector<Slice>& slices,
-                                               int* num_deserialized,
+                                               uint64_t* num_deserialized,
                                                const FormatOptions& options) const override {
         DESERIALIZE_COLUMN_FROM_JSON_VECTOR()
         return Status::OK();
@@ -249,8 +302,8 @@ public:
         return Status::OK();
     }
 
-    Status deserialize_column_from_fixed_json(IColumn& column, Slice& slice, int rows,
-                                              int* num_deserialized,
+    Status deserialize_column_from_fixed_json(IColumn& column, Slice& slice, uint64_t rows,
+                                              uint64_t* num_deserialized,
                                               const FormatOptions& options) const override {
         if (rows < 1) [[unlikely]] {
             return Status::OK();
@@ -265,7 +318,7 @@ public:
         return Status::OK();
     }
 
-    void insert_column_last_value_multiple_times(IColumn& column, int times) const override {
+    void insert_column_last_value_multiple_times(IColumn& column, uint64_t times) const override {
         if (times < 1) [[unlikely]] {
             return;
         }
@@ -303,7 +356,7 @@ public:
     }
 
     void write_column_to_arrow(const IColumn& column, const NullMap* null_map,
-                               arrow::ArrayBuilder* array_builder, int start, int end,
+                               arrow::ArrayBuilder* array_builder, int64_t start, int64_t end,
                                const cctz::time_zone& ctz) const override {
         const auto& string_column = assert_cast<const ColumnType&>(column);
         auto& builder = assert_cast<arrow::StringBuilder&>(*array_builder);
@@ -318,14 +371,14 @@ public:
                              array_builder->type()->name());
         }
     }
-    void read_column_from_arrow(IColumn& column, const arrow::Array* arrow_array, int start,
-                                int end, const cctz::time_zone& ctz) const override {
+    void read_column_from_arrow(IColumn& column, const arrow::Array* arrow_array, int64_t start,
+                                int64_t end, const cctz::time_zone& ctz) const override {
         if (arrow_array->type_id() == arrow::Type::STRING ||
             arrow_array->type_id() == arrow::Type::BINARY) {
             const auto* concrete_array = dynamic_cast<const arrow::BinaryArray*>(arrow_array);
             std::shared_ptr<arrow::Buffer> buffer = concrete_array->value_data();
 
-            for (size_t offset_i = start; offset_i < end; ++offset_i) {
+            for (auto offset_i = start; offset_i < end; ++offset_i) {
                 if (!concrete_array->IsNull(offset_i)) {
                     const auto* raw_data = buffer->data() + concrete_array->value_offset(offset_i);
                     assert_cast<ColumnType&>(column).insert_data(
@@ -377,25 +430,23 @@ public:
         cur_batch->numElements = end - start;
         return Status::OK();
     }
-    Status write_one_cell_to_json(const IColumn& column, rapidjson::Value& result,
-                                  rapidjson::Document::AllocatorType& allocator, Arena& mem_pool,
-                                  int row_num) const override {
-        const auto& col = assert_cast<const ColumnType&>(column);
+
+    void write_one_cell_to_binary(const IColumn& src_column, ColumnString::Chars& chars,
+                                  int64_t row_num) const override {
+        const uint8_t type = static_cast<uint8_t>(FieldType::OLAP_FIELD_TYPE_STRING);
+        const auto& col = assert_cast<const ColumnType&>(src_column);
         const auto& data_ref = col.get_data_at(row_num);
-        result.SetString(data_ref.data, data_ref.size);
-        return Status::OK();
-    }
-    Status read_one_cell_from_json(IColumn& column, const rapidjson::Value& result) const override {
-        auto& col = assert_cast<ColumnType&>(column);
-        if (!result.IsString()) {
-            rapidjson::StringBuffer buffer;
-            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-            result.Accept(writer);
-            col.insert_data(buffer.GetString(), buffer.GetSize());
-            return Status::OK();
-        }
-        col.insert_data(result.GetString(), result.GetStringLength());
-        return Status::OK();
+        const size_t data_size = data_ref.size;
+
+        const size_t old_size = chars.size();
+        const size_t new_size = old_size + sizeof(uint8_t) + sizeof(size_t) + data_ref.size;
+        chars.resize(new_size);
+
+        memcpy(chars.data() + old_size, reinterpret_cast<const char*>(&type), sizeof(uint8_t));
+        memcpy(chars.data() + old_size + sizeof(uint8_t), reinterpret_cast<const char*>(&data_size),
+               sizeof(size_t));
+        memcpy(chars.data() + old_size + sizeof(uint8_t) + sizeof(size_t), data_ref.data,
+               data_size);
     }
 
 private:

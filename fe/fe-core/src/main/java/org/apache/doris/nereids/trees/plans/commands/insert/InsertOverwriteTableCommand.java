@@ -32,13 +32,16 @@ import org.apache.doris.insertoverwrite.InsertOverwriteManager;
 import org.apache.doris.insertoverwrite.InsertOverwriteUtil;
 import org.apache.doris.mtmv.MTMVUtil;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.nereids.CascadesContext;
 import org.apache.doris.nereids.NereidsPlanner;
+import org.apache.doris.nereids.StatementContext;
 import org.apache.doris.nereids.analyzer.UnboundHiveTableSink;
 import org.apache.doris.nereids.analyzer.UnboundIcebergTableSink;
 import org.apache.doris.nereids.analyzer.UnboundTableSink;
 import org.apache.doris.nereids.analyzer.UnboundTableSinkCreator;
 import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.glue.LogicalPlanAdapter;
+import org.apache.doris.nereids.properties.PhysicalProperties;
 import org.apache.doris.nereids.trees.TreeNode;
 import org.apache.doris.nereids.trees.plans.Explainable;
 import org.apache.doris.nereids.trees.plans.Plan;
@@ -47,6 +50,7 @@ import org.apache.doris.nereids.trees.plans.commands.Command;
 import org.apache.doris.nereids.trees.plans.commands.ForwardWithSync;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
 import org.apache.doris.nereids.trees.plans.logical.UnboundLogicalSink;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalIcebergTableSink;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalOlapTableSink;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalTableSink;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
@@ -54,11 +58,12 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ConnectContext.ConnectType;
 import org.apache.doris.qe.QueryState.MysqlStateType;
 import org.apache.doris.qe.StmtExecutor;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.awaitility.Awaitility;
@@ -82,35 +87,43 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
 
     private static final Logger LOG = LogManager.getLogger(InsertOverwriteTableCommand.class);
 
-    private LogicalPlan logicalQuery;
+    private LogicalPlan originLogicalQuery;
+    private Optional<LogicalPlan> logicalQuery;
     private Optional<String> labelName;
     private final Optional<LogicalPlan> cte;
     private AtomicBoolean isCancelled = new AtomicBoolean(false);
     private AtomicBoolean isRunning = new AtomicBoolean(false);
+    private Optional<String> branchName;
 
     /**
      * constructor
      */
     public InsertOverwriteTableCommand(LogicalPlan logicalQuery, Optional<String> labelName,
-            Optional<LogicalPlan> cte) {
+            Optional<LogicalPlan> cte, Optional<String> branchName) {
         super(PlanType.INSERT_INTO_TABLE_COMMAND);
-        this.logicalQuery = Objects.requireNonNull(logicalQuery, "logicalQuery should not be null");
+        this.originLogicalQuery = Objects.requireNonNull(logicalQuery, "logicalQuery should not be null");
+        this.logicalQuery = Optional.empty();
         this.labelName = Objects.requireNonNull(labelName, "labelName should not be null");
         this.cte = cte;
+        this.branchName = branchName;
     }
 
     public void setLabelName(Optional<String> labelName) {
         this.labelName = labelName;
     }
 
-    public boolean isAutoDetectOverwrite() {
+    public boolean isAutoDetectOverwrite(LogicalPlan logicalQuery) {
         return (logicalQuery instanceof UnboundTableSink)
-                && ((UnboundTableSink<?>) this.logicalQuery).isAutoDetectPartition();
+                && ((UnboundTableSink<?>) logicalQuery).isAutoDetectPartition();
+    }
+
+    public LogicalPlan getLogicalQuery() {
+        return logicalQuery.orElse(originLogicalQuery);
     }
 
     @Override
     public void run(ConnectContext ctx, StmtExecutor executor) throws Exception {
-        TableIf targetTableIf = InsertUtils.getTargetTable(logicalQuery, ctx);
+        TableIf targetTableIf = InsertUtils.getTargetTable(originLogicalQuery, ctx);
         //check allow insert overwrite
         if (!allowInsertOverwrite(targetTableIf)) {
             String errMsg = "insert into overwrite only support OLAP and HMS/ICEBERG table."
@@ -122,12 +135,20 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
         if (targetTableIf instanceof MTMV && !MTMVUtil.allowModifyMTMVData(ctx)) {
             throw new AnalysisException("Not allowed to perform current operation on async materialized view");
         }
-        this.logicalQuery = (LogicalPlan) InsertUtils.normalizePlan(logicalQuery, targetTableIf, Optional.empty());
+        Optional<CascadesContext> analyzeContext = Optional.of(
+                CascadesContext.initContext(ctx.getStatementContext(), originLogicalQuery, PhysicalProperties.ANY)
+        );
+        this.logicalQuery = Optional.of((LogicalPlan) InsertUtils.normalizePlan(
+            originLogicalQuery, targetTableIf, analyzeContext, Optional.empty()));
         if (cte.isPresent()) {
-            this.logicalQuery = (LogicalPlan) logicalQuery.withChildren(cte.get().withChildren(
-                    this.logicalQuery.child(0)));
+            LogicalPlan logicalQuery = this.logicalQuery.get();
+            this.logicalQuery = Optional.of(
+                    (LogicalPlan) logicalQuery.withChildren(
+                            cte.get().withChildren(logicalQuery.child(0))
+                    )
+            );
         }
-
+        LogicalPlan logicalQuery = this.logicalQuery.get();
         LogicalPlanAdapter logicalPlanAdapter = new LogicalPlanAdapter(logicalQuery, ctx.getStatementContext());
         NereidsPlanner planner = new NereidsPlanner(ctx.getStatementContext());
         planner.plan(logicalPlanAdapter, ctx.getSessionVariable().toThrift());
@@ -167,14 +188,21 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
             // Do not create temp partition on FE
             partitionNames = new ArrayList<>();
         }
+
+        // check branch
+        if (branchName.isPresent() && !(physicalTableSink instanceof PhysicalIcebergTableSink)) {
+            throw new AnalysisException(
+                    "Only support insert overwrite into iceberg table's branch");
+        }
+
         InsertOverwriteManager insertOverwriteManager = Env.getCurrentEnv().getInsertOverwriteManager();
         insertOverwriteManager.recordRunningTableOrException(targetTable.getDatabase(), targetTable);
         isRunning.set(true);
         long taskId = 0;
         try {
-            if (isAutoDetectOverwrite()) {
+            if (isAutoDetectOverwrite(getLogicalQuery())) {
                 // taskId here is a group id. it contains all replace tasks made and registered in rpc process.
-                taskId = insertOverwriteManager.registerTaskGroup();
+                taskId = insertOverwriteManager.registerTaskGroup(targetTable.getId());
                 // When inserting, BE will call to replace partition by FrontendService. FE will register new temp
                 // partitions and return. for transactional, the replacement will really occur when insert successed,
                 // i.e. `insertInto` finished. then we call taskGroupSuccess to make replacement.
@@ -220,7 +248,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
             }
         } catch (Exception e) {
             LOG.warn("insert into overwrite failed with task(or group) id " + taskId);
-            if (isAutoDetectOverwrite()) {
+            if (isAutoDetectOverwrite(getLogicalQuery())) {
                 insertOverwriteManager.taskGroupFail(taskId);
             } else {
                 insertOverwriteManager.taskFail(taskId);
@@ -265,7 +293,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
     private void runInsertCommand(LogicalPlan logicalQuery, InsertCommandContext insertCtx,
             ConnectContext ctx, StmtExecutor executor) throws Exception {
         InsertIntoTableCommand insertCommand = new InsertIntoTableCommand(logicalQuery, labelName,
-                Optional.of(insertCtx), Optional.empty());
+                Optional.of(insertCtx), Optional.empty(), false, Optional.empty());
         insertCommand.run(ctx, executor);
         if (ctx.getState().getStateType() == MysqlStateType.ERR) {
             String errMsg = Strings.emptyToNull(ctx.getState().getErrorMessage());
@@ -288,6 +316,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
         // copy sink tot replace by tempPartitions
         UnboundLogicalSink<?> copySink;
         InsertCommandContext insertCtx;
+        LogicalPlan logicalQuery = getLogicalQuery();
         if (logicalQuery instanceof UnboundTableSink) {
             UnboundTableSink<?> sink = (UnboundTableSink<?>) logicalQuery;
             copySink = (UnboundLogicalSink<?>) UnboundTableSinkCreator.createUnboundTableSink(
@@ -297,6 +326,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
                     true,
                     tempPartitionNames,
                     sink.isPartialUpdate(),
+                    sink.getPartialUpdateNewRowPolicy(),
                     sink.getDMLCommandType(),
                     (LogicalPlan) (sink.child(0)));
             // 1. when overwrite table, allow auto partition or not is controlled by session variable.
@@ -312,6 +342,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
                     false,
                     sink.getPartitions(),
                     false,
+                    TPartialUpdateNewRowPolicy.APPEND,
                     sink.getDMLCommandType(),
                     (LogicalPlan) (sink.child(0)));
             insertCtx = new HiveInsertCommandContext();
@@ -325,10 +356,12 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
                     false,
                     sink.getPartitions(),
                     false,
+                    TPartialUpdateNewRowPolicy.APPEND,
                     sink.getDMLCommandType(),
                     (LogicalPlan) (sink.child(0)));
             insertCtx = new IcebergInsertCommandContext();
             ((IcebergInsertCommandContext) insertCtx).setOverwrite(true);
+            branchName.ifPresent(notUsed -> ((IcebergInsertCommandContext) insertCtx).setBranchName(branchName));
         } else {
             throw new UserException("Current catalog does not support insert overwrite yet.");
         }
@@ -343,6 +376,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
      */
     private void insertIntoAutoDetect(ConnectContext ctx, StmtExecutor executor, long groupId) throws Exception {
         InsertCommandContext insertCtx;
+        LogicalPlan logicalQuery = getLogicalQuery();
         if (logicalQuery instanceof UnboundTableSink) {
             // 1. when overwrite auto-detect, allow auto partition or not is controlled by session variable.
             // 2. we save and pass overwrite auto detect by insertCtx
@@ -355,6 +389,7 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
         } else if (logicalQuery instanceof UnboundIcebergTableSink) {
             insertCtx = new IcebergInsertCommandContext();
             ((IcebergInsertCommandContext) insertCtx).setOverwrite(true);
+            branchName.ifPresent(notUsed -> ((IcebergInsertCommandContext) insertCtx).setBranchName(branchName));
         } else {
             throw new UserException("Current catalog does not support insert overwrite yet.");
         }
@@ -363,7 +398,23 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
 
     @Override
     public Plan getExplainPlan(ConnectContext ctx) {
-        return InsertUtils.getPlanForExplain(ctx, this.logicalQuery);
+        Optional<CascadesContext> analyzeContext = Optional.of(
+                CascadesContext.initContext(ctx.getStatementContext(), originLogicalQuery, PhysicalProperties.ANY)
+        );
+        return InsertUtils.getPlanForExplain(ctx, analyzeContext, getLogicalQuery());
+    }
+
+    @Override
+    public Optional<NereidsPlanner> getExplainPlanner(LogicalPlan logicalPlan, StatementContext ctx) {
+        LogicalPlan logicalQuery = getLogicalQuery();
+        if (logicalQuery instanceof UnboundTableSink) {
+            boolean allowAutoPartition = ctx.getConnectContext().getSessionVariable().isEnableAutoCreateWhenOverwrite();
+            OlapInsertCommandContext insertCtx = new OlapInsertCommandContext(allowAutoPartition, true);
+            InsertIntoTableCommand insertIntoTableCommand = new InsertIntoTableCommand(
+                    logicalQuery, labelName, Optional.of(insertCtx), Optional.empty(), true, Optional.empty());
+            return insertIntoTableCommand.getExplainPlanner(logicalPlan, ctx);
+        }
+        return Optional.empty();
     }
 
     public boolean isForceDropPartition() {
@@ -378,5 +429,17 @@ public class InsertOverwriteTableCommand extends Command implements ForwardWithS
     @Override
     public StmtType stmtType() {
         return StmtType.INSERT;
+    }
+
+    @Override
+    public String toDigest() {
+        // if with cte, query will be print twice
+        StringBuilder sb = new StringBuilder();
+        sb.append("OVERWRITE TABLE "); // there is no way add overwrite flag in sink(logic query), so add it here
+        sb.append(originLogicalQuery.toDigest());
+        if (cte.isPresent()) {
+            sb.append(" (").append(cte.get().toDigest()).append(")");
+        }
+        return sb.toString();
     }
 }

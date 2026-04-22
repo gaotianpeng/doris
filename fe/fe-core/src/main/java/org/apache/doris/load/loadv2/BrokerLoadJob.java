@@ -44,7 +44,7 @@ import org.apache.doris.common.util.LogKey;
 import org.apache.doris.common.util.MetaLockUtils;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.datasource.InternalCatalog;
-import org.apache.doris.datasource.property.constants.S3Properties;
+import org.apache.doris.datasource.property.storage.S3Properties;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import org.apache.doris.load.EtlJobType;
@@ -224,7 +224,8 @@ public class BrokerLoadJob extends BulkLoadJob {
             BrokerPendingTaskAttachment attachment) throws UserException {
         LoadLoadingTask task = new LoadLoadingTask(db, table, brokerDesc,
                 brokerFileGroups, getDeadlineMs(), getExecMemLimit(),
-                isStrictMode(), isPartialUpdate(), transactionId, this, getTimeZone(), getTimeout(),
+                isStrictMode(), isPartialUpdate(), getPartialUpdateNewKeyPolicy(),
+                transactionId, this, getTimeZone(), getTimeout(),
                 getLoadParallelism(), getSendBatchParallelism(),
                 getMaxFilterRatio() <= 0, enableProfile ? jobProfile : null, isSingleTabletLoadPerSink(),
                 useNewLoadScanNode(), getPriority(), isEnableMemtableOnSinkNode, batchSize);
@@ -261,6 +262,10 @@ public class BrokerLoadJob extends BulkLoadJob {
                 List<BrokerFileGroup> brokerFileGroups = entry.getValue();
                 long tableId = aggKey.getTableId();
                 OlapTable table = (OlapTable) db.getTableNullable(tableId);
+                if (table.isTemporary())  {
+                    throw new UserException("Do not support load into temporary table "
+                        + table.getDisplayName());
+                }
                 boolean isEnableMemtableOnSinkNode =
                         table.getTableProperty().getUseSchemaLightChange() && this.enableMemTableOnSinkNode;
                 // Generate loading task and init the plan of task

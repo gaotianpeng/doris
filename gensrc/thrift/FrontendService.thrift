@@ -598,10 +598,14 @@ struct TMasterOpRequest {
     29: optional TTxnLoadInfo txnLoadInfo
     30: optional TGroupCommitInfo groupCommitInfo
     31: optional binary prepareExecuteBuffer
+    32: optional bool moreResultExists // Server has more result to send
 
     // selectdb cloud
     1000: optional string cloud_cluster
     1001: optional bool noAuth;
+
+    // temporary table
+    1002: optional string sessionId
 }
 
 struct TColumnDefinition {
@@ -766,6 +770,8 @@ struct TStreamLoadPutRequest {
     54: optional bool group_commit // deprecated
     55: optional i32 stream_per_node;
     56: optional string group_commit_mode
+    57: optional Types.TUniqueKeyUpdateMode unique_key_update_mode
+    58: optional Descriptors.TPartialUpdateNewRowPolicy partial_update_new_key_policy
 
     // For cloud
     1000: optional string cloud_cluster
@@ -958,6 +964,17 @@ struct TFrontendPingFrontendRequest {
    3: optional string deployMode
 }
 
+struct TFrontendReportAliveSessionRequest {
+   1: required i32 clusterId
+   2: required string token
+}
+
+struct TFrontendReportAliveSessionResult {
+   1: required Status.TStatusCode status
+   2: required string msg
+   3: required list<string> sessionIdList
+}
+
 struct TDiskInfo {
     1: required string dirType
     2: required string dir
@@ -1039,6 +1056,7 @@ struct TMetadataTableRequestParams {
   11: optional PlanNodes.TPartitionsMetadataParams partitions_metadata_params
   12: optional PlanNodes.TMetaCacheStatsParams meta_cache_stats_params
   13: optional PlanNodes.TPartitionValuesMetadataParams partition_values_metadata_params
+  14: optional PlanNodes.THudiMetadataParams hudi_metadata_params
 }
 
 struct TSchemaTableRequestParams {
@@ -1047,6 +1065,7 @@ struct TSchemaTableRequestParams {
     3: optional bool replay_to_other_fe
     4: optional string catalog  // use for table specific queries
     5: optional i64 dbId         // used for table specific queries
+    6: optional string time_zone // used for DATETIME field
 }
 
 struct TFetchSchemaTableDataRequest {
@@ -1543,6 +1562,9 @@ struct TCreatePartitionRequest {
     4: optional list<list<Exprs.TNullableStringLiteral>> partitionValues
     // be_endpoint = <ip>:<heartbeat_port> to distinguish a particular BE
     5: optional string be_endpoint
+    6: optional bool write_single_replica = false
+    // query_id to identify the coordinator, if coordinator exists, it means this is a multi-instance load
+    7: optional Types.TUniqueId query_id
 }
 
 struct TCreatePartitionResult {
@@ -1550,6 +1572,7 @@ struct TCreatePartitionResult {
     2: optional list<Descriptors.TOlapTablePartition> partitions
     3: optional list<Descriptors.TTabletLocation> tablets
     4: optional list<Descriptors.TNodeInfo> nodes
+    5: optional list<Descriptors.TTabletLocation> slave_tablets
 }
 
 // these two for auto detect replacing partition
@@ -1560,6 +1583,7 @@ struct TReplacePartitionRequest {
     4: optional list<i64> partition_ids // partition to replace.
     // be_endpoint = <ip>:<heartbeat_port> to distinguish a particular BE
     5: optional string be_endpoint
+    6: optional bool write_single_replica = false
 }
 
 struct TReplacePartitionResult {
@@ -1567,6 +1591,7 @@ struct TReplacePartitionResult {
     2: optional list<Descriptors.TOlapTablePartition> partitions
     3: optional list<Descriptors.TTabletLocation> tablets
     4: optional list<Descriptors.TNodeInfo> nodes
+    5: optional list<Descriptors.TTabletLocation> slave_tablets
 }
 
 struct TGetMetaReplica {
@@ -1703,6 +1728,7 @@ struct TGetColumnInfoResult {
 struct TShowProcessListRequest {
     1: optional bool show_full_sql
     2: optional Types.TUserIdentity current_user_ident
+    3: optional string time_zone
 }
 
 struct TShowProcessListResult {
@@ -1783,6 +1809,34 @@ struct TFetchRoutineLoadJobResult {
     1: optional list<TRoutineLoadJob> routineLoadJobs
 }
 
+enum TEncryptionKeyType {
+    MASTER_KEY = 0,
+    DATA_KEY = 1,
+}
+
+struct TEncryptionKey {
+    1: optional binary key_pb;
+}
+
+struct TGetEncryptionKeysRequest {
+    2: optional i32 version
+}
+
+struct TGetEncryptionKeysResult {
+    1: optional Status.TStatus status
+    2: optional list<TEncryptionKey> master_keys
+}
+
+struct TGetTableTDEInfoRequest {
+    1: optional i64 db_id
+    2: optional i64 table_id
+}
+
+struct TGetTableTDEInfoResult {
+    1: optional Status.TStatus status
+    2: optional AgentService.TEncryptionAlgorithm algorithm
+}
+
 service FrontendService {
     TGetDbsResult getDbNames(1: TGetDbsParams params)
     TGetTablesResult getTableNames(1: TGetTablesParams params)
@@ -1827,6 +1881,8 @@ service FrontendService {
     TStreamLoadMultiTablePutResult streamLoadMultiTablePut(1: TStreamLoadPutRequest request)
 
     Status.TStatus snapshotLoaderReport(1: TSnapshotLoaderReportRequest request)
+
+    TFrontendReportAliveSessionResult getAliveSessions(1: TFrontendReportAliveSessionRequest request)
 
     TFrontendPingFrontendResult ping(1: TFrontendPingFrontendRequest request)
 
@@ -1882,4 +1938,8 @@ service FrontendService {
     TFetchRunningQueriesResult fetchRunningQueries(1: TFetchRunningQueriesRequest request)
 
     TFetchRoutineLoadJobResult fetchRoutineLoadJob(1: TFetchRoutineLoadJobRequest request)
+
+    TGetEncryptionKeysResult getEncryptionKeys(1: TGetEncryptionKeysRequest request)
+
+    TGetTableTDEInfoResult getTableTDEInfo(1: TGetTableTDEInfoRequest request)
 }

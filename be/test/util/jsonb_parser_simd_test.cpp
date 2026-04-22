@@ -232,7 +232,7 @@ TEST_F(JsonbParserTest, ParseJsonWithLongInt) {
 
 TEST_F(JsonbParserTest, ParseInvalidJsonFormat) {
     std::string_view invalid_json = R"({"key": "value")";
-    EXPECT_NE(parse_json_and_check(invalid_json, invalid_json), JsonbErrType::E_NONE);
+    EXPECT_EQ(parse_json_and_check(invalid_json, invalid_json), JsonbErrType::E_EXCEPTION);
 }
 
 TEST_F(JsonbParserTest, ParseJsonWithInvalidKeyType) {

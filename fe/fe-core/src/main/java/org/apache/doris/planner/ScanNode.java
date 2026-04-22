@@ -69,7 +69,7 @@ import com.google.common.collect.Range;
 import com.google.common.collect.RangeSet;
 import com.google.common.collect.Sets;
 import com.google.common.collect.TreeRangeSet;
-import org.apache.commons.collections.map.CaseInsensitiveMap;
+import org.apache.commons.collections4.map.CaseInsensitiveMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -102,7 +102,7 @@ public abstract class ScanNode extends PlanNode implements SplitGenerator {
     protected SplitAssignment splitAssignment = null;
 
     protected long selectedPartitionNum = 0;
-    protected long selectedSplitNum = 0;
+    protected int selectedSplitNum = 0;
 
     // create a mapping between output slot's id and project expr
     Map<SlotId, Expr> outputSlotToProjectExpr = new HashMap<>();
@@ -111,6 +111,7 @@ public abstract class ScanNode extends PlanNode implements SplitGenerator {
     protected final List<SortNode> topnFilterSortNodes = Lists.newArrayList();
 
     protected TableSnapshot tableSnapshot;
+    protected List<Column> columns;
 
     // Save the id of backends which this scan node will be executed on.
     // This is also important for local shuffle logic.
@@ -140,6 +141,13 @@ public abstract class ScanNode extends PlanNode implements SplitGenerator {
         result.hostname = hostPort[0];
         result.port = Integer.parseInt(hostPort[1]);
         return result;
+    }
+
+    protected List<Column> getColumns() {
+        if (columns == null && desc.getTable() != null) {
+            columns = desc.getTable().getBaseSchema();
+        }
+        return columns;
     }
 
     public TupleDescriptor getTupleDesc() {
@@ -234,7 +242,7 @@ public abstract class ScanNode extends PlanNode implements SplitGenerator {
         // for load scan node, table is null
         // partitionsInfo maybe null for other scan node, eg: ExternalScanNode...
         if (desc.getTable() != null) {
-            computeColumnsFilter(desc.getTable().getBaseSchema(), partitionsInfo);
+            computeColumnsFilter(getColumns(), partitionsInfo);
         }
     }
 

@@ -118,6 +118,7 @@ import org.apache.doris.catalog.constraint.Constraint;
 import org.apache.doris.catalog.constraint.ForeignKeyConstraint;
 import org.apache.doris.catalog.constraint.PrimaryKeyConstraint;
 import org.apache.doris.catalog.constraint.UniqueConstraint;
+import org.apache.doris.cloud.backup.CloudRestoreJob;
 import org.apache.doris.cloud.catalog.CloudPartition;
 import org.apache.doris.cloud.catalog.CloudReplica;
 import org.apache.doris.cloud.catalog.CloudTablet;
@@ -184,11 +185,12 @@ import org.apache.doris.job.extensions.insert.InsertJob;
 import org.apache.doris.job.extensions.mtmv.MTMVJob;
 import org.apache.doris.load.loadv2.BrokerLoadJob;
 import org.apache.doris.load.loadv2.BulkLoadJob;
+import org.apache.doris.load.loadv2.IngestionLoadJob;
+import org.apache.doris.load.loadv2.IngestionLoadJob.IngestionLoadJobStateUpdateInfo;
 import org.apache.doris.load.loadv2.InsertLoadJob;
 import org.apache.doris.load.loadv2.LoadJob;
 import org.apache.doris.load.loadv2.LoadJob.LoadJobStateUpdateInfo;
 import org.apache.doris.load.loadv2.LoadJobFinalOperation;
-import org.apache.doris.load.loadv2.MiniLoadJob;
 import org.apache.doris.load.loadv2.MiniLoadTxnCommitAttachment;
 import org.apache.doris.load.loadv2.SparkLoadJob;
 import org.apache.doris.load.loadv2.SparkLoadJob.SparkLoadJobStateUpdateInfo;
@@ -202,6 +204,7 @@ import org.apache.doris.load.routineload.kafka.KafkaDataSourceProperties;
 import org.apache.doris.load.sync.SyncJob;
 import org.apache.doris.load.sync.canal.CanalSyncJob;
 import org.apache.doris.mtmv.MTMVMaxTimestampSnapshot;
+import org.apache.doris.mtmv.MTMVSnapshotIdSnapshot;
 import org.apache.doris.mtmv.MTMVSnapshotIf;
 import org.apache.doris.mtmv.MTMVTimestampSnapshot;
 import org.apache.doris.mtmv.MTMVVersionSnapshot;
@@ -387,7 +390,9 @@ public class GsonUtils {
     // runtime adapter for class "LoadJobStateUpdateInfo"
     private static RuntimeTypeAdapterFactory<LoadJobStateUpdateInfo> loadJobStateUpdateInfoTypeAdapterFactory
             = RuntimeTypeAdapterFactory.of(LoadJobStateUpdateInfo.class, "clazz")
-            .registerSubtype(SparkLoadJobStateUpdateInfo.class, SparkLoadJobStateUpdateInfo.class.getSimpleName());
+            .registerSubtype(SparkLoadJobStateUpdateInfo.class, SparkLoadJobStateUpdateInfo.class.getSimpleName())
+            .registerSubtype(IngestionLoadJobStateUpdateInfo.class,
+                    IngestionLoadJobStateUpdateInfo.class.getSimpleName());
 
     // runtime adapter for class "Policy"
     private static RuntimeTypeAdapterFactory<Policy> policyTypeAdapterFactory = RuntimeTypeAdapterFactory.of(
@@ -450,6 +455,7 @@ public class GsonUtils {
             RuntimeTypeAdapterFactory.of(MTMVSnapshotIf.class, "clazz")
                     .registerSubtype(MTMVMaxTimestampSnapshot.class, MTMVMaxTimestampSnapshot.class.getSimpleName())
                     .registerSubtype(MTMVTimestampSnapshot.class, MTMVTimestampSnapshot.class.getSimpleName())
+                    .registerSubtype(MTMVSnapshotIdSnapshot.class, MTMVSnapshotIdSnapshot.class.getSimpleName())
                     .registerSubtype(MTMVVersionSnapshot.class, MTMVVersionSnapshot.class.getSimpleName());
 
     private static RuntimeTypeAdapterFactory<DatabaseIf> dbTypeAdapterFactory = RuntimeTypeAdapterFactory.of(
@@ -577,7 +583,8 @@ public class GsonUtils {
             jobBackupTypeAdapterFactory
                     = RuntimeTypeAdapterFactory.of(org.apache.doris.backup.AbstractJob.class, "clazz")
                     .registerSubtype(BackupJob.class, BackupJob.class.getSimpleName())
-                    .registerSubtype(RestoreJob.class, RestoreJob.class.getSimpleName());
+                    .registerSubtype(RestoreJob.class, RestoreJob.class.getSimpleName())
+                    .registerSubtype(CloudRestoreJob.class, CloudRestoreJob.class.getSimpleName());
 
     private static RuntimeTypeAdapterFactory<LoadJob> loadJobTypeAdapterFactory
                     = RuntimeTypeAdapterFactory.of(LoadJob.class, "clazz")
@@ -586,8 +593,8 @@ public class GsonUtils {
                     .registerSubtype(CloudBrokerLoadJob.class, CloudBrokerLoadJob.class.getSimpleName())
                     .registerSubtype(CopyJob.class, CopyJob.class.getSimpleName())
                     .registerSubtype(InsertLoadJob.class, InsertLoadJob.class.getSimpleName())
-                    .registerSubtype(MiniLoadJob.class, MiniLoadJob.class.getSimpleName())
-                    .registerSubtype(SparkLoadJob.class, SparkLoadJob.class.getSimpleName());
+                    .registerSubtype(SparkLoadJob.class, SparkLoadJob.class.getSimpleName())
+                    .registerSubtype(IngestionLoadJob.class, IngestionLoadJob.class.getSimpleName());
 
     private static RuntimeTypeAdapterFactory<PartitionItem> partitionItemTypeAdapterFactory
                     = RuntimeTypeAdapterFactory.of(PartitionItem.class, "clazz")

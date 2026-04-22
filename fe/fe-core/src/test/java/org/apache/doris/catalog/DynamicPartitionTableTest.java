@@ -1791,7 +1791,6 @@ public class DynamicPartitionTableTest {
         Assert.assertEquals(53, partitions.size());
         Assert.assertEquals(1, partitions.get(partitions.size() - 1).getDistributionInfo().getBucketNum());
         Config.autobucket_out_of_bounds_percent_threshold = 0.5;
-
         table.readLock();
         try {
             // first 40 partitions with size 0,  then 13 partitions with size 100GB(10GB * 10 buckets)

@@ -82,6 +82,7 @@ DEFINE_string(dest_idx_dirs_file, "", "destination segment index files");
 DEFINE_string(dest_seg_num_rows_file, "", "destination segment number of rows");
 DEFINE_string(tablet_path, "", "tablet path");
 DEFINE_string(trans_vec_file, "", "rowid conversion map file");
+DEFINE_string(idx_path, "", "inverted index path");
 
 std::string get_usage(const std::string& progname) {
     std::stringstream ss;
@@ -119,9 +120,9 @@ std::vector<std::string> split(const std::string& s, char delimiter) {
 
 void search(lucene::store::Directory* dir, std::string& field, std::string& token,
             std::string& pred) {
-    IndexReader* reader = IndexReader::open(dir);
+    lucene::index::IndexReader* reader = lucene::index::IndexReader::open(dir);
 
-    IndexReader* newreader = reader->reopen();
+    lucene::index::IndexReader* newreader = reader->reopen();
     if (newreader != reader) {
         reader->close();
         _CLDELETE(reader);
@@ -171,7 +172,14 @@ void search(lucene::store::Directory* dir, std::string& field, std::string& toke
 
         doris::TQueryOptions queryOptions;
         ConjunctionQuery conjunct_query(s, queryOptions, nullptr);
-        conjunct_query.add(field_ws, terms);
+        InvertedIndexQueryInfo query_info;
+        query_info.field_name = field_ws;
+        for (auto& term : terms) {
+            doris::segment_v2::TermInfo term_info;
+            term_info.term = term;
+            query_info.term_infos.push_back(term_info);
+        }
+        conjunct_query.add(query_info);
         conjunct_query.search(result);
 
         total += result.cardinality();
@@ -194,7 +202,7 @@ void search(lucene::store::Directory* dir, std::string& field, std::string& toke
 }
 
 void check_terms_stats(lucene::store::Directory* dir) {
-    IndexReader* r = IndexReader::open(dir);
+    lucene::index::IndexReader* r = lucene::index::IndexReader::open(dir);
 
     printf("Max Docs: %d\n", r->maxDoc());
     printf("Num Docs: %d\n", r->numDocs());
@@ -666,6 +674,9 @@ int main(int argc, char** argv) {
             std::vector<std::string> files;
             int64_t index_id = FLAGS_idx_id;
             std::string index_suffix = "";
+            if (FLAGS_idx_path != "") {
+                index_suffix = FLAGS_idx_path;
+            }
             doris::TabletIndexPB index_pb;
             index_pb.set_index_id(index_id);
             index_pb.set_index_suffix_name(index_suffix);

@@ -420,7 +420,7 @@ Status PointQueryExecutor::_lookup_row_key() {
         auto rowset_ptr = std::make_unique<RowsetSharedPtr>();
         st = (_tablet->lookup_row_key(_row_read_ctxs[i]._primary_key, nullptr, false,
                                       specified_rowsets, &location, INT32_MAX /*rethink?*/,
-                                      segment_caches, rowset_ptr.get(), false,
+                                      segment_caches, rowset_ptr.get(), false, nullptr,
                                       &_profile_metrics.read_stats));
         if (st.is<ErrorCode::KEY_NOT_FOUND>()) {
             continue;
@@ -503,8 +503,12 @@ Status PointQueryExecutor::_lookup_row_data() {
                         _result_block->get_by_position(pos).column->assume_mutable();
                 std::unique_ptr<ColumnIterator> iter;
                 SlotDescriptor* slot = _reusable->tuple_desc()->slots()[pos];
+                StorageReadOptions storage_read_options;
+                storage_read_options.stats = &_read_stats;
+                storage_read_options.io_ctx.reader_type = ReaderType::READER_QUERY;
                 RETURN_IF_ERROR(segment->seek_and_read_by_rowid(*_tablet->tablet_schema(), slot,
-                                                                row_id, column, _read_stats, iter));
+                                                                row_id, column,
+                                                                storage_read_options, iter));
                 if (_tablet->tablet_schema()
                             ->column_by_uid(slot->col_unique_id())
                             .has_char_type()) {

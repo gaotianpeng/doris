@@ -36,6 +36,7 @@ import org.apache.doris.plugin.DialectConverterPlugin;
 import org.apache.doris.plugin.PluginMgr;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
+import org.apache.doris.qe.SqlModeHelper;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -50,7 +51,7 @@ import org.antlr.v4.runtime.TokenSource;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.antlr.v4.runtime.misc.ParseCancellationException;
 import org.antlr.v4.runtime.tree.TerminalNode;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -289,7 +290,7 @@ public class NereidsParser {
         if (isSimpleIdentifier(expression)) {
             return new UnboundSlot(expression);
         }
-        return parse(expression, DorisParser::expression);
+        return parse(expression, DorisParser::expressionWithEof);
     }
 
     private static boolean isSimpleIdentifier(String expression) {
@@ -326,12 +327,12 @@ public class NereidsParser {
     }
 
     private <T> T parse(String sql, @Nullable LogicalPlanBuilder logicalPlanBuilder,
-            Function<DorisParser, ParserRuleContext> parseFunction) {
+                        Function<DorisParser, ParserRuleContext> parseFunction) {
         CommonTokenStream tokenStream = parseAllTokens(sql);
         ParserRuleContext tree = toAst(tokenStream, parseFunction);
         LogicalPlanBuilder realLogicalPlanBuilder = logicalPlanBuilder == null
-                ? new LogicalPlanBuilder(getHintMap(sql, tokenStream, DorisParser::selectHint))
-                : logicalPlanBuilder;
+                    ? new LogicalPlanBuilder(getHintMap(sql, tokenStream, DorisParser::selectHint))
+                    : logicalPlanBuilder;
         return (T) realLogicalPlanBuilder.visit(tree);
     }
 
@@ -343,9 +344,27 @@ public class NereidsParser {
         return (LogicalPlan) realLogicalPlanBuilder.visit(tree);
     }
 
+    public LogicalPlan parseForEncryption(String sql, Map<Pair<Integer, Integer>, String> indexInSqlToString) {
+        CommonTokenStream tokenStream = parseAllTokens(sql);
+        ParserRuleContext tree = toAst(tokenStream, DorisParser::singleStatement);
+        LogicalPlanBuilder realLogicalPlanBuilder = new LogicalPlanBuilderForEncryption(
+                getHintMap(sql, tokenStream, DorisParser::selectHint), indexInSqlToString);
+        return (LogicalPlan) realLogicalPlanBuilder.visit(tree);
+    }
+
+    /** parseForSyncMv */
+    public Optional<String> parseForSyncMv(String sql) {
+        CommonTokenStream tokenStream = parseAllTokens(sql);
+        ParserRuleContext tree = toAst(tokenStream, DorisParser::singleStatement);
+        LogicalPlanBuilderForSyncMv logicalPlanBuilderForSyncMv = new LogicalPlanBuilderForSyncMv(
+                getHintMap(sql, tokenStream, DorisParser::selectHint));
+        logicalPlanBuilderForSyncMv.visit(tree);
+        return logicalPlanBuilderForSyncMv.getQuerySql();
+    }
+
     /** get hint map */
     public static Map<Integer, ParserRuleContext> getHintMap(String sql, CommonTokenStream hintTokenStream,
-            Function<DorisParser, ParserRuleContext> parseFunction) {
+                                                             Function<DorisParser, ParserRuleContext> parseFunction) {
         // parse hint first round
         Map<Integer, ParserRuleContext> selectHintMap = Maps.newHashMap();
 
@@ -433,20 +452,9 @@ public class NereidsParser {
 
     private static CommonTokenStream parseAllTokens(String sql) {
         DorisLexer lexer = new DorisLexer(new CaseInsensitiveStream(CharStreams.fromString(sql)));
+        lexer.isNoBackslashEscapes = SqlModeHelper.hasNoBackSlashEscapes();
         CommonTokenStream tokenStream = new CommonTokenStream(lexer);
         tokenStream.fill();
         return tokenStream;
-    }
-
-    /**
-     * sync mv sql parser
-     */
-    public Optional<String> parseForSyncMv(String sql) {
-        CommonTokenStream tokenStream = parseAllTokens(sql);
-        ParserRuleContext tree = toAst(sql, DorisParser::singleStatement);
-        LogicalPlanBuilderForSyncMv logicalPlanBuilderForSyncMv = new LogicalPlanBuilderForSyncMv(
-                getHintMap(sql, tokenStream, DorisParser::selectHint));
-        logicalPlanBuilderForSyncMv.visit(tree);
-        return logicalPlanBuilderForSyncMv.getQuerySql();
     }
 }

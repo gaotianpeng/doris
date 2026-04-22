@@ -18,6 +18,7 @@
 #include "data_type_datetimev2_serde.h"
 
 #include <arrow/builder.h>
+#include <cctz/time_zone.h>
 
 #include <chrono> // IWYU pragma: keep
 
@@ -74,7 +75,7 @@ Status DataTypeDateTimeV2SerDe::serialize_one_cell_to_json(const IColumn& column
 }
 
 Status DataTypeDateTimeV2SerDe::deserialize_column_from_json_vector(
-        IColumn& column, std::vector<Slice>& slices, int* num_deserialized,
+        IColumn& column, std::vector<Slice>& slices, uint64_t* num_deserialized,
         const FormatOptions& options) const {
     DESERIALIZE_COLUMN_FROM_JSON_VECTOR();
     return Status::OK();
@@ -106,10 +107,15 @@ Status DataTypeDateTimeV2SerDe::deserialize_one_cell_from_json(IColumn& column, 
 }
 
 void DataTypeDateTimeV2SerDe::write_column_to_arrow(const IColumn& column, const NullMap* null_map,
-                                                    arrow::ArrayBuilder* array_builder, int start,
-                                                    int end, const cctz::time_zone& ctz) const {
+                                                    arrow::ArrayBuilder* array_builder,
+                                                    int64_t start, int64_t end,
+                                                    const cctz::time_zone& ctz) const {
     const auto& col_data = static_cast<const ColumnVector<UInt64>&>(column).get_data();
     auto& timestamp_builder = assert_cast<arrow::TimestampBuilder&>(*array_builder);
+    std::shared_ptr<arrow::TimestampType> timestamp_type =
+            std::static_pointer_cast<arrow::TimestampType>(array_builder->type());
+    const std::string& timezone = timestamp_type->timezone();
+    const cctz::time_zone& real_ctz = timezone == "" ? cctz::utc_time_zone() : ctz;
     for (size_t i = start; i < end; ++i) {
         if (null_map && (*null_map)[i]) {
             checkArrowStatus(timestamp_builder.AppendNull(), column.get_name(),
@@ -118,7 +124,7 @@ void DataTypeDateTimeV2SerDe::write_column_to_arrow(const IColumn& column, const
             int64_t timestamp = 0;
             DateV2Value<DateTimeV2ValueType> datetime_val =
                     binary_cast<UInt64, DateV2Value<DateTimeV2ValueType>>(col_data[i]);
-            datetime_val.unix_timestamp(&timestamp, ctz);
+            datetime_val.unix_timestamp(&timestamp, real_ctz);
 
             if (scale > 3) {
                 uint32_t microsecond = datetime_val.microsecond();
@@ -134,8 +140,9 @@ void DataTypeDateTimeV2SerDe::write_column_to_arrow(const IColumn& column, const
 }
 
 void DataTypeDateTimeV2SerDe::read_column_from_arrow(IColumn& column,
-                                                     const arrow::Array* arrow_array, int start,
-                                                     int end, const cctz::time_zone& ctz) const {
+                                                     const arrow::Array* arrow_array, int64_t start,
+                                                     int64_t end,
+                                                     const cctz::time_zone& ctz) const {
     auto& col_data = static_cast<ColumnDateTimeV2&>(column).get_data();
     int64_t divisor = 1;
     if (arrow_array->type()->id() == arrow::Type::TIMESTAMP) {
@@ -163,7 +170,7 @@ void DataTypeDateTimeV2SerDe::read_column_from_arrow(IColumn& column,
             return;
         }
         }
-        for (size_t value_i = start; value_i < end; ++value_i) {
+        for (auto value_i = start; value_i < end; ++value_i) {
             auto utc_epoch = static_cast<UInt64>(concrete_array->Value(value_i));
 
             DateV2Value<DateTimeV2ValueType> v;
@@ -251,7 +258,7 @@ Status DataTypeDateTimeV2SerDe::write_column_to_orc(const std::string& timezone,
 }
 
 Status DataTypeDateTimeV2SerDe::deserialize_column_from_fixed_json(
-        IColumn& column, Slice& slice, int rows, int* num_deserialized,
+        IColumn& column, Slice& slice, uint64_t rows, uint64_t* num_deserialized,
         const FormatOptions& options) const {
     if (rows < 1) [[unlikely]] {
         return Status::OK();
@@ -267,7 +274,7 @@ Status DataTypeDateTimeV2SerDe::deserialize_column_from_fixed_json(
 }
 
 void DataTypeDateTimeV2SerDe::insert_column_last_value_multiple_times(IColumn& column,
-                                                                      int times) const {
+                                                                      uint64_t times) const {
     if (times < 1) [[unlikely]] {
         return;
     }
@@ -275,6 +282,24 @@ void DataTypeDateTimeV2SerDe::insert_column_last_value_multiple_times(IColumn& c
     auto sz = col.size();
     UInt64 val = col.get_element(sz - 1);
     col.insert_many_vals(val, times);
+}
+
+void DataTypeDateTimeV2SerDe::write_one_cell_to_binary(const IColumn& src_column,
+                                                       ColumnString::Chars& chars,
+                                                       int64_t row_num) const {
+    const uint8_t type = static_cast<uint8_t>(FieldType::OLAP_FIELD_TYPE_DATETIMEV2);
+    const auto& data_ref =
+            assert_cast<const ColumnVector<UInt64>&>(src_column).get_data_at(row_num);
+    const uint8_t sc = static_cast<uint8_t>(scale);
+
+    const size_t old_size = chars.size();
+    const size_t new_size = old_size + sizeof(uint8_t) + sizeof(uint8_t) + data_ref.size;
+    chars.resize(new_size);
+    memcpy(chars.data() + old_size, reinterpret_cast<const char*>(&type), sizeof(uint8_t));
+    memcpy(chars.data() + old_size + sizeof(uint8_t), reinterpret_cast<const char*>(&sc),
+           sizeof(uint8_t));
+    memcpy(chars.data() + old_size + sizeof(uint8_t) + sizeof(uint8_t), data_ref.data,
+           data_ref.size);
 }
 
 } // namespace doris::vectorized

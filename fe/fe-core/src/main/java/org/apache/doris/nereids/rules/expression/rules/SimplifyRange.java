@@ -38,6 +38,7 @@ import org.apache.doris.nereids.trees.expressions.literal.Literal;
 import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
 import org.apache.doris.nereids.trees.expressions.visitor.ExpressionVisitor;
 import org.apache.doris.nereids.types.BooleanType;
+import org.apache.doris.nereids.types.DataType;
 import org.apache.doris.nereids.util.ExpressionUtils;
 
 import com.google.common.collect.BoundType;
@@ -113,8 +114,10 @@ public class SimplifyRange implements ExpressionPatternRuleFactory {
             if (right.isNullLiteral()) {
                 return new UnknownValue(context, predicate);
             }
-            // only handle `NumericType` and `DateLikeType`
-            if (right.isLiteral() && (right.getDataType().isNumericType() || right.getDataType().isDateLikeType())) {
+            // only handle `NumericType` and `DateLikeType` and `StringLikeType`
+            DataType rightDataType = right.getDataType();
+            if (right.isLiteral() && (rightDataType.isNumericType() || rightDataType.isDateLikeType()
+                    || rightDataType.isStringLikeType())) {
                 return ValueDesc.range(context, predicate);
             }
             return new UnknownValue(context, predicate);
@@ -148,7 +151,8 @@ public class SimplifyRange implements ExpressionPatternRuleFactory {
         @Override
         public ValueDesc visitInPredicate(InPredicate inPredicate, ExpressionRewriteContext context) {
             // only handle `NumericType` and `DateLikeType`
-            if (ExpressionUtils.isAllNonNullLiteral(inPredicate.getOptions())
+            if (inPredicate.getOptions().size() <= InPredicateDedup.REWRITE_OPTIONS_MAX_SIZE
+                    && ExpressionUtils.isAllNonNullLiteral(inPredicate.getOptions())
                     && (ExpressionUtils.matchNumericType(inPredicate.getOptions())
                     || ExpressionUtils.matchDateLikeType(inPredicate.getOptions()))) {
                 return ValueDesc.discrete(context, inPredicate);
@@ -508,7 +512,7 @@ public class SimplifyRange implements ExpressionPatternRuleFactory {
                 return new EqualTo(reference, values.iterator().next());
 
                 // this condition should as same as OrToIn, or else meet dead loop
-            } else if (values.size() < OrToIn.REWRITE_OR_TO_IN_PREDICATE_THRESHOLD) {
+            } else if (values.size() < 2) {
                 Iterator<Literal> iterator = values.iterator();
                 return new Or(new EqualTo(reference, iterator.next()), new EqualTo(reference, iterator.next()));
             } else {

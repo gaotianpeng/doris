@@ -30,6 +30,7 @@
 #include "common/global_types.h"
 #include "common/status.h"
 #include "exec/olap_common.h"
+#include "io/fs/file_meta_cache.h"
 #include "io/io_common.h"
 #include "pipeline/exec/file_scan_operator.h"
 #include "runtime/descriptors.h"
@@ -38,6 +39,7 @@
 #include "vec/core/block.h"
 #include "vec/exec/format/generic_reader.h"
 #include "vec/exec/scan/vscanner.h"
+#include "vec/exprs/vexpr_fwd.h"
 
 namespace doris {
 class RuntimeState;
@@ -80,6 +82,8 @@ public:
 
     std::string get_current_scan_range_name() override { return _current_range_path; }
 
+    void update_realtime_counters() override;
+
 protected:
     Status _get_block_impl(RuntimeState* state, Block* block, bool* eof) override;
 
@@ -91,6 +95,10 @@ protected:
     Status _cast_src_block(Block* block) { return Status::OK(); }
 
     void _collect_profile_before_close() override;
+
+    // fe will add skip_bitmap_col to _input_tuple_desc iff the target olaptable has skip_bitmap_col
+    // and the current load is a flexible partial update
+    bool _should_process_skip_bitmap_col() const { return _skip_bitmap_col_idx != -1; }
 
 protected:
     const TFileScanRangeParams* _params = nullptr;
@@ -105,8 +113,6 @@ protected:
     std::vector<SlotDescriptor*> _file_slot_descs;
     // col names from _file_slot_descs
     std::vector<std::string> _file_col_names;
-    // column id to name map. Collect from FE slot descriptor.
-    std::unordered_map<int, std::string> _col_id_name_map;
 
     // Partition source slot descriptors
     std::vector<SlotDescriptor*> _partition_slot_descs;
@@ -129,15 +135,13 @@ protected:
     std::unordered_map<std::string, size_t> _src_block_name_to_idx;
 
     // Get from GenericReader, save the existing columns in file to their type.
-    std::unordered_map<std::string, TypeDescriptor> _name_to_col_type;
+    std::unordered_map<std::string, TypeDescriptor> _slot_lower_name_to_col_type;
     // Get from GenericReader, save columns that required by scan but not exist in file.
     // These columns will be filled by default value or null.
     std::unordered_set<std::string> _missing_cols;
 
-    //  The col names and types of source file, such as parquet, orc files.
-    std::vector<std::string> _source_file_col_names;
-    std::vector<TypeDescriptor> _source_file_col_types;
-    std::map<std::string, TypeDescriptor*> _source_file_col_name_types;
+    // The col lowercase name of source file to type of source file.
+    std::map<std::string, TypeDescriptor> _source_file_col_name_types;
 
     // For load task
     vectorized::VExprContextSPtrs _pre_conjunct_ctxs;
@@ -148,6 +152,7 @@ protected:
     // owned by scan node
     ShardedKVCache* _kv_cache = nullptr;
 
+    std::set<TSlotId> _is_file_slot;
     bool _scanner_eof = false;
     int _rows = 0;
     int _num_of_columns_from_file;
@@ -160,24 +165,39 @@ protected:
     Block _src_block;
 
     VExprContextSPtrs _push_down_conjuncts;
+    VExprContextSPtrs _runtime_filter_partition_prune_ctxs;
+    Block _runtime_filter_partition_prune_block;
 
     std::unique_ptr<io::FileCacheStatistics> _file_cache_statistics;
+    std::unique_ptr<io::FileReaderStats> _file_reader_stats;
     std::unique_ptr<io::IOContext> _io_ctx;
 
+    // Whether to fill partition columns from path, default is true.
+    bool _fill_partition_from_path = true;
     std::unordered_map<std::string, std::tuple<std::string, const SlotDescriptor*>>
             _partition_col_descs;
+    std::unordered_map<std::string, bool> _partition_value_is_null;
     std::unordered_map<std::string, VExprContextSPtr> _missing_col_descs;
+
+    // idx of skip_bitmap_col in _input_tuple_desc
+    int32_t _skip_bitmap_col_idx {-1};
+    int32_t _sequence_map_col_uid {-1};
+    int32_t _sequence_col_uid {-1};
 
 private:
     RuntimeProfile::Counter* _get_block_timer = nullptr;
-    RuntimeProfile::Counter* _open_reader_timer = nullptr;
     RuntimeProfile::Counter* _cast_to_input_block_timer = nullptr;
     RuntimeProfile::Counter* _fill_missing_columns_timer = nullptr;
     RuntimeProfile::Counter* _pre_filter_timer = nullptr;
     RuntimeProfile::Counter* _convert_to_output_block_timer = nullptr;
+    RuntimeProfile::Counter* _runtime_filter_partition_prune_timer = nullptr;
     RuntimeProfile::Counter* _empty_file_counter = nullptr;
     RuntimeProfile::Counter* _not_found_file_counter = nullptr;
     RuntimeProfile::Counter* _file_counter = nullptr;
+    RuntimeProfile::Counter* _file_read_bytes_counter = nullptr;
+    RuntimeProfile::Counter* _file_read_calls_counter = nullptr;
+    RuntimeProfile::Counter* _file_read_time_counter = nullptr;
+    RuntimeProfile::Counter* _runtime_filter_partition_pruned_range_counter = nullptr;
 
     const std::unordered_map<std::string, int>* _col_name_to_slot_id = nullptr;
     // single slot filter conjuncts
@@ -205,7 +225,12 @@ private:
     Status _convert_to_output_block(Block* block);
     Status _truncate_char_or_varchar_columns(Block* block);
     void _truncate_char_or_varchar_column(Block* block, int idx, int len);
-    Status _generate_fill_columns();
+    Status _generate_partition_columns();
+    Status _generate_missing_columns();
+    bool _check_partition_prune_expr(const VExprSPtr& expr);
+    void _init_runtime_filter_partition_prune_ctxs();
+    void _init_runtime_filter_partition_prune_block();
+    Status _process_runtime_filters_partition_prune(bool& is_partition_pruned);
     Status _process_conjuncts_for_dict_filter();
     Status _process_late_arrival_conjuncts();
     void _get_slot_ids(VExpr* expr, std::vector<int>* slot_ids);
@@ -224,7 +249,7 @@ private:
     // 2. the file number is less than 1/3 of cache's capacibility
     // Otherwise, the cache miss rate will be high
     bool _should_enable_file_meta_cache() {
-        return config::max_external_file_meta_cache_num > 0 &&
+        return ExecEnv::GetInstance()->file_meta_cache()->enabled() &&
                _split_source->num_scan_ranges() < config::max_external_file_meta_cache_num / 3;
     }
 };

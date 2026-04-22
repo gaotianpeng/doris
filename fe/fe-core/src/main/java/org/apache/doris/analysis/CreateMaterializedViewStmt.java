@@ -225,7 +225,7 @@ public class CreateMaterializedViewStmt extends DdlStmt implements NotFallbackIn
             mvKeysType = KeysType.AGG_KEYS;
         }
         if (selectStmt.getWhereClause() != null) {
-            if (!isReplay && selectStmt.getWhereClause().hasAggregateSlot()) {
+            if (!isReplay && selectStmt.getWhereClause().hasAggregateSlot(getMVKeysType())) {
                 throw new AnalysisException(
                         "The where clause contained aggregate column is not supported, expr:"
                                 + selectStmt.getWhereClause().toSql());
@@ -331,6 +331,9 @@ public class CreateMaterializedViewStmt extends DdlStmt implements NotFallbackIn
             throw new AnalysisException("The materialized view only support olap table.");
         }
         OlapTable olapTable = (OlapTable) tableRefList.get(0).getTable();
+        if (olapTable.isTemporary()) {
+            throw new AnalysisException("do not support create materialized view on temporary table");
+        }
         mvKeysType = olapTable.getKeysType();
 
         TableName tableName = tableRefList.get(0).getName();
@@ -582,7 +585,7 @@ public class CreateMaterializedViewStmt extends DdlStmt implements NotFallbackIn
             mvAggregateType = AggregateType.valueOf(functionName.toUpperCase());
         }
 
-        if (!isReplay && defineExpr.hasAggregateSlot()) {
+        if (!isReplay && defineExpr.hasAggregateSlot(getMVKeysType())) {
             SlotRef slot = null;
             if (defineExpr instanceof SlotRef) {
                 slot = (SlotRef) defineExpr;

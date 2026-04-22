@@ -22,12 +22,11 @@ import org.apache.doris.common.Config;
 import org.apache.doris.statistics.StatisticsCleaner.ExpiredStats;
 
 import com.google.common.collect.Lists;
-import mockit.Mock;
-import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-
-import java.util.List;
+import org.mockito.ArgumentMatchers;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 class StatisticsCleanerTest {
 
@@ -42,14 +41,13 @@ class StatisticsCleanerTest {
         long expiredStats = cleaner.findExpiredStats(null, stat, 1, true);
         Assertions.assertEquals(expiredStats, 1);
 
-        new MockUp<StatisticsRepository>() {
-            @Mock
-            public List<ResultRow> fetchStatsFullName(long limit, long offset, boolean isTableStats) {
-                return Lists.newArrayList();
-            }
-        };
-        stat.expiredCatalog.clear();
-        expiredStats = cleaner.findExpiredStats(olapTable, stat, 0, true);
-        Assertions.assertEquals(expiredStats, StatisticConstants.FETCH_LIMIT);
+        try (MockedStatic<StatisticsRepository> mockedRep = Mockito.mockStatic(StatisticsRepository.class)) {
+            mockedRep.when(() -> StatisticsRepository.fetchStatsFullName(
+                    ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong(), ArgumentMatchers.anyBoolean()))
+                    .thenReturn(Lists.newArrayList());
+            stat.expiredCatalog.clear();
+            expiredStats = cleaner.findExpiredStats(olapTable, stat, 0, true);
+            Assertions.assertEquals(expiredStats, StatisticConstants.FETCH_LIMIT);
+        }
     }
 }

@@ -75,6 +75,8 @@ import org.apache.doris.analysis.RollupRenameClause;
 import org.apache.doris.analysis.SetType;
 import org.apache.doris.analysis.ShowAlterStmt.AlterType;
 import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.TableName;
+import org.apache.doris.analysis.TableRef;
 import org.apache.doris.analysis.TableRenameClause;
 import org.apache.doris.analysis.TruncateTableStmt;
 import org.apache.doris.analysis.UninstallPluginStmt;
@@ -107,10 +109,11 @@ import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.LogUtils;
 import org.apache.doris.common.MetaNotFoundException;
-import org.apache.doris.common.NereidsSqlCacheManager;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.ThreadPoolManager;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.cache.NereidsSortedPartitionsCacheManager;
+import org.apache.doris.common.cache.NereidsSqlCacheManager;
 import org.apache.doris.common.io.CountingDataOutputStream;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.lock.MonitoredReentrantLock;
@@ -142,10 +145,12 @@ import org.apache.doris.datasource.es.EsRepository;
 import org.apache.doris.datasource.hive.HiveTransactionMgr;
 import org.apache.doris.datasource.hive.event.MetastoreEventsProcessor;
 import org.apache.doris.datasource.iceberg.IcebergExternalTable;
+import org.apache.doris.datasource.paimon.PaimonExternalTable;
 import org.apache.doris.deploy.DeployManager;
-import org.apache.doris.deploy.impl.AmbariDeployManager;
-import org.apache.doris.deploy.impl.K8sDeployManager;
 import org.apache.doris.deploy.impl.LocalFileDeployManager;
+import org.apache.doris.encryption.KeyManagerFactory;
+import org.apache.doris.encryption.KeyManagerInterface;
+import org.apache.doris.encryption.KeyManagerStore;
 import org.apache.doris.event.EventProcessor;
 import org.apache.doris.event.ReplacePartitionEvent;
 import org.apache.doris.ha.BDBHA;
@@ -155,6 +160,7 @@ import org.apache.doris.ha.MasterInfo;
 import org.apache.doris.httpv2.entity.ResponseBody;
 import org.apache.doris.httpv2.meta.MetaBaseAction;
 import org.apache.doris.httpv2.rest.RestApiStatusCode;
+import org.apache.doris.indexpolicy.IndexPolicyMgr;
 import org.apache.doris.insertoverwrite.InsertOverwriteManager;
 import org.apache.doris.job.base.AbstractJob;
 import org.apache.doris.job.extensions.mtmv.MTMVTask;
@@ -164,9 +170,9 @@ import org.apache.doris.journal.JournalEntity;
 import org.apache.doris.journal.bdbje.Timestamp;
 import org.apache.doris.load.DeleteHandler;
 import org.apache.doris.load.ExportJob;
+import org.apache.doris.load.ExportJobState;
 import org.apache.doris.load.ExportMgr;
 import org.apache.doris.load.GroupCommitManager;
-import org.apache.doris.load.Load;
 import org.apache.doris.load.StreamLoadRecordMgr;
 import org.apache.doris.load.loadv2.LoadEtlChecker;
 import org.apache.doris.load.loadv2.LoadJobScheduler;
@@ -178,8 +184,6 @@ import org.apache.doris.load.loadv2.ProgressManager;
 import org.apache.doris.load.routineload.RoutineLoadManager;
 import org.apache.doris.load.routineload.RoutineLoadScheduler;
 import org.apache.doris.load.routineload.RoutineLoadTaskScheduler;
-import org.apache.doris.load.sync.SyncChecker;
-import org.apache.doris.load.sync.SyncJobManager;
 import org.apache.doris.master.Checkpoint;
 import org.apache.doris.master.MetaHelper;
 import org.apache.doris.master.PartitionInfoCollector;
@@ -210,6 +214,9 @@ import org.apache.doris.persist.BackendReplicasInfo;
 import org.apache.doris.persist.BackendTabletsInfo;
 import org.apache.doris.persist.BinlogGcInfo;
 import org.apache.doris.persist.CleanQueryStatsInfo;
+import org.apache.doris.persist.CreateDbInfo;
+import org.apache.doris.persist.CreateTableInfo;
+import org.apache.doris.persist.DropDbInfo;
 import org.apache.doris.persist.DropPartitionInfo;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.persist.GlobalVarPersistInfo;
@@ -271,6 +278,7 @@ import org.apache.doris.system.HeartbeatMgr;
 import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.system.SystemInfoService.HostInfo;
 import org.apache.doris.task.AgentBatchTask;
+import org.apache.doris.task.AgentTaskCleanupDaemon;
 import org.apache.doris.task.AgentTaskExecutor;
 import org.apache.doris.task.CleanTrashTask;
 import org.apache.doris.task.CleanUDFCacheTask;
@@ -304,10 +312,11 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Queues;
+import com.google.common.collect.Sets;
 import com.sleepycat.je.rep.InsufficientLogException;
 import com.sleepycat.je.rep.NetworkRestore;
 import com.sleepycat.je.rep.NetworkRestoreConfig;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -375,7 +384,6 @@ public class Env {
 
     private CatalogMgr catalogMgr;
     private GlobalFunctionMgr globalFunctionMgr;
-    private Load load;
     protected LoadManager loadManager;
     private ProgressManager progressManager;
     private StreamLoadRecordMgr streamLoadRecordMgr;
@@ -384,7 +392,6 @@ public class Env {
     private GroupCommitManager groupCommitManager;
     private SqlBlockRuleMgr sqlBlockRuleMgr;
     private ExportMgr exportMgr;
-    private SyncJobManager syncJobManager;
     private Alter alter;
     private ConsistencyChecker consistencyChecker;
     private BackupHandler backupHandler;
@@ -456,6 +463,10 @@ public class Env {
 
     protected SystemInfoService systemInfo;
     private HeartbeatMgr heartbeatMgr;
+    private FESessionMgr feSessionMgr;
+    private TemporaryTableMgr temporaryTableMgr;
+    // alive session of current fe
+    private Set<String> aliveSessionSet;
     private TabletInvertedIndex tabletInvertedIndex;
     private ColocateTableIndex colocateTableIndex;
 
@@ -503,8 +514,6 @@ public class Env {
 
     private RoutineLoadTaskScheduler routineLoadTaskScheduler;
 
-    private SyncChecker syncChecker;
-
     private SmallFileMgr smallFileMgr;
 
     private DynamicPartitionScheduler dynamicPartitionScheduler;
@@ -516,6 +525,8 @@ public class Env {
     private RefreshManager refreshManager;
 
     private PolicyMgr policyMgr;
+
+    private IndexPolicyMgr indexPolicyMgr;
 
     private AnalysisManager analysisManager;
 
@@ -567,13 +578,24 @@ public class Env {
 
     private final NereidsSqlCacheManager sqlCacheManager;
 
+    private final NereidsSortedPartitionsCacheManager sortedPartitionsCacheManager;
+
     private final SplitSourceManager splitSourceManager;
 
     private final GlobalExternalTransactionInfoMgr globalExternalTransactionInfoMgr;
 
     private final List<String> forceSkipJournalIds = Arrays.asList(Config.force_skip_journal_ids);
 
+    // all sessions' last heartbeat time of all fe
+    private static volatile Map<String, Long> sessionReportTimeMap = new HashMap<>();
+
     private TokenManager tokenManager;
+
+    private KeyManagerStore keyManagerStore;
+
+    private KeyManagerInterface keyManager;
+
+    private AgentTaskCleanupDaemon agentTaskCleanupDaemon;
 
     // if a config is relative to a daemon thread. record the relation here. we will proactively change interval of it.
     private final Map<String, Supplier<MasterDaemon>> configtoThreads = ImmutableMap
@@ -677,6 +699,13 @@ public class Env {
         return binlogManager;
     }
 
+    public KeyManagerInterface getKeyManager() throws Exception {
+        if (keyManager == null) {
+            throw new Exception("The keyManager is null, possibly due to a missing implementation of KeyManager");
+        }
+        return keyManager;
+    }
+
     private static class SingletonHolder {
         private static final Env INSTANCE = EnvFactory.getInstance().createEnv(false);
     }
@@ -688,12 +717,10 @@ public class Env {
     // if isCheckpointCatalog is true, it means that we should not collect thread pool metric
     public Env(boolean isCheckpointCatalog) {
         this.catalogMgr = new CatalogMgr();
-        this.load = new Load();
         this.routineLoadManager = EnvFactory.getInstance().createRoutineLoadManager();
         this.groupCommitManager = new GroupCommitManager();
         this.sqlBlockRuleMgr = new SqlBlockRuleMgr();
         this.exportMgr = new ExportMgr();
-        this.syncJobManager = new SyncJobManager();
         this.alter = new Alter();
         this.consistencyChecker = new ConsistencyChecker();
         this.lock = new MonitoredReentrantLock(true);
@@ -728,6 +755,9 @@ public class Env {
 
         this.systemInfo = EnvFactory.getInstance().createSystemInfoService();
         this.heartbeatMgr = new HeartbeatMgr(systemInfo, !isCheckpointCatalog);
+        this.feSessionMgr = new FESessionMgr();
+        this.temporaryTableMgr = new TemporaryTableMgr();
+        this.aliveSessionSet = Sets.newConcurrentHashSet();
         this.tabletInvertedIndex = new TabletInvertedIndex();
         this.colocateTableIndex = new ColocateTableIndex();
         this.recycleBin = new CatalogRecycleBin();
@@ -748,7 +778,7 @@ public class Env {
 
         this.auth = new Auth();
         this.accessManager = new AccessControllerManager(auth);
-        this.authenticatorManager = new AuthenticatorManager(AuthenticateType.getAuthTypeConfig());
+        this.authenticatorManager = new AuthenticatorManager(AuthenticateType.getAuthTypeConfigString());
         this.domainResolver = new DomainResolver(auth);
 
         this.metaContext = new MetaContext();
@@ -780,7 +810,6 @@ public class Env {
         this.routineLoadScheduler = new RoutineLoadScheduler(routineLoadManager);
         this.routineLoadTaskScheduler = new RoutineLoadTaskScheduler(routineLoadManager);
 
-        this.syncChecker = new SyncChecker(syncJobManager);
         this.smallFileMgr = new SmallFileMgr();
 
         this.dynamicPartitionScheduler = new DynamicPartitionScheduler("DynamicPartitionScheduler",
@@ -794,6 +823,7 @@ public class Env {
         this.auditEventProcessor = new AuditEventProcessor(this.pluginMgr);
         this.refreshManager = new RefreshManager();
         this.policyMgr = new PolicyMgr();
+        this.indexPolicyMgr = new IndexPolicyMgr();
         this.extMetaCacheMgr = new ExternalMetaCacheMgr(isCheckpointCatalog);
         this.analysisManager = new AnalysisManager();
         this.statisticsCleaner = new StatisticsCleaner();
@@ -819,9 +849,49 @@ public class Env {
         this.insertOverwriteManager = new InsertOverwriteManager();
         this.dnsCache = new DNSCache();
         this.sqlCacheManager = new NereidsSqlCacheManager();
+        this.sortedPartitionsCacheManager = new NereidsSortedPartitionsCacheManager();
         this.splitSourceManager = new SplitSourceManager();
         this.globalExternalTransactionInfoMgr = new GlobalExternalTransactionInfoMgr();
         this.tokenManager = new TokenManager();
+        this.keyManagerStore = new KeyManagerStore();
+        this.keyManager = KeyManagerFactory.getKeyManager();
+        if (Config.agent_task_health_check_intervals_ms > 0) {
+            this.agentTaskCleanupDaemon = new AgentTaskCleanupDaemon();
+        }
+    }
+
+    public static Map<String, Long> getSessionReportTimeMap() {
+        return sessionReportTimeMap;
+    }
+
+    public void registerTempTableAndSession(Table table) {
+        if (ConnectContext.get() != null) {
+            ConnectContext.get().addTempTableToDB(table.getQualifiedDbName(), table.getName());
+        }
+
+        refreshSession(Util.getTempTableSessionId(table.getName()));
+    }
+
+    public void unregisterTempTable(Table table) {
+        if (ConnectContext.get() != null) {
+            ConnectContext.get().removeTempTableFromDB(table.getQualifiedDbName(), table.getName());
+        }
+    }
+
+    private void refreshSession(String sessionId) {
+        sessionReportTimeMap.put(sessionId, System.currentTimeMillis());
+    }
+
+    public void checkAndRefreshSession(String sessionId) {
+        if (sessionReportTimeMap.containsKey(sessionId)) {
+            sessionReportTimeMap.put(sessionId, System.currentTimeMillis());
+        }
+    }
+
+    public void refreshAllAliveSession() {
+        for (String sessionId : sessionReportTimeMap.keySet()) {
+            refreshSession(sessionId);
+        }
     }
 
     public static void destroyCheckpoint() {
@@ -935,6 +1005,10 @@ public class Env {
 
     public PlsqlManager getPlsqlManager() {
         return plsqlManager;
+    }
+
+    public KeyManagerStore getKeyManagerStore() {
+        return keyManagerStore;
     }
 
     // use this to get correct ClusterInfoService instance
@@ -1268,8 +1342,8 @@ public class Env {
             // this loop will not end until we get certain role type and name
             while (true) {
                 if (!getFeNodeTypeAndNameFromHelpers()) {
-                    LOG.warn("current node is not added to the group. please add it first. "
-                            + "sleep 5 seconds and retry, current helper nodes: {}", helperNodes);
+                    LOG.warn("current node {} is not added to the group. please add it first. "
+                            + "sleep 5 seconds and retry, current helper nodes: {}", selfNode, helperNodes);
                     try {
                         Thread.sleep(5000);
                         continue;
@@ -1484,11 +1558,7 @@ public class Env {
         }
 
         if (!Config.enable_deploy_manager.equalsIgnoreCase("disable")) {
-            if (Config.enable_deploy_manager.equalsIgnoreCase("k8s")) {
-                deployManager = new K8sDeployManager(this, 5000 /* 5s interval */);
-            } else if (Config.enable_deploy_manager.equalsIgnoreCase("ambari")) {
-                deployManager = new AmbariDeployManager(this, 5000 /* 5s interval */);
-            } else if (Config.enable_deploy_manager.equalsIgnoreCase("local")) {
+            if (Config.enable_deploy_manager.equalsIgnoreCase("local")) {
                 deployManager = new LocalFileDeployManager(this, 5000 /* 5s interval */);
             } else {
                 throw new AnalysisException("Unknow deploy manager: " + Config.enable_deploy_manager);
@@ -1698,6 +1768,11 @@ public class Env {
 
             toMasterProgress = "start daemon threads";
 
+            // coz current fe was not master fe and didn't get all fes' alive session report before, which cause
+            // sessionReportTimeMap is not up-to-date.
+            // reset all session's last heartbeat time. must run before init of TemporaryTableMgr
+            refreshAllAliveSession();
+
             // start all daemon threads that only running on MASTER FE
             startMasterOnlyDaemonThreads();
             // start other daemon threads that should running on all FE
@@ -1808,6 +1883,14 @@ public class Env {
         // heartbeat mgr
         heartbeatMgr.setMaster(clusterId, token, epoch);
         heartbeatMgr.start();
+
+        // alive session of all fes' mgr
+        feSessionMgr.setClusterId(clusterId);
+        feSessionMgr.setToken(token);
+        feSessionMgr.start();
+
+        temporaryTableMgr.start();
+
         // New load scheduler
         pendingLoadTaskScheduler.start();
         loadingLoadTaskScheduler.start();
@@ -1827,8 +1910,6 @@ public class Env {
             txnCleaner.start();
             // Consistency checker
             getConsistencyChecker().start();
-            // Backup handler
-            getBackupHandler().start();
             // start daemon thread to update global partition version and in memory information periodically
             partitionInfoCollector.start();
         }
@@ -1837,6 +1918,8 @@ public class Env {
         transientTaskManager.start();
         // Alter
         getAlterInstance().start();
+        // Backup handler
+        getBackupHandler().start();
         // catalog recycle bin
         getRecycleBin().start();
         // time printer
@@ -1851,8 +1934,6 @@ public class Env {
         // start routine load scheduler
         routineLoadScheduler.start();
         routineLoadTaskScheduler.start();
-        // start sync checker
-        syncChecker.start();
         // start dynamic partition task
         dynamicPartitionScheduler.start();
         // start daemon thread to update db used data quota for db txn manager periodically
@@ -1880,6 +1961,10 @@ public class Env {
         statisticsCleaner.start();
         statisticsAutoCollector.start();
         statisticsJobAppender.start();
+        if (keyManager != null) {
+            keyManager.init();
+        }
+        agentTaskCleanupDaemon.start();
     }
 
     // start threads that should run on all FE
@@ -2208,14 +2293,6 @@ public class Env {
         return newChecksum;
     }
 
-    public long loadSyncJobs(DataInputStream dis, long checksum) throws IOException, DdlException {
-        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_103) {
-            syncJobManager.readField(dis);
-        }
-        LOG.info("finished replay syncJobMgr from image");
-        return checksum;
-    }
-
     public long loadAlterJob(DataInputStream dis, long checksum)
             throws IOException, AnalysisException {
         long newChecksum = checksum;
@@ -2409,6 +2486,12 @@ public class Env {
         return checksum;
     }
 
+    public long loadIndexPolicy(DataInputStream in, long checksum) throws IOException {
+        indexPolicyMgr = IndexPolicyMgr.read(in);
+        LOG.info("finished replay index policy from image");
+        return checksum;
+    }
+
     /**
      * Load catalogs through file.
      **/
@@ -2442,6 +2525,12 @@ public class Env {
     public long loadInsertOverwrite(DataInputStream in, long checksum) throws IOException {
         this.insertOverwriteManager = InsertOverwriteManager.read(in);
         LOG.info("finished replay iot from image");
+        return checksum;
+    }
+
+    public long loadKeyManagerStore(DataInputStream in, long checksum) throws IOException {
+        this.keyManagerStore = KeyManagerStore.read(in);
+        LOG.info("finished replay KeyManagerStore from image");
         return checksum;
     }
 
@@ -2541,6 +2630,16 @@ public class Env {
         long curTime = System.currentTimeMillis();
         List<ExportJob> jobs = exportMgr.getJobs().stream().filter(t -> !t.isExpired(curTime))
                 .collect(Collectors.toList());
+        if (jobs.size() > Config.max_export_history_job_num) {
+            jobs.sort(Comparator.comparingLong(ExportJob::getCreateTimeMs));
+            Iterator<ExportJob> iterator = jobs.iterator();
+            while (jobs.size() > Config.max_export_history_job_num && iterator.hasNext()) {
+                ExportJob job = iterator.next();
+                if (job.getState() == ExportJobState.FINISHED || job.getState() == ExportJobState.CANCELLED) {
+                    iterator.remove();
+                }
+            }
+        }
         int size = jobs.size();
         checksum ^= size;
         dos.writeInt(size);
@@ -2550,11 +2649,6 @@ public class Env {
             dos.writeLong(jobId);
             job.write(dos);
         }
-        return checksum;
-    }
-
-    public long saveSyncJobs(CountingDataOutputStream dos, long checksum) throws IOException {
-        syncJobManager.write(dos);
         return checksum;
     }
 
@@ -2689,6 +2783,11 @@ public class Env {
         return checksum;
     }
 
+    public long saveIndexPolicy(CountingDataOutputStream out, long checksum) throws IOException {
+        Env.getCurrentEnv().getIndexPolicyMgr().write(out);
+        return checksum;
+    }
+
     /**
      * Save catalog image.
      */
@@ -2718,11 +2817,16 @@ public class Env {
         return checksum;
     }
 
+    public long saveKeyManagerStore(CountingDataOutputStream out, long checksum) throws IOException {
+        this.keyManagerStore.write(out);
+        LOG.info("finished save KeyManager to image");
+        return checksum;
+    }
+
     public void createLabelCleaner() {
         labelCleaner = new MasterDaemon("LoadLabelCleaner", Config.label_clean_interval_second * 1000L) {
             @Override
             protected void runAfterCatalogReady() {
-                load.removeOldLoadJobs();
                 loadManager.removeOldLoadJob();
                 exportMgr.removeOldExportJobs();
                 deleteHandler.removeOldDeleteInfos();
@@ -3247,18 +3351,25 @@ public class Env {
         if (StringUtils.isEmpty(stmt.getCtlName())) {
             catalogIf = getCurrentCatalog();
         } else {
-            catalogIf = catalogMgr.getCatalog(stmt.getCtlName());
+            catalogIf = catalogMgr.getCatalogOrDdlException(stmt.getCtlName());
         }
-        catalogIf.createDb(stmt);
+        catalogIf.createDb(stmt.getFullDbName(), stmt.isSetIfNotExists(), stmt.getProperties());
     }
 
-    // For replay edit log, need't lock metadata
+    // For replay edit log, no need to lock metadata
     public void unprotectCreateDb(Database db) {
         getInternalCatalog().unprotectCreateDb(db);
     }
 
-    public void replayCreateDb(Database db) {
-        getInternalCatalog().replayCreateDb(db, "");
+    public void replayCreateDb(CreateDbInfo dbInfo) {
+        if (dbInfo.getInternalDb() != null) {
+            getInternalCatalog().replayCreateDb(dbInfo.getInternalDb(), "");
+        } else {
+            ExternalCatalog externalCatalog = (ExternalCatalog) catalogMgr.getCatalog(dbInfo.getCtlName());
+            if (externalCatalog != null) {
+                externalCatalog.replayCreateDb(dbInfo.getDbName());
+            }
+        }
     }
 
     public void dropDb(DropDbStmt stmt) throws DdlException {
@@ -3268,11 +3379,19 @@ public class Env {
         } else {
             catalogIf = catalogMgr.getCatalog(stmt.getCtlName());
         }
-        catalogIf.dropDb(stmt);
+        catalogIf.dropDb(stmt.getDbName(), stmt.isSetIfExists(), stmt.isForceDrop());
     }
 
-    public void replayDropDb(String dbName, boolean isForceDrop, Long recycleTime) throws DdlException {
-        getInternalCatalog().replayDropDb(dbName, isForceDrop, recycleTime);
+    public void replayDropDb(DropDbInfo info) throws DdlException {
+        if (Strings.isNullOrEmpty(info.getCtlName()) || info.getCtlName()
+                .equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
+            getInternalCatalog().replayDropDb(info.getDbName(), info.isForceDrop(), info.getRecycleTime());
+        } else {
+            ExternalCatalog externalCatalog = (ExternalCatalog) catalogMgr.getCatalog(info.getCtlName());
+            if (externalCatalog != null) {
+                externalCatalog.replayDropDb(info.getDbName());
+            }
+        }
     }
 
     public void recoverDatabase(RecoverDbStmt recoverStmt) throws DdlException {
@@ -3434,7 +3553,7 @@ public class Env {
         try {
             StringBuilder sb = new StringBuilder("CREATE MATERIALIZED VIEW ");
             sb.append(mtmv.getName());
-            addMTMVCols(mtmv, sb);
+            addColNameAndComment(mtmv, sb);
             sb.append("\n");
             sb.append(mtmv.getRefreshInfo());
             addMTMVKeyInfo(mtmv, sb);
@@ -3483,9 +3602,9 @@ public class Env {
         sb.append(")");
     }
 
-    private static void addMTMVCols(MTMV mtmv, StringBuilder sb) {
+    private static void addColNameAndComment(TableIf tableIf, StringBuilder sb) {
         sb.append("\n(");
-        List<Column> columns = mtmv.getBaseSchema();
+        List<Column> columns = tableIf.getBaseSchema();
         for (int i = 0; i < columns.size(); i++) {
             if (i != 0) {
                 sb.append(",");
@@ -3610,10 +3729,18 @@ public class Env {
             sb.append(olapTable.getEnableUniqueKeyMergeOnWrite()).append("\"");
         }
 
+        // enable_unique_key_skip_bitmap, always print this property for merge-on-write unique table
+        if (olapTable.getKeysType() == KeysType.UNIQUE_KEYS && olapTable.getEnableUniqueKeyMergeOnWrite()
+                && olapTable.getEnableUniqueKeySkipBitmap()) {
+            sb.append(",\n\"").append(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN).append("\" = \"");
+            sb.append(olapTable.getEnableUniqueKeySkipBitmap()).append("\"");
+        }
+
         // show lightSchemaChange only when it is set true
         if (olapTable.getEnableLightSchemaChange()) {
             sb.append(",\n\"").append(PropertyAnalyzer.PROPERTIES_ENABLE_LIGHT_SCHEMA_CHANGE).append("\" = \"");
             sb.append(olapTable.getEnableLightSchemaChange()).append("\"");
+
         }
 
         // storage policy
@@ -3655,6 +3782,12 @@ public class Env {
         if (olapTable.storagePageSize() != PropertyAnalyzer.STORAGE_PAGE_SIZE_DEFAULT_VALUE) {
             sb.append(",\n\"").append(PropertyAnalyzer.PROPERTIES_STORAGE_PAGE_SIZE).append("\" = \"");
             sb.append(olapTable.storagePageSize()).append("\"");
+        }
+
+        // storage dict page size
+        if (olapTable.storageDictPageSize() != PropertyAnalyzer.STORAGE_DICT_PAGE_SIZE_DEFAULT_VALUE) {
+            sb.append(",\n\"").append(PropertyAnalyzer.PROPERTIES_STORAGE_DICT_PAGE_SIZE).append("\" = \"");
+            sb.append(olapTable.storageDictPageSize()).append("\"");
         }
 
         // skip inverted index on load
@@ -3786,6 +3919,8 @@ public class Env {
             View view = (View) table;
 
             sb.append("CREATE VIEW `").append(table.getName()).append("`");
+            addColNameAndComment(view, sb);
+            sb.append("\n");
             if (StringUtils.isNotBlank(table.getComment())) {
                 sb.append(" COMMENT '").append(table.getComment()).append("'");
             }
@@ -3801,12 +3936,26 @@ public class Env {
                 || table.getType() == TableType.HIVE || table.getType() == TableType.JDBC) {
             sb.append("EXTERNAL ");
         }
+
+        // create table like a temporary table or create temporary table like a table
+        if (ddlStmt instanceof CreateTableLikeStmt) {
+            if (((CreateTableLikeStmt) ddlStmt).isTemp()) {
+                sb.append("TEMPORARY ");
+            }
+        } else if (table.isTemporary()) {
+            // used for show create table
+            sb.append("TEMPORARY ");
+        }
         sb.append(table.getType() != TableType.MATERIALIZED_VIEW ? "TABLE " : "MATERIALIZED VIEW ");
 
         if (!Strings.isNullOrEmpty(dbName)) {
             sb.append("`").append(dbName).append("`.");
         }
-        sb.append("`").append(table.getName()).append("`");
+        if (table.isTemporary()) {
+            sb.append("`").append(Util.getTempTableDisplayName(table.getName())).append("`");
+        } else {
+            sb.append("`").append(table.getName()).append("`");
+        }
 
 
         sb.append(" (\n");
@@ -4087,10 +4236,25 @@ public class Env {
             sb.append("\n)");
         } else if (table.getType() == TableType.ICEBERG_EXTERNAL_TABLE) {
             addTableComment(table, sb);
-            org.apache.iceberg.Table icebergTable = ((IcebergExternalTable) table).getIcebergTable();
-            sb.append("\nLOCATION '").append(icebergTable.location()).append("'");
+            IcebergExternalTable icebergExternalTable = (IcebergExternalTable) table;
+            sb.append("\nLOCATION '").append(icebergExternalTable.location()).append("'");
             sb.append("\nPROPERTIES (");
-            Iterator<Entry<String, String>> iterator = icebergTable.properties().entrySet().iterator();
+            Iterator<Entry<String, String>> iterator = icebergExternalTable.properties().entrySet().iterator();
+            while (iterator.hasNext()) {
+                Entry<String, String> prop = iterator.next();
+                sb.append("\n  \"").append(prop.getKey()).append("\" = \"").append(prop.getValue()).append("\"");
+                if (iterator.hasNext()) {
+                    sb.append(",");
+                }
+            }
+            sb.append("\n)");
+        } else if (table.getType() == TableType.PAIMON_EXTERNAL_TABLE) {
+            addTableComment(table, sb);
+            PaimonExternalTable paimonExternalTable = (PaimonExternalTable) table;
+            Map<String, String> properties = paimonExternalTable.getTableProperties();
+            sb.append("\nLOCATION '").append(properties.getOrDefault("path", "")).append("'");
+            sb.append("\nPROPERTIES (");
+            Iterator<Entry<String, String>> iterator = properties.entrySet().iterator();
             while (iterator.hasNext()) {
                 Entry<String, String> prop = iterator.next();
                 sb.append("\n  \"").append(prop.getKey()).append("\" = \"").append(prop.getValue()).append("\"");
@@ -4165,8 +4329,21 @@ public class Env {
         }
     }
 
-    public void replayCreateTable(String dbName, Table table) throws MetaNotFoundException {
-        getInternalCatalog().replayCreateTable(dbName, table);
+    public void replayCreateTable(CreateTableInfo info) throws MetaNotFoundException {
+        if (Strings.isNullOrEmpty(info.getCtlName()) || info.getCtlName()
+                .equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
+            Table table = info.getTable();
+            long dbId = info.getDbId();
+            getInternalCatalog().replayCreateTable(info.getDbName(), dbId, table);
+            if (table instanceof MTMV) {
+                ((MTMV) table).compatible(Env.getCurrentEnv().getCatalogMgr());
+            }
+        } else {
+            ExternalCatalog externalCatalog = (ExternalCatalog) catalogMgr.getCatalog(info.getCtlName());
+            if (externalCatalog != null) {
+                externalCatalog.replayCreateTable(info.getDbName(), info.getTblName());
+            }
+        }
     }
 
     public void replayAlterExternalTableSchema(String dbName, String tableName, List<Column> newSchema)
@@ -4178,12 +4355,8 @@ public class Env {
     public void dropTable(DropTableStmt stmt) throws DdlException {
         CatalogIf<?> catalogIf = catalogMgr.getCatalogOrException(stmt.getCatalogName(),
                 catalog -> new DdlException(("Unknown catalog " + catalog)));
-        catalogIf.dropTable(stmt);
-    }
-
-    public boolean unprotectDropTable(Database db, Table table, boolean isForceDrop, boolean isReplay,
-                                      Long recycleTime) {
-        return getInternalCatalog().unprotectDropTable(db, table, isForceDrop, isReplay, recycleTime);
+        catalogIf.dropTable(stmt.getDbName(), stmt.getTableName(), stmt.isView(), stmt.isMaterializedView(),
+                stmt.isSetIfExists(), stmt.isMustTemporary(), stmt.isForceDrop());
     }
 
     public void replayDropTable(Database db, long tableId, boolean isForceDrop,
@@ -4460,10 +4633,6 @@ public class Env {
         return this.deleteHandler;
     }
 
-    public Load getLoadInstance() {
-        return this.load;
-    }
-
     public LoadManager getLoadManager() {
         return loadManager;
     }
@@ -4514,10 +4683,6 @@ public class Env {
 
     public ExportMgr getExportMgr() {
         return this.exportMgr;
-    }
-
-    public SyncJobManager getSyncJobManager() {
-        return this.syncJobManager;
     }
 
     public JobManager getJobManager() {
@@ -4612,6 +4777,10 @@ public class Env {
 
     public PolicyMgr getPolicyMgr() {
         return this.policyMgr;
+    }
+
+    public IndexPolicyMgr getIndexPolicyMgr() {
+        return this.indexPolicyMgr;
     }
 
     public void setMaster(MasterInfo info) {
@@ -5276,7 +5445,9 @@ public class Env {
                     indexIdToSchemaVersion);
             editLog.logColumnRename(info);
             LOG.info("rename coloumn[{}] to {}", colName, newColName);
-            Env.getCurrentEnv().getAnalysisManager().dropStats(table, null);
+            AnalysisManager manager = Env.getCurrentEnv().getAnalysisManager();
+            manager.removeTableStats(table.getId());
+            manager.dropStats(table, null);
         }
     }
 
@@ -5304,6 +5475,7 @@ public class Env {
 
         Database db = getCurrentEnv().getInternalCatalog().getDbOrMetaException(dbId);
         OlapTable table = (OlapTable) db.getTableOrMetaException(tableId, TableType.OLAP);
+        Env.getCurrentEnv().getAnalysisManager().removeTableStats(tableId);
         table.writeLock();
         try {
             renameColumn(db, table, colName, newColName, indexIdToSchemaVersion, true);
@@ -5637,12 +5809,7 @@ public class Env {
 
     // Switch catalog of this session
     public void changeCatalog(ConnectContext ctx, String catalogName) throws DdlException {
-        CatalogIf catalogIf = catalogMgr.getCatalog(catalogName);
-        if (catalogIf == null) {
-            throw new DdlException(ErrorCode.ERR_UNKNOWN_CATALOG.formatErrorMsg(catalogName),
-                    ErrorCode.ERR_UNKNOWN_CATALOG);
-        }
-
+        CatalogIf catalogIf = catalogMgr.getCatalogOrDdlException(catalogName);
         String currentDB = ctx.getDatabase();
         if (StringUtils.isNotEmpty(currentDB)) {
             // When dropped the current catalog in current context, the current catalog will be null.
@@ -5673,10 +5840,6 @@ public class Env {
     // for test only
     public void clear() {
         getInternalCatalog().clearDbs();
-        if (load.getIdToLoadJob() != null) {
-            load.getIdToLoadJob().clear();
-            // load = null;
-        }
         System.gc();
     }
 
@@ -5702,8 +5865,10 @@ public class Env {
         }
 
         if (replace) {
+            String comment = stmt.getComment();
+            comment = comment == null || comment.isEmpty() ? null : comment;
             AlterViewStmt alterViewStmt = new AlterViewStmt(stmt.getTableName(), stmt.getColWithComments(),
-                    stmt.getViewDefStmt());
+                    stmt.getViewDefStmt(), comment);
             alterViewStmt.setInlineViewDef(stmt.getInlineViewDef());
             alterViewStmt.setFinalColumns(stmt.getColumns());
             try {
@@ -5838,7 +6003,6 @@ public class Env {
             }
             LOG.info("acquired all the tables' read lock.");
 
-            load.readLock();
             LOG.info("acquired all jobs' read lock.");
             long journalId = getMaxJournalId();
             File dumpFile = new File(Config.meta_dir, "image." + journalId);
@@ -5855,7 +6019,6 @@ public class Env {
             }
         } finally {
             // unlock all
-            load.readUnlock();
             for (int i = databases.size() - 1; i >= 0; i--) {
                 MetaLockUtils.readUnlockTables(tableLists.get(i));
             }
@@ -5881,11 +6044,29 @@ public class Env {
     public void truncateTable(TruncateTableStmt stmt) throws DdlException {
         CatalogIf<?> catalogIf = catalogMgr.getCatalogOrException(stmt.getTblRef().getName().getCtl(),
                 catalog -> new DdlException(("Unknown catalog " + catalog)));
-        catalogIf.truncateTable(stmt);
+        TableRef tableRef = stmt.getTblRef();
+        TableName tableName = tableRef.getName();
+        catalogIf.truncateTable(tableName.getDb(), tableName.getTbl(), tableRef.getPartitionNames(),
+                false, stmt.toSqlWithoutTable());
     }
 
     public void replayTruncateTable(TruncateTableInfo info) throws MetaNotFoundException {
-        getInternalCatalog().replayTruncateTable(info);
+        if (Strings.isNullOrEmpty(info.getCtl()) || info.getCtl().equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
+            // In previous versions(before 2.1.8), there is no catalog info in TruncateTableInfo,
+            // So if the catalog info is empty, we assume it's internal table.
+            getInternalCatalog().replayTruncateTable(info);
+            if (info.isEntireTable()) {
+                Env.getCurrentEnv().getAnalysisManager().removeTableStats(info.getTblId());
+            } else {
+                Env.getCurrentEnv().getAnalysisManager().updateUpdatedRows(info.getUpdateRecords(),
+                        info.getDbId(), info.getTblId(), 0);
+            }
+        } else {
+            ExternalCatalog ctl = (ExternalCatalog) catalogMgr.getCatalog(info.getCtl());
+            if (ctl != null) {
+                ctl.replayTruncateTable(info);
+            }
+        }
     }
 
     public void createFunction(CreateFunctionStmt stmt) throws UserException {
@@ -5941,7 +6122,7 @@ public class Env {
      * we can't set callback which is in fe-core to config items which are in fe-common. so wrap them here. it's not so
      * good but is best for us now.
      */
-    public void setMutableConfigwithCallback(String key, String value) throws ConfigException {
+    public void setMutableConfigWithCallback(String key, String value) throws ConfigException {
         ConfigBase.setMutableConfig(key, value);
         if (configtoThreads.get(key) != null) {
             try {
@@ -5955,19 +6136,20 @@ public class Env {
         }
     }
 
-    public void setConfig(AdminSetConfigStmt stmt) throws Exception {
+    public void setConfig(AdminSetConfigStmt stmt, boolean isProxy) throws Exception {
         Map<String, String> configs = stmt.getConfigs();
         Preconditions.checkState(configs.size() == 1);
 
         for (Map.Entry<String, String> entry : configs.entrySet()) {
             try {
-                setMutableConfigwithCallback(entry.getKey(), entry.getValue());
+                setMutableConfigWithCallback(entry.getKey(), entry.getValue());
             } catch (ConfigException e) {
                 throw new DdlException(e.getMessage());
             }
         }
 
-        if (stmt.isApplyToAll()) {
+        // if this request already come from other Frontend, do not forward it again
+        if (!isProxy && stmt.isApplyToAll()) {
             for (Frontend fe : Env.getCurrentEnv().getFrontends(null /* all */)) {
                 if (!fe.isAlive() || fe.getHost().equals(Env.getCurrentEnv().getSelfNode().getHost())) {
                     continue;
@@ -6393,9 +6575,6 @@ public class Env {
     }
 
     public void eraseDatabase(long dbId, boolean needEditLog) {
-        // remove jobs
-        Env.getCurrentEnv().getLoadInstance().removeDbLoadJob(dbId);
-
         // remove database transaction manager
         Env.getCurrentGlobalTransactionMgr().removeDatabaseTransactionMgr(dbId);
 
@@ -6725,6 +6904,10 @@ public class Env {
         return sqlCacheManager;
     }
 
+    public NereidsSortedPartitionsCacheManager getSortedPartitionsCacheManager() {
+        return sortedPartitionsCacheManager;
+    }
+
     public SplitSourceManager getSplitSourceManager() {
         return splitSourceManager;
     }
@@ -6834,6 +7017,18 @@ public class Env {
         }
 
         System.exit(0);
+    }
+
+    public void registerSessionInfo(String sessionId) {
+        this.aliveSessionSet.add(sessionId);
+    }
+
+    public void unregisterSessionInfo(String sessionId) {
+        this.aliveSessionSet.remove(sessionId);
+    }
+
+    public List<String> getAllAliveSessionIds() {
+        return new ArrayList<>(aliveSessionSet);
     }
 }
 

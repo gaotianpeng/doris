@@ -17,7 +17,9 @@
 
 #include "olap/tablet_meta.h"
 
+#include <bvar/bvar.h>
 #include <gen_cpp/Descriptors_types.h>
+#include <gen_cpp/FrontendService_types.h>
 #include <gen_cpp/Types_types.h>
 #include <gen_cpp/olap_common.pb.h>
 #include <gen_cpp/olap_file.pb.h>
@@ -42,6 +44,7 @@
 #include "io/fs/local_file_system.h"
 #include "olap/data_dir.h"
 #include "olap/file_header.h"
+#include "olap/lru_cache.h"
 #include "olap/olap_common.h"
 #include "olap/olap_define.h"
 #include "olap/rowset/rowset.h"
@@ -64,6 +67,22 @@ using std::vector;
 namespace doris {
 #include "common/compile_check_begin.h"
 using namespace ErrorCode;
+
+bvar::Adder<uint64_t> g_contains_agg_with_cache_if_eligible_total(
+        "g_contains_agg_with_cache_if_eligible_total");
+bvar::Adder<uint64_t> g_contains_agg_with_cache_if_eligible_partial_hit(
+        "g_contains_agg_with_cache_if_eligible_partial_hit");
+bvar::Adder<uint64_t> g_contains_agg_with_cache_if_eligible_full_hit(
+        "g_contains_agg_with_cache_if_eligible_full_hit");
+bvar::Window<bvar::Adder<uint64_t>> g_contains_agg_with_cache_if_eligible_total_minute(
+        "g_contains_agg_with_cache_if_eligible_total_1m",
+        &g_contains_agg_with_cache_if_eligible_total, 60);
+bvar::Window<bvar::Adder<uint64_t>> g_contains_agg_with_cache_if_eligible_partial_hit_minute(
+        "g_contains_agg_with_cache_if_eligible_partial_hit_1m",
+        &g_contains_agg_with_cache_if_eligible_partial_hit, 60);
+bvar::Window<bvar::Adder<uint64_t>> g_contains_agg_with_cache_if_eligible_full_hit_minute(
+        "g_contains_agg_with_cache_if_eligible_full_hit_1m",
+        &g_contains_agg_with_cache_if_eligible_full_hit, 60);
 
 TabletMetaSharedPtr TabletMeta::create(
         const TCreateTabletReq& request, const TabletUid& tablet_uid, uint64_t shard_id,
@@ -103,7 +122,8 @@ TabletMetaSharedPtr TabletMeta::create(
             request.time_series_compaction_file_count_threshold,
             request.time_series_compaction_time_threshold_seconds,
             request.time_series_compaction_empty_rowsets_threshold,
-            request.time_series_compaction_level_threshold, inverted_index_file_storage_format);
+            request.time_series_compaction_level_threshold, inverted_index_file_storage_format,
+            request.tde_algorithm);
 }
 
 TabletMeta::~TabletMeta() {
@@ -130,7 +150,8 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
                        int64_t time_series_compaction_time_threshold_seconds,
                        int64_t time_series_compaction_empty_rowsets_threshold,
                        int64_t time_series_compaction_level_threshold,
-                       TInvertedIndexFileStorageFormat::type inverted_index_file_storage_format)
+                       TInvertedIndexFileStorageFormat::type inverted_index_file_storage_format,
+                       TEncryptionAlgorithm::type tde_algorithm)
         : _tablet_uid(0, 0),
           _schema(new TabletSchema),
           _delete_bitmap(new DeleteBitmap(tablet_id)) {
@@ -214,6 +235,9 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
         break;
     case TInvertedIndexFileStorageFormat::V2:
         schema->set_inverted_index_storage_format(InvertedIndexStorageFormatPB::V2);
+        break;
+    case TInvertedIndexFileStorageFormat::V3:
+        schema->set_inverted_index_storage_format(InvertedIndexStorageFormatPB::V3);
         break;
     default:
         schema->set_inverted_index_storage_format(InvertedIndexStorageFormatPB::V2);
@@ -344,6 +368,9 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
     if (tablet_schema.__isset.storage_page_size) {
         schema->set_storage_page_size(tablet_schema.storage_page_size);
     }
+    if (tablet_schema.__isset.storage_dict_page_size) {
+        schema->set_storage_dict_page_size(tablet_schema.storage_dict_page_size);
+    }
     if (tablet_schema.__isset.skip_write_index_on_load) {
         schema->set_skip_write_index_on_load(tablet_schema.skip_write_index_on_load);
     }
@@ -355,6 +382,17 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
         BinlogConfig tmp_binlog_config;
         tmp_binlog_config = binlog_config.value();
         tmp_binlog_config.to_pb(tablet_meta_pb.mutable_binlog_config());
+    }
+
+    switch (tde_algorithm) {
+    case doris::TEncryptionAlgorithm::AES256:
+        tablet_meta_pb.set_encryption_algorithm(EncryptionAlgorithmPB::AES_256_CTR);
+        break;
+    case doris::TEncryptionAlgorithm::SM4:
+        tablet_meta_pb.set_encryption_algorithm(EncryptionAlgorithmPB::SM4_128_CTR);
+        break;
+    default:
+        tablet_meta_pb.set_encryption_algorithm(EncryptionAlgorithmPB::PLAINTEXT);
     }
 
     init_from_pb(tablet_meta_pb);
@@ -400,6 +438,9 @@ void TabletMeta::init_column_from_tcolumn(uint32_t unique_id, const TColumn& tco
     column->set_name(tcolumn.column_name);
     column->set_has_bitmap_index(tcolumn.has_bitmap_index);
     column->set_is_auto_increment(tcolumn.is_auto_increment);
+    if (tcolumn.__isset.is_on_update_current_timestamp) {
+        column->set_is_on_update_current_timestamp(tcolumn.is_on_update_current_timestamp);
+    }
     string data_type;
     EnumToString(TPrimitiveType, tcolumn.column_type.type, data_type);
     column->set_type(data_type);
@@ -452,6 +493,26 @@ void TabletMeta::init_column_from_tcolumn(uint32_t unique_id, const TColumn& tco
         init_column_from_tcolumn(tcolumn.children_column[i].col_unique_id,
                                  tcolumn.children_column[i], children_column);
     }
+    if (tcolumn.column_type.__isset.variant_max_subcolumns_count) {
+        column->set_variant_max_subcolumns_count(tcolumn.column_type.variant_max_subcolumns_count);
+    }
+    if (tcolumn.__isset.pattern_type) {
+        switch (tcolumn.pattern_type) {
+        case TPatternType::MATCH_NAME:
+            column->set_pattern_type(PatternTypePB::MATCH_NAME);
+            break;
+        case TPatternType::MATCH_NAME_GLOB:
+            column->set_pattern_type(PatternTypePB::MATCH_NAME_GLOB);
+        }
+    }
+    if (tcolumn.__isset.variant_enable_typed_paths_to_sparse) {
+        column->set_variant_enable_typed_paths_to_sparse(
+                tcolumn.variant_enable_typed_paths_to_sparse);
+    }
+    if (tcolumn.__isset.variant_max_sparse_column_statistics_size) {
+        column->set_variant_max_sparse_column_statistics_size(
+                tcolumn.variant_max_sparse_column_statistics_size);
+    }
 }
 
 void TabletMeta::remove_rowset_delete_bitmap(const RowsetId& rowset_id, const Version& version) {
@@ -479,10 +540,29 @@ Status TabletMeta::load_from_file(const string& file_path, TabletMetaPB* tablet_
     RETURN_IF_ERROR(file_header.deserialize());
     try {
         tablet_meta_pb->CopyFrom(file_header.message());
-    } catch (...) {
-        return Status::Error<PARSE_PROTOBUF_ERROR>("fail to copy protocol buffer object. file={}",
-                                                   file_path);
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "Failed to copy protocol buffer object: " << e.what()
+                     << ", file=" << file_path;
+        return Status::Error<PARSE_PROTOBUF_ERROR>(
+                "fail to copy protocol buffer object. file={}, error={}", file_path, e.what());
     }
+    return Status::OK();
+}
+
+Status TabletMeta::create_from_buffer(const uint8_t* buffer, size_t buffer_size) {
+    FileHeader<TabletMetaPB> file_header(""); // empty file path
+    RETURN_IF_ERROR(file_header.deserialize_from_memory(buffer, buffer_size));
+
+    TabletMetaPB tablet_meta_pb;
+    try {
+        tablet_meta_pb.CopyFrom(file_header.message());
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "Failed to copy protocol buffer object from buffer: " << e.what();
+        return Status::Error<ErrorCode::PARSE_PROTOBUF_ERROR>(
+                "fail to copy protocol buffer object from buffer. error={}", e.what());
+    }
+
+    init_from_pb(tablet_meta_pb);
     return Status::OK();
 }
 
@@ -660,6 +740,7 @@ void TabletMeta::init_from_pb(const TabletMetaPB& tablet_meta_pb) {
 
     if (tablet_meta_pb.has_enable_unique_key_merge_on_write()) {
         _enable_unique_key_merge_on_write = tablet_meta_pb.enable_unique_key_merge_on_write();
+        _delete_bitmap->set_tablet_id(_tablet_id);
     }
 
     // init _rs_metas
@@ -724,6 +805,10 @@ void TabletMeta::init_from_pb(const TabletMetaPB& tablet_meta_pb) {
             tablet_meta_pb.time_series_compaction_empty_rowsets_threshold();
     _time_series_compaction_level_threshold =
             tablet_meta_pb.time_series_compaction_level_threshold();
+
+    if (tablet_meta_pb.has_encryption_algorithm()) {
+        _encryption_algorithm = tablet_meta_pb.encryption_algorithm();
+    }
 }
 
 void TabletMeta::to_meta_pb(TabletMetaPB* tablet_meta_pb) {
@@ -815,6 +900,8 @@ void TabletMeta::to_meta_pb(TabletMetaPB* tablet_meta_pb) {
             time_series_compaction_empty_rowsets_threshold());
     tablet_meta_pb->set_time_series_compaction_level_threshold(
             time_series_compaction_level_threshold());
+
+    tablet_meta_pb->set_encryption_algorithm(_encryption_algorithm);
 }
 
 void TabletMeta::to_json(string* json_string, json2pb::Pb2JsonOptions& options) {
@@ -1012,25 +1099,19 @@ void TabletMeta::_check_mow_rowset_cache_version_size(size_t rowset_cache_versio
         rowset_cache_version_size > _rs_metas.size() + _stale_rs_metas.size()) {
         std::stringstream ss;
         auto rowset_ids = _delete_bitmap->get_rowset_cache_version();
-        for (const auto& rowset_id : rowset_ids) {
-            bool found = false;
+        std::set<std::string> tablet_rowset_ids;
+        {
+            std::shared_lock rlock(_meta_lock);
             for (auto& rs_meta : _rs_metas) {
-                if (rs_meta->rowset_id() == rowset_id) {
-                    found = true;
-                    break;
-                }
-            }
-            if (found) {
-                continue;
+                tablet_rowset_ids.emplace(rs_meta->rowset_id().to_string());
             }
             for (auto& rs_meta : _stale_rs_metas) {
-                if (rs_meta->rowset_id() == rowset_id) {
-                    found = true;
-                    break;
-                }
+                tablet_rowset_ids.emplace(rs_meta->rowset_id().to_string());
             }
-            if (!found) {
-                ss << rowset_id.to_string() << ", ";
+        }
+        for (const auto& rowset_id : rowset_ids) {
+            if (tablet_rowset_ids.find(rowset_id) == tablet_rowset_ids.end()) {
+                ss << rowset_id << ", ";
             }
         }
         // size(rowset_cache_version) <= size(_rs_metas) + size(_stale_rs_metas) + size(_unused_rs)
@@ -1085,6 +1166,39 @@ bool operator!=(const TabletMeta& a, const TabletMeta& b) {
     return !(a == b);
 }
 
+// We cannot just copy the underlying memory to construct a string
+// due to equivalent objects may have different padding bytes.
+// Reading padding bytes is undefined behavior, neither copy nor
+// placement new will help simplify the code.
+// Refer to C11 standards §6.2.6.1/6 and §6.7.9/21 for more info.
+static std::string agg_cache_key(int64_t tablet_id, const DeleteBitmap::BitmapKey& bmk) {
+    std::string ret(sizeof(tablet_id) + sizeof(bmk), '\0');
+    *reinterpret_cast<int64_t*>(ret.data()) = tablet_id;
+    auto t = reinterpret_cast<DeleteBitmap::BitmapKey*>(ret.data() + sizeof(tablet_id));
+    std::get<RowsetId>(*t).version = std::get<RowsetId>(bmk).version;
+    std::get<RowsetId>(*t).hi = std::get<RowsetId>(bmk).hi;
+    std::get<RowsetId>(*t).mi = std::get<RowsetId>(bmk).mi;
+    std::get<RowsetId>(*t).lo = std::get<RowsetId>(bmk).lo;
+    std::get<1>(*t) = std::get<1>(bmk);
+    std::get<2>(*t) = std::get<2>(bmk);
+    return ret;
+}
+
+// decode cache key info from a agg_cache_key
+static void decode_agg_cache_key(const std::string& key_str, int64_t& tablet_id,
+                                 DeleteBitmap::BitmapKey& bmk) {
+    const char* ptr = key_str.data();
+    tablet_id = *reinterpret_cast<const int64_t*>(ptr);
+    ptr += sizeof(tablet_id);
+    auto* t = reinterpret_cast<DeleteBitmap::BitmapKey*>(const_cast<char*>(ptr));
+    std::get<RowsetId>(bmk).version = std::get<RowsetId>(*t).version;
+    std::get<RowsetId>(bmk).hi = std::get<RowsetId>(*t).hi;
+    std::get<RowsetId>(bmk).mi = std::get<RowsetId>(*t).mi;
+    std::get<RowsetId>(bmk).lo = std::get<RowsetId>(*t).lo;
+    std::get<1>(bmk) = std::get<1>(*t);
+    std::get<2>(bmk) = std::get<2>(*t);
+}
+
 DeleteBitmapAggCache::DeleteBitmapAggCache(size_t capacity)
         : LRUCachePolicy(CachePolicy::CacheType::DELETE_BITMAP_AGG_CACHE, capacity,
                          LRUCacheType::SIZE, config::delete_bitmap_agg_cache_stale_sweep_time_sec,
@@ -1096,6 +1210,22 @@ DeleteBitmapAggCache* DeleteBitmapAggCache::instance() {
 
 DeleteBitmapAggCache* DeleteBitmapAggCache::create_instance(size_t capacity) {
     return new DeleteBitmapAggCache(capacity);
+}
+
+DeleteBitmap DeleteBitmapAggCache::snapshot(int64_t tablet_id) {
+    DeleteBitmap ret(tablet_id);
+    auto collector = [&](const LRUHandle* handle) {
+        auto key = handle->key().to_string();
+        int64_t key_tablet_id;
+        DeleteBitmap::BitmapKey bmk;
+        decode_agg_cache_key(key, key_tablet_id, bmk);
+        if (key_tablet_id == tablet_id) {
+            const auto& dbm = reinterpret_cast<DeleteBitmapAggCache::Value*>(handle->value)->bitmap;
+            ret.set(bmk, dbm);
+        }
+    };
+    DeleteBitmapAggCache::instance()->for_each_entry(collector);
+    return ret;
 }
 
 DeleteBitmap::DeleteBitmap(int64_t tablet_id) : _tablet_id(tablet_id) {}
@@ -1210,6 +1340,19 @@ void DeleteBitmap::remove(const BitmapKey& start, const BitmapKey& end) {
     }
 }
 
+void DeleteBitmap::remove(const std::vector<std::tuple<BitmapKey, BitmapKey>>& key_ranges) {
+    std::lock_guard l(lock);
+    for (auto& [start, end] : key_ranges) {
+        for (auto it = delete_bitmap.lower_bound(start); it != delete_bitmap.end();) {
+            auto& [k, _] = *it;
+            if (k >= end) {
+                break;
+            }
+            it = delete_bitmap.erase(it);
+        }
+    }
+}
+
 bool DeleteBitmap::contains(const BitmapKey& bmk, uint32_t row_id) const {
     std::shared_lock l(lock);
     auto it = delete_bitmap.find(bmk);
@@ -1243,9 +1386,53 @@ uint64_t DeleteBitmap::get_size() const {
     return charge;
 }
 
-bool DeleteBitmap::contains_agg_without_cache(const BitmapKey& bmk, uint32_t row_id) const {
+bool DeleteBitmap::contains_agg_with_cache_if_eligible(const BitmapKey& bmk,
+                                                       uint32_t row_id) const {
+    g_contains_agg_with_cache_if_eligible_total << 1;
+    int64_t start_version {0};
+    if (config::enable_mow_get_agg_by_cache) {
+        auto deleter = [&](Cache::Handle* handle) {
+            DeleteBitmapAggCache::instance()->release(handle);
+        };
+        std::unique_ptr<Cache::Handle, decltype(deleter)> dbm_handle(nullptr, deleter);
+        int64_t cached_version = 0;
+        // 1. try to lookup the desired key directly
+        dbm_handle.reset(DeleteBitmapAggCache::instance()->lookup(agg_cache_key(_tablet_id, bmk)));
+        if (dbm_handle != nullptr) {
+            cached_version = std::get<2>(bmk);
+        } else {
+            // 2. if not found, try to lookup with cached version
+            cached_version = _get_rowset_cache_version(bmk);
+            if (cached_version > 0) {
+                if (cached_version > std::get<2>(bmk)) {
+                    cached_version = 0;
+                } else {
+                    dbm_handle.reset(DeleteBitmapAggCache::instance()->lookup(agg_cache_key(
+                            _tablet_id, {std::get<0>(bmk), std::get<1>(bmk), cached_version})));
+                }
+            }
+        }
+        if (dbm_handle != nullptr) {
+            const auto& cached_dbm =
+                    reinterpret_cast<DeleteBitmapAggCache::Value*>(
+                            DeleteBitmapAggCache::instance()->value(dbm_handle.get()))
+                            ->bitmap;
+            if (cached_version == std::get<2>(bmk)) {
+                g_contains_agg_with_cache_if_eligible_full_hit << 1;
+            } else {
+                g_contains_agg_with_cache_if_eligible_partial_hit << 1;
+            }
+            if (cached_dbm.contains(row_id)) {
+                return true;
+            }
+            if (cached_version == std::get<2>(bmk)) {
+                return false;
+            }
+            start_version = cached_version + 1;
+        }
+    }
+    DeleteBitmap::BitmapKey start {std::get<0>(bmk), std::get<1>(bmk), start_version};
     std::shared_lock l(lock);
-    DeleteBitmap::BitmapKey start {std::get<0>(bmk), std::get<1>(bmk), 0};
     for (auto it = delete_bitmap.lower_bound(start); it != delete_bitmap.end(); ++it) {
         auto& [k, bm] = *it;
         if (std::get<0>(k) != std::get<0>(bmk) || std::get<1>(k) != std::get<1>(bmk) ||
@@ -1335,54 +1522,6 @@ void DeleteBitmap::merge(const DeleteBitmap& other) {
     }
 }
 
-void DeleteBitmap::add_to_remove_queue(
-        const std::string& version_str,
-        const std::vector<std::tuple<int64_t, DeleteBitmap::BitmapKey, DeleteBitmap::BitmapKey>>&
-                vector) {
-    std::shared_lock l(stale_delete_bitmap_lock);
-    _stale_delete_bitmap.emplace(version_str, vector);
-}
-
-void DeleteBitmap::remove_stale_delete_bitmap_from_queue(const std::vector<std::string>& vector) {
-    if (!config::enable_delete_bitmap_merge_on_compaction) {
-        return;
-    }
-    std::shared_lock l(stale_delete_bitmap_lock);
-    //<rowset_id, start_version, end_version>
-    std::vector<std::tuple<std::string, uint64_t, uint64_t>> to_delete;
-    int64_t tablet_id = -1;
-    for (auto& version_str : vector) {
-        auto it = _stale_delete_bitmap.find(version_str);
-        if (it != _stale_delete_bitmap.end()) {
-            auto delete_bitmap_vector = it->second;
-            for (auto& delete_bitmap_tuple : it->second) {
-                if (tablet_id < 0) {
-                    tablet_id = std::get<0>(delete_bitmap_tuple);
-                }
-                auto start_bmk = std::get<1>(delete_bitmap_tuple);
-                auto end_bmk = std::get<2>(delete_bitmap_tuple);
-                // the key range of to be removed is [start_bmk,end_bmk),
-                // due to the different definitions of the right boundary,
-                // so use end_bmk as right boundary when removing local delete bitmap,
-                // use (end_bmk - 1) as right boundary when removing ms delete bitmap
-                remove(start_bmk, end_bmk);
-                to_delete.emplace_back(std::make_tuple(std::get<0>(start_bmk).to_string(), 0,
-                                                       std::get<2>(end_bmk) - 1));
-            }
-            _stale_delete_bitmap.erase(version_str);
-        }
-    }
-    if (tablet_id == -1 || to_delete.empty()) {
-        return;
-    }
-    CloudStorageEngine& engine = ExecEnv::GetInstance()->storage_engine().to_cloud();
-    auto st = engine.meta_mgr().remove_old_version_delete_bitmap(tablet_id, to_delete);
-    if (!st.ok()) {
-        LOG(WARNING) << "fail to remove_stale_delete_bitmap_from_queue for tablet=" << tablet_id
-                     << ",st=" << st;
-    }
-}
-
 uint64_t DeleteBitmap::get_delete_bitmap_count() {
     std::shared_lock l(lock);
     uint64_t count = 0;
@@ -1392,6 +1531,25 @@ uint64_t DeleteBitmap::get_delete_bitmap_count() {
         }
     }
     return count;
+}
+
+void DeleteBitmap::traverse_rowset_and_version(
+        const std::function<int(const RowsetId& rowsetId, int64_t version)>& func) const {
+    std::shared_lock l(lock);
+    auto it = delete_bitmap.cbegin();
+    while (it != delete_bitmap.cend()) {
+        RowsetId rowset_id = std::get<0>(it->first);
+        int64_t version = std::get<2>(it->first);
+        int result = func(rowset_id, version);
+        if (result == -2) {
+            // find next <rowset, version>
+            it++;
+        } else {
+            // find next <rowset>
+            it = delete_bitmap.upper_bound({rowset_id, std::numeric_limits<SegmentId>::max(),
+                                            std::numeric_limits<Version>::max()});
+        }
+    }
 }
 
 bool DeleteBitmap::has_calculated_for_multi_segments(const RowsetId& rowset_id) const {
@@ -1412,11 +1570,11 @@ void DeleteBitmap::clear_rowset_cache_version() {
     VLOG_DEBUG << "clear agg cache version for tablet=" << _tablet_id;
 }
 
-std::set<RowsetId> DeleteBitmap::get_rowset_cache_version() {
-    std::set<RowsetId> set;
+std::set<std::string> DeleteBitmap::get_rowset_cache_version() {
+    std::set<std::string> set;
     std::shared_lock l(_rowset_cache_version_lock);
     for (auto& [k, _] : _rowset_cache_version) {
-        set.insert(k);
+        set.insert(k.to_string());
     }
     return set;
 }
@@ -1433,22 +1591,12 @@ DeleteBitmap::Version DeleteBitmap::_get_rowset_cache_version(const BitmapKey& b
     return 0;
 }
 
-// We cannot just copy the underlying memory to construct a string
-// due to equivalent objects may have different padding bytes.
-// Reading padding bytes is undefined behavior, neither copy nor
-// placement new will help simplify the code.
-// Refer to C11 standards §6.2.6.1/6 and §6.7.9/21 for more info.
-static std::string agg_cache_key(int64_t tablet_id, const DeleteBitmap::BitmapKey& bmk) {
-    std::string ret(sizeof(tablet_id) + sizeof(bmk), '\0');
-    *reinterpret_cast<int64_t*>(ret.data()) = tablet_id;
-    auto t = reinterpret_cast<DeleteBitmap::BitmapKey*>(ret.data() + sizeof(tablet_id));
-    std::get<RowsetId>(*t).version = std::get<RowsetId>(bmk).version;
-    std::get<RowsetId>(*t).hi = std::get<RowsetId>(bmk).hi;
-    std::get<RowsetId>(*t).mi = std::get<RowsetId>(bmk).mi;
-    std::get<RowsetId>(*t).lo = std::get<RowsetId>(bmk).lo;
-    std::get<1>(*t) = std::get<1>(bmk);
-    std::get<2>(*t) = std::get<2>(bmk);
-    return ret;
+DeleteBitmap DeleteBitmap::agg_cache_snapshot() {
+    return DeleteBitmapAggCache::instance()->snapshot(_tablet_id);
+}
+
+void DeleteBitmap::set_tablet_id(int64_t tablet_id) {
+    _tablet_id = tablet_id;
 }
 
 std::shared_ptr<roaring::Roaring> DeleteBitmap::get_agg(const BitmapKey& bmk) const {
@@ -1542,10 +1690,11 @@ std::shared_ptr<roaring::Roaring> DeleteBitmap::get_agg(const BitmapKey& bmk) co
             &val->bitmap, [handle](...) { DeleteBitmapAggCache::instance()->release(handle); });
 }
 
-std::shared_ptr<roaring::Roaring> DeleteBitmap::get_agg_without_cache(const BitmapKey& bmk) const {
+std::shared_ptr<roaring::Roaring> DeleteBitmap::get_agg_without_cache(
+        const BitmapKey& bmk, const int64_t start_version) const {
     std::shared_ptr<roaring::Roaring> bitmap = std::make_shared<roaring::Roaring>();
     std::shared_lock l(lock);
-    DeleteBitmap::BitmapKey start {std::get<0>(bmk), std::get<1>(bmk), 0};
+    DeleteBitmap::BitmapKey start {std::get<0>(bmk), std::get<1>(bmk), start_version};
     for (auto it = delete_bitmap.lower_bound(start); it != delete_bitmap.end(); ++it) {
         auto& [k, bm] = *it;
         if (std::get<0>(k) != std::get<0>(bmk) || std::get<1>(k) != std::get<1>(bmk) ||

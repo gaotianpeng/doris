@@ -24,7 +24,9 @@ import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.util.DebugUtil;
 import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.nereids.analyzer.UnboundVariable;
 import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.rules.analysis.ExpressionAnalyzer;
 import org.apache.doris.nereids.rules.expression.AbstractExpressionRewriteRule;
 import org.apache.doris.nereids.rules.expression.ExpressionListenerMatcher;
 import org.apache.doris.nereids.rules.expression.ExpressionMatchingContext;
@@ -53,6 +55,7 @@ import org.apache.doris.nereids.trees.expressions.NullSafeEqual;
 import org.apache.doris.nereids.trees.expressions.Or;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.TimestampArithmetic;
+import org.apache.doris.nereids.trees.expressions.Variable;
 import org.apache.doris.nereids.trees.expressions.WhenClause;
 import org.apache.doris.nereids.trees.expressions.functions.BoundFunction;
 import org.apache.doris.nereids.trees.expressions.functions.PropagateNullLiteral;
@@ -179,7 +182,8 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
                 matches(Version.class, this::visitVersion),
                 matches(SessionUser.class, this::visitSessionUser),
                 matches(LastQueryId.class, this::visitLastQueryId),
-                matches(Nvl.class, this::visitNvl)
+                matches(Nvl.class, this::visitNvl),
+                matches(Match.class, this::visitMatch)
         );
     }
 
@@ -220,6 +224,12 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
             return checkedExpr.get();
         }
         return super.visitMatch(match, context);
+    }
+
+    @Override
+    public Expression visitUnboundVariable(UnboundVariable unboundVariable, ExpressionRewriteContext context) {
+        Variable variable = ExpressionAnalyzer.resolveUnboundVariable(unboundVariable);
+        return variable.getRealExpression();
     }
 
     @Override
@@ -403,15 +413,15 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
                     // x and y
                     return and.withChildren(nonTrueLiteral);
             }
-        } else if (nullCount == 1) {
+        } else if (nullCount < and.children().size()) {
             if (nonTrueLiteral.size() == 1) {
-                // null and true
-                return new NullLiteral(BooleanType.INSTANCE);
+                return nonTrueLiteral.get(0);
+            } else {
+                // null and x
+                return and.withChildren(nonTrueLiteral);
             }
-            // null and x
-            return and.withChildren(nonTrueLiteral);
         } else {
-            // null and null
+            // null and null and null and ...
             return new NullLiteral(BooleanType.INSTANCE);
         }
     }
@@ -444,10 +454,10 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
                     // x or y
                     return or.withChildren(nonFalseLiteral);
             }
-        } else if (nullCount == 1) {
+        } else if (nullCount < nonFalseLiteral.size()) {
             if (nonFalseLiteral.size() == 1) {
                 // null or false
-                return new NullLiteral(BooleanType.INSTANCE);
+                return nonFalseLiteral.get(0);
             }
             // null or x
             return or.withChildren(nonFalseLiteral);
@@ -484,6 +494,10 @@ public class FoldConstantRuleOnFE extends AbstractExpressionRewriteRule
             }
         }
         try {
+            // TODO: support no throw exception in `checkedCastTo` and return Optional<Expression>
+            if (cast.child().getDataType().isStringLikeType() && dataType.isComplexType()) {
+                return cast;
+            }
             Expression castResult = child.checkedCastTo(dataType);
             if (!Objects.equals(castResult, cast) && !Objects.equals(castResult, child)) {
                 castResult = rewrite(castResult, context);

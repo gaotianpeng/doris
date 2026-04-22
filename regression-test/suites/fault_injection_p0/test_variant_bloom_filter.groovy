@@ -55,7 +55,9 @@ suite("test_variant_bloom_filter", "nonConcurrent") {
     sql """
         CREATE TABLE IF NOT EXISTS ${index_table} (
             k bigint,
-            v variant
+            v variant<
+                properties("variant_max_subcolumns_count" = "9999")
+            >
         )
         DUPLICATE KEY(`k`)
         DISTRIBUTED BY HASH(k) BUCKETS 1
@@ -70,8 +72,10 @@ suite("test_variant_bloom_filter", "nonConcurrent") {
     def backendId_to_backendIP = [:]
     def backendId_to_backendHttpPort = [:]
     getBackendIpHttpPort(backendId_to_backendIP, backendId_to_backendHttpPort);
-    def tablets = sql_return_maparray """ show tablets from ${index_table}; """
 
+    sql """ select count() from ${index_table}; """
+
+    def tablets = sql_return_maparray """ show tablets from ${index_table}; """
 
     sql """ select count() from ${index_table}; """
 

@@ -48,7 +48,6 @@ import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.EtlStatus;
 import org.apache.doris.load.FailMsg;
 import org.apache.doris.load.FailMsg.CancelType;
-import org.apache.doris.load.Load;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.mysql.privilege.Privilege;
 import org.apache.doris.persist.gson.GsonPostProcessable;
@@ -57,6 +56,7 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.Coordinator;
 import org.apache.doris.qe.QeProcessorImpl;
 import org.apache.doris.thrift.TEtlState;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 import org.apache.doris.thrift.TPipelineWorkloadGroup;
 import org.apache.doris.thrift.TStatusCode;
 import org.apache.doris.thrift.TUniqueId;
@@ -321,12 +321,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
     private void initDefaultJobProperties() {
         long timeout = Config.broker_load_default_timeout_second;
         switch (jobType) {
-            case SPARK:
-                timeout = Config.spark_load_default_timeout_second;
-                break;
-            case HADOOP:
-                timeout = Config.hadoop_load_default_timeout_second;
-                break;
             case COPY:
             case BROKER:
                 timeout = Config.broker_load_default_timeout_second;
@@ -336,8 +330,8 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
                                     .map(ConnectContext::getExecTimeout)
                                     .orElse(Config.insert_load_default_timeout_second);
                 break;
-            case MINI:
-                timeout = Config.stream_load_default_timeout_second;
+            case INGESTION:
+                timeout = Config.ingestion_load_default_timeout_second;
                 break;
             default:
                 break;
@@ -347,6 +341,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
         jobProperties.put(LoadStmt.MAX_FILTER_RATIO_PROPERTY, 0.0);
         jobProperties.put(LoadStmt.STRICT_MODE, false);
         jobProperties.put(LoadStmt.PARTIAL_COLUMNS, false);
+        jobProperties.put(LoadStmt.PARTIAL_UPDATE_NEW_KEY_POLICY, TPartialUpdateNewRowPolicy.APPEND);
         jobProperties.put(LoadStmt.TIMEZONE, TimeUtils.DEFAULT_TIME_ZONE);
         jobProperties.put(LoadStmt.LOAD_PARALLELISM, Config.default_load_parallelism);
         jobProperties.put(LoadStmt.SEND_BATCH_PARALLELISM, 1);
@@ -492,11 +487,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
         writeLock();
         try {
             checkAuth("CANCEL LOAD");
-
-            // mini load can not be cancelled by frontend
-            if (jobType == EtlJobType.MINI) {
-                throw new DdlException("Job could not be cancelled in type " + jobType.name());
-            }
             if (isCommitting) {
                 LOG.warn(new LogBuilder(LogKey.LOAD_JOB, id)
                         .add("error_msg", "The txn which belongs to job is committing. "
@@ -838,18 +828,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
         return loadStartTimestamp;
     }
 
-    public void getJobInfo(Load.JobInfo jobInfo) throws DdlException {
-        checkAuth("SHOW LOAD");
-        jobInfo.tblNames.addAll(getTableNamesForShow());
-        jobInfo.state = org.apache.doris.load.LoadJob.JobState.valueOf(state.name());
-        if (failMsg != null) {
-            jobInfo.failMsg = failMsg.getMsg();
-        } else {
-            jobInfo.failMsg = "";
-        }
-        jobInfo.trackingUrl = loadingStatus.getTrackingUrl();
-    }
-
     public static LoadJob read(DataInput in) throws IOException {
         if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_136) {
             return GsonUtils.GSON.fromJson(Text.readString(in), LoadJob.class);
@@ -863,10 +841,10 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
             job = new SparkLoadJob();
         } else if (type == EtlJobType.INSERT || type == EtlJobType.INSERT_JOB) {
             job = new InsertLoadJob();
-        } else if (type == EtlJobType.MINI) {
-            job = new MiniLoadJob();
         } else if (type == EtlJobType.COPY) {
             job = new CopyJob();
+        } else if (type == EtlJobType.INGESTION) {
+            job = new IngestionLoadJob();
         } else {
             throw new IOException("Unknown load type: " + type.name());
         }
@@ -1198,6 +1176,10 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
 
     protected boolean isPartialUpdate() {
         return (boolean) jobProperties.get(LoadStmt.PARTIAL_COLUMNS);
+    }
+
+    protected TPartialUpdateNewRowPolicy getPartialUpdateNewKeyPolicy() {
+        return (TPartialUpdateNewRowPolicy) jobProperties.get(LoadStmt.PARTIAL_UPDATE_NEW_KEY_POLICY);
     }
 
     protected String getTimeZone() {

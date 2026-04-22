@@ -142,6 +142,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalPartitionTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalPlan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalProject;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalQuickSort;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalRelation;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalRepeat;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalResultSink;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalSchemaScan;
@@ -206,20 +207,24 @@ import org.apache.doris.thrift.TPushAggOp;
 import org.apache.doris.thrift.TResultSinkType;
 import org.apache.doris.thrift.TRuntimeFilterType;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableList.Builder;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -285,6 +290,14 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
                 scanNode.finalizeForNereids();
             } catch (Exception e) {
                 throw new RuntimeException(e.getMessage(), e);
+            }
+        }
+
+        if (isSimpleQuery(physicalPlan)) {
+            // the simple query maybe has two fragments or one fragment
+            rootFragment.setForceSingleInstance();
+            for (PlanFragment child : rootFragment.getChildren()) {
+                child.setForceSingleInstance();
             }
         }
         return rootFragment;
@@ -450,6 +463,9 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
             );
         }
         sink.setPartialUpdateInputColumns(isPartialUpdate, partialUpdateCols);
+        if (isPartialUpdate) {
+            sink.setPartialUpdateNewRowPolicy(olapTableSink.getPartialUpdateNewRowPolicy());
+        }
         rootFragment.setSink(sink);
 
         return rootFragment;
@@ -535,7 +551,7 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
 
         // TODO: should not call legacy planner analyze in Nereids
         try {
-            outFile.analyze(null, outputExprs, labels);
+            outFile.analyze(null, outputExprs, labels, true);
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());
         }
@@ -590,8 +606,10 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
         } else {
             throw new RuntimeException("do not support table type " + table.getType());
         }
-        if (fileScan.getTableSnapshot().isPresent() && scanNode instanceof FileQueryScanNode) {
-            ((FileQueryScanNode) scanNode).setQueryTableSnapshot(fileScan.getTableSnapshot().get());
+        if (scanNode instanceof FileQueryScanNode) {
+            FileQueryScanNode fileQueryScanNode = (FileQueryScanNode) scanNode;
+            fileScan.getTableSnapshot().ifPresent(fileQueryScanNode::setQueryTableSnapshot);
+            fileScan.getScanParams().ifPresent(fileQueryScanNode::setScanParams);
         }
         return getPlanFragmentForPhysicalFileScan(fileScan, context, scanNode, table, tupleDescriptor);
     }
@@ -761,8 +779,8 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
             if (context.getSessionVariable() != null && context.getSessionVariable().forbidUnknownColStats) {
                 for (int i = 0; i < slots.size(); i++) {
                     SlotReference slot = (SlotReference) slots.get(i);
-                    boolean inVisibleCol = slot.getColumn().isPresent()
-                            && StatisticConstants.shouldIgnoreCol(olapTable, slot.getColumn().get());
+                    boolean inVisibleCol = slot.getOriginalColumn().isPresent()
+                            && StatisticConstants.shouldIgnoreCol(olapTable, slot.getOriginalColumn().get());
                     if (olapScan.getStats().findColumnStatistics(slot).isUnKnown()
                             && !isComplexDataType(slot.getDataType())
                             && !StatisticConstants.isSystemTable(olapTable)
@@ -2103,19 +2121,26 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
         } else {
             throw new RuntimeException("not support set operation type " + setOperation);
         }
+        List<List<Expr>> distributeExprLists = getDistributeExprs(setOperation.children().toArray(new Plan[0]));
+        setOperationNode.setChildrenDistributeExprLists(distributeExprLists);
         setOperationNode.setNereidsId(setOperation.getId());
 
-        setOperation.getRegularChildrenOutputs().stream()
-                .map(o -> o.stream()
-                        .map(e -> ExpressionTranslator.translate(e, context))
-                        .collect(ImmutableList.toImmutableList()))
-                .forEach(setOperationNode::addResultExprLists);
+        for (List<SlotReference> regularChildrenOutput : setOperation.getRegularChildrenOutputs()) {
+            Builder<Expr> translateOutputs = ImmutableList.builderWithExpectedSize(regularChildrenOutput.size());
+            for (SlotReference childOutput : regularChildrenOutput) {
+                translateOutputs.add(ExpressionTranslator.translate(childOutput, context));
+            }
+            setOperationNode.addResultExprLists(translateOutputs.build());
+        }
+
         if (setOperation instanceof PhysicalUnion) {
-            ((PhysicalUnion) setOperation).getConstantExprsList().stream()
-                    .map(l -> l.stream()
-                            .map(e -> ExpressionTranslator.translate(e, context))
-                            .collect(ImmutableList.toImmutableList()))
-                    .forEach(setOperationNode::addConstExprList);
+            for (List<NamedExpression> unionConsts : ((PhysicalUnion) setOperation).getConstantExprsList()) {
+                Builder<Expr> translateConsts = ImmutableList.builderWithExpectedSize(unionConsts.size());
+                for (NamedExpression unionConst : unionConsts) {
+                    translateConsts.add(ExpressionTranslator.translate(unionConst, context));
+                }
+                setOperationNode.addConstExprList(translateConsts.build());
+            }
         }
 
         for (PlanFragment childFragment : childrenFragments) {
@@ -2489,8 +2514,9 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
     private void updateScanSlotsMaterialization(ScanNode scanNode,
             Set<SlotId> requiredSlotIdSet, Set<SlotId> requiredByProjectSlotIdSet,
             PlanTranslatorContext context) {
-        // TODO: use smallest slot if do not need any slot in upper node
-        SlotDescriptor smallest = scanNode.getTupleDesc().getSlots().get(0);
+
+        // Find the smallest column, for count(*) or other situation that slot is empty after prune
+        SlotDescriptor smallest = getSmallestSlot(scanNode.getTupleDesc().getSlots());
         scanNode.getTupleDesc().getSlots().removeIf(s -> !requiredSlotIdSet.contains(s.getId()));
         if (scanNode.getTupleDesc().getSlots().isEmpty()) {
             scanNode.getTupleDesc().getSlots().add(smallest);
@@ -2505,6 +2531,56 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
                 }
             }
             context.removeScanFromStatsUnknownColumnsMap(scanNode);
+        }
+    }
+
+    /**
+     * Get the smallest slot in the slot list.
+     *
+     * @param slots slot list
+     * @return the smallest slot
+     */
+    @VisibleForTesting
+    @Nullable
+    public static SlotDescriptor getSmallestSlot(List<SlotDescriptor> slots) {
+        if (slots == null || slots.isEmpty()) {
+            return null;
+        }
+        return Collections.min(slots, new SlotSizeComparator());
+    }
+
+    /**
+     * Comparator to compare the size of two slots.
+     */
+    public static class SlotSizeComparator implements Comparator<SlotDescriptor> {
+        @Override
+        public int compare(SlotDescriptor s1, SlotDescriptor s2) {
+            int p1 = typePriority(s1);
+            int p2 = typePriority(s2);
+
+            if (p1 != p2) {
+                return Integer.compare(p1, p2);
+            }
+
+            int res = Integer.compare(s1.getType().getSlotSize(), s2.getType().getSlotSize());
+            if (res != 0) {
+                return res;
+            } else {
+                return Integer.compare(s1.getType().getLength(), s2.getType().getLength());
+            }
+        }
+
+        private int typePriority(SlotDescriptor s) {
+            if (s.getType().isNumericType() || s.getType().isDateType() || s.getType().isBoolean()
+                    || s.getType().isTime() || s.getType().isTimeV2() || s.getType().isIP()) {
+                return 1;
+            } else if (s.getType().isStringType()) {
+                return 2;
+            } else if (s.getType().isComplexType()) {
+                return 3;
+            } else {
+                return Integer.MAX_VALUE;
+            }
         }
     }
 
@@ -2845,5 +2921,31 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
             return partitionExprs;
         }
         return Lists.newArrayList();
+    }
+
+    // matching the simple query:
+    // 1. select xxx from tbl
+    // 2. select xxx from tbl where xxx=yyy
+    private boolean isSimpleQuery(PhysicalPlan root) {
+        if (!(root instanceof PhysicalResultSink)) {
+            return false;
+        }
+        Plan child = root.child(0);
+        if (child instanceof PhysicalLimit) {
+            child = child.child(0);
+        }
+        if (child instanceof PhysicalDistribute) {
+            child = child.child(0);
+        }
+        if (child instanceof PhysicalLimit) {
+            child = child.child(0);
+        }
+        if (child instanceof PhysicalProject) {
+            child = child.child(0);
+        }
+        if (child instanceof PhysicalFilter) {
+            child = child.child(0);
+        }
+        return child instanceof PhysicalRelation;
     }
 }

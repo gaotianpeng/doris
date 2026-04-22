@@ -147,34 +147,69 @@ public class AuditLoader extends Plugin implements AuditPlugin {
 
     private void fillLogBuffer(AuditEvent event, StringBuilder logBuffer) {
         // should be same order as InternalSchema.AUDIT_SCHEMA
+
+        // uuid and time
         logBuffer.append(event.queryId).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(TimeUtils.longToTimeStringWithms(event.timestamp)).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // cs info
         logBuffer.append(event.clientIp).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.user).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.feIp).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // default ctl and db
         logBuffer.append(event.ctl).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.db).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // query state
         logBuffer.append(event.state).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.errorCode).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.errorMessage).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // execution info
         logBuffer.append(event.queryTime).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.cpuTimeMs).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.peakMemoryBytes).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.scanBytes).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.scanRows).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.returnRows).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.shuffleSendRows).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.shuffleSendBytes).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.spillWriteBytesToLocalStorage).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.spillReadBytesFromLocalStorage).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.scanBytesFromLocalStorage).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.scanBytesFromRemoteStorage).append(AUDIT_TABLE_COL_SEPARATOR);
-        logBuffer.append(event.stmtId).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // plan info
+        logBuffer.append(event.parseTimeMs).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.planTimesMs).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.getMetaTimesMs).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.scheduleTimesMs).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.hitSqlCache ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.isHandledInFe ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // queried tables, views and m-views
+        logBuffer.append(event.queriedTablesAndViews).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.chosenMViews).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // variable and configs
+        logBuffer.append(event.changedVariables).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.sqlMode).append(AUDIT_TABLE_COL_SEPARATOR);
+
+
+        // type and digest
         logBuffer.append(event.stmtType).append(AUDIT_TABLE_COL_SEPARATOR);
-        logBuffer.append(event.isQuery ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
-        logBuffer.append(event.isNereids ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
-        logBuffer.append(event.feIp).append(AUDIT_TABLE_COL_SEPARATOR);
-        logBuffer.append(event.cpuTimeMs).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.stmtId).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.sqlHash).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.sqlDigest).append(AUDIT_TABLE_COL_SEPARATOR);
-        logBuffer.append(event.peakMemoryBytes).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.isQuery ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.isNereids ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
+        logBuffer.append(event.isInternal ? 1 : 0).append(AUDIT_TABLE_COL_SEPARATOR);
+
+        // resource
         logBuffer.append(event.workloadGroup).append(AUDIT_TABLE_COL_SEPARATOR);
         logBuffer.append(event.cloudClusterName).append(AUDIT_TABLE_COL_SEPARATOR);
+
         // already trim the query in org.apache.doris.qe.AuditLogHelper#logAuditLog
         String stmt = event.stmt;
         if (LOG.isDebugEnabled()) {

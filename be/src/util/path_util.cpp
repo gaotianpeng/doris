@@ -20,8 +20,14 @@
 // Use the POSIX version of dirname(3). See `man 3 dirname`
 #include <libgen.h>
 
+#include <cstdlib>
+#include <filesystem>
+
+#include "cloud/config.h"
+#include "common/config.h"
 #include "gutil/strings/split.h"
 #include "gutil/strings/strip.h"
+#include "runtime/plugin/cloud_plugin_downloader.h"
 
 using std::string;
 using std::vector;
@@ -62,6 +68,72 @@ std::string file_extension(const string& path) {
 
     string::size_type pos = file_name.rfind(".");
     return pos == string::npos ? "" : file_name.substr(pos);
+}
+
+std::string get_real_plugin_url(const std::string& url, const std::string& plugin_dir_config_value,
+                                const std::string& plugin_dir_name, const std::string& doris_home) {
+    if (url.find(":/") == std::string::npos) {
+        return check_and_return_default_plugin_url(url, plugin_dir_config_value, plugin_dir_name,
+                                                   doris_home);
+    }
+    return url;
+}
+
+std::string check_and_return_default_plugin_url(const std::string& url,
+                                                const std::string& plugin_dir_config_value,
+                                                const std::string& plugin_dir_name,
+                                                const std::string& doris_home) {
+    std::string home_dir = doris_home;
+    if (home_dir.empty()) {
+        const char* env_home = std::getenv("DORIS_HOME");
+        if (env_home) {
+            home_dir = std::string(env_home);
+        } else {
+            return "file://" + plugin_dir_config_value + "/" + url;
+        }
+    }
+
+    std::string default_url = home_dir + "/plugins/" + plugin_dir_name;
+    std::string default_old_url = home_dir + "/" + plugin_dir_name;
+
+    if (plugin_dir_config_value == default_url) {
+        // If true, which means user does not set `jdbc_drivers_dir` and use the default one.
+        // Because in 2.1.8, we change the default value of `jdbc_drivers_dir`
+        // from `DORIS_HOME/jdbc_drivers` to `DORIS_HOME/plugins/jdbc_drivers`,
+        // so we need to check the old default dir for compatibility.
+        std::string target_path = default_url + "/" + url;
+        if (std::filesystem::exists(target_path)) {
+            // File exists in new default directory
+            return "file://" + target_path;
+        } else if (config::is_cloud_mode()) {
+            // Cloud mode: try to download from cloud to new default directory
+            CloudPluginDownloader::PluginType plugin_type;
+            if (plugin_dir_name == "jdbc_drivers") {
+                plugin_type = CloudPluginDownloader::PluginType::JDBC_DRIVERS;
+            } else if (plugin_dir_name == "java_udf") {
+                plugin_type = CloudPluginDownloader::PluginType::JAVA_UDF;
+            } else {
+                // Unknown plugin type, fallback to old directory
+                return "file://" + default_old_url + "/" + url;
+            }
+
+            std::string downloaded_path;
+            Status status = CloudPluginDownloader::download_from_cloud(
+                    plugin_type, url, target_path, &downloaded_path);
+            if (status.ok() && !downloaded_path.empty()) {
+                return "file://" + downloaded_path;
+            }
+            // Download failed, log warning but continue to fallback
+            LOG(WARNING) << "Failed to download plugin from cloud: " << status.to_string()
+                         << ", fallback to old directory";
+        }
+
+        // Fallback to old default directory for compatibility
+        return "file://" + default_old_url + "/" + url;
+    } else {
+        // User specified custom directory - use directly
+        return "file://" + plugin_dir_config_value + "/" + url;
+    }
 }
 
 } // namespace path_util

@@ -23,7 +23,9 @@
 #include <gen_cpp/cloud.pb.h>
 #include <gtest/gtest.h>
 
+#ifdef USE_AZURE
 #include <azure/storage/blobs/blob_options.hpp>
+#endif
 #include <chrono>
 #include <unordered_set>
 
@@ -243,6 +245,7 @@ TEST_F(S3AccessorTest, s3) {
     test_s3_accessor(*accessor);
 }
 
+#ifdef USE_AZURE
 TEST_F(S3AccessorTest, azure) {
     std::shared_ptr<S3Accessor> accessor;
     int ret = S3Accessor::create(
@@ -284,6 +287,7 @@ TEST_F(S3AccessorTest, azure) {
 
     test_s3_accessor(*accessor);
 }
+#endif
 
 TEST_F(S3AccessorTest, gcs) {
     std::shared_ptr<S3Accessor> accessor;

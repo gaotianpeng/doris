@@ -28,6 +28,7 @@ import org.apache.doris.mtmv.BaseTableInfo;
 import org.apache.doris.nereids.CascadesContext;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner.PartitionTableType;
+import org.apache.doris.nereids.rules.expression.rules.SortedPartitionRanges;
 import org.apache.doris.nereids.sqltest.SqlTestBase;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.Slot;
@@ -48,6 +49,7 @@ import java.util.BitSet;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -171,7 +173,7 @@ public class OptimizeGetAvailableMvsTest extends SqlTestBase {
             @Mock
             public <K extends Comparable<K>> List<Long> prune(List<Slot> partitionSlots, Expression partitionPredicate,
                     Map<K, PartitionItem> idToPartitions, CascadesContext cascadesContext,
-                    PartitionTableType partitionTableType) {
+                    PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges) {
                 return Lists.newArrayList(1L);
             }
         };

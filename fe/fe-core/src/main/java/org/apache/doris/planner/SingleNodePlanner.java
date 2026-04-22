@@ -86,7 +86,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -289,9 +289,6 @@ public class SingleNodePlanner {
         } else {
             Preconditions.checkState(stmt instanceof SetOperationStmt);
             root = createSetOperationPlan((SetOperationStmt) stmt, analyzer, newDefaultOrderByLimit, sqlSelectLimit);
-        }
-        if (ConnectContext.get().getExecutor() != null) {
-            ConnectContext.get().getExecutor().getSummaryProfile().setQueryJoinReorderFinishTime();
         }
 
         // Avoid adding a sort node if the sort tuple has no materialized slots.

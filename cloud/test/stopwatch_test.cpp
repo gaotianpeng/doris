@@ -31,21 +31,34 @@ int main(int argc, char** argv) {
 
 TEST(StopWatchTest, SimpleTest) {
     {
+        constexpr int64_t kSleepUs = 1000;
+        constexpr int64_t kSleepJitterUs = 5000;
+        constexpr int64_t kPauseDriftUs = 1000;
+
         StopWatch s;
         s.start();
-        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-        ASSERT_TRUE(s.elapsed_us() >= 1000);
+        std::this_thread::sleep_for(std::chrono::microseconds(kSleepUs));
+        const auto elapsed_after_start = s.elapsed_us();
+        ASSERT_TRUE(elapsed_after_start >= kSleepUs &&
+                    elapsed_after_start < kSleepUs + kSleepJitterUs);
 
         s.pause();
-        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-        ASSERT_TRUE(s.elapsed_us() >= 1000 && s.elapsed_us() < 1500);
+        std::this_thread::sleep_for(std::chrono::microseconds(kSleepUs));
+        const auto elapsed_while_paused = s.elapsed_us();
+        ASSERT_TRUE(elapsed_while_paused >= elapsed_after_start &&
+                    elapsed_while_paused < elapsed_after_start + kPauseDriftUs);
 
         s.resume();
-        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-        ASSERT_TRUE(s.elapsed_us() >= 1000 && s.elapsed_us() < 2500);
+        std::this_thread::sleep_for(std::chrono::microseconds(kSleepUs));
+        const auto elapsed_after_resume = s.elapsed_us();
+        ASSERT_TRUE(elapsed_after_resume >= elapsed_while_paused + kSleepUs &&
+                    elapsed_after_resume <
+                            elapsed_while_paused + kSleepUs + kSleepJitterUs);
 
         s.reset();
-        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-        ASSERT_TRUE(s.elapsed_us() >= 1000 && s.elapsed_us() < 1500);
+        std::this_thread::sleep_for(std::chrono::microseconds(kSleepUs));
+        const auto elapsed_after_reset = s.elapsed_us();
+        ASSERT_TRUE(elapsed_after_reset >= kSleepUs &&
+                    elapsed_after_reset < kSleepUs + kSleepJitterUs);
     }
 }

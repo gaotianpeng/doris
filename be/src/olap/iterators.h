@@ -28,6 +28,7 @@
 #include "olap/rowset/segment_v2/row_ranges.h"
 #include "olap/tablet_schema.h"
 #include "runtime/runtime_state.h"
+#include "vec/columns/column.h"
 #include "vec/core/block.h"
 #include "vec/exprs/vexpr.h"
 

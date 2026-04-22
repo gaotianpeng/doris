@@ -36,6 +36,9 @@ import java.util.Objects;
  */
 public class DateTimeV2Literal extends DateTimeLiteral {
 
+    public static final DateTimeV2Literal USE_IN_FLOOR_CEIL
+            = new DateTimeV2Literal(0001L, 01L, 01L, 0L, 0L, 0L, 0L);
+
     public DateTimeV2Literal(String s) {
         this(DateTimeV2Type.forTypeFromString(s), s);
     }
@@ -86,6 +89,10 @@ public class DateTimeV2Literal extends DateTimeLiteral {
     public String getFullMicroSecondValue() {
         return String.format("%04d-%02d-%02d %02d:%02d:%02d.%06d",
                 year, month, day, hour, minute, second, microSecond);
+    }
+
+    public int getScale() {
+        return ((DateTimeV2Type) dataType).getScale();
     }
 
     @Override

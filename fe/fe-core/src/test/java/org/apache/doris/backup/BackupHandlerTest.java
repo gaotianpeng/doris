@@ -63,11 +63,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
@@ -280,20 +276,6 @@ public class BackupHandlerTest {
         request.setTaskStatus(new TStatus(TStatusCode.OK));
         handler.handleFinishedSnapshotUploadTask(uploadTask, request);
 
-        // test file persist
-        File tmpFile = new File("./tmp" + System.currentTimeMillis());
-        try {
-            DataOutputStream out = new DataOutputStream(new FileOutputStream(tmpFile));
-            handler.write(out);
-            out.flush();
-            out.close();
-            DataInputStream in = new DataInputStream(new FileInputStream(tmpFile));
-            BackupHandler.read(in);
-            in.close();
-        } finally {
-            tmpFile.delete();
-        }
-
         // cancel backup
         handler.cancel(new CancelBackupStmt(CatalogMocker.TEST_DB_NAME, false));
 
@@ -321,7 +303,7 @@ public class BackupHandlerTest {
 
         // handleDownloadSnapshotTask
         DownloadTask downloadTask = new DownloadTask(null, 0, 0, restoreJob.getJobId(), CatalogMocker.TEST_DB_ID,
-                srcToDestPath, null, null, StorageBackend.StorageType.BROKER, "");
+                srcToDestPath, null, null, StorageBackend.StorageType.BROKER, "", "");
         request = new TFinishTaskRequest();
         List<Long> downloadedTabletIds = Lists.newArrayList();
         request.setDownloadedTabletIds(downloadedTabletIds);
@@ -334,20 +316,6 @@ public class BackupHandlerTest {
         request = new TFinishTaskRequest();
         request.setTaskStatus(new TStatus(TStatusCode.OK));
         handler.handleDirMoveTask(dirMoveTask, request);
-
-        // test file persist
-        tmpFile = new File("./tmp" + System.currentTimeMillis());
-        try {
-            DataOutputStream out = new DataOutputStream(new FileOutputStream(tmpFile));
-            handler.write(out);
-            out.flush();
-            out.close();
-            DataInputStream in = new DataInputStream(new FileInputStream(tmpFile));
-            BackupHandler.read(in);
-            in.close();
-        } finally {
-            tmpFile.delete();
-        }
 
         // cancel restore
         handler.cancel(new CancelBackupStmt(CatalogMocker.TEST_DB_NAME, true));

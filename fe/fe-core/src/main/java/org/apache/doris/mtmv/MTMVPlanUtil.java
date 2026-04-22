@@ -60,7 +60,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -89,6 +89,7 @@ public class MTMVPlanUtil {
         ctx.setQualifiedUser(Auth.ADMIN_USER);
         ctx.setCurrentUserIdentity(UserIdentity.ADMIN);
         ctx.getState().reset();
+        ctx.getState().setInternal(true);
         ctx.setThreadLocalInfo();
         // Debug session variable should be disabled when refreshed
         ctx.getSessionVariable().skipDeletePredicate = false;
@@ -99,7 +100,9 @@ public class MTMVPlanUtil {
         ctx.getSessionVariable().allowModifyMaterializedViewData = true;
         // Disable add default limit rule to avoid refresh data wrong
         ctx.getSessionVariable().setDisableNereidsRules(
-                String.join(",", ImmutableSet.of(RuleType.ADD_DEFAULT_LIMIT.name())));
+                String.join(",", ImmutableSet.of(
+                        RuleType.ADD_DEFAULT_LIMIT.name(),
+                        RuleType.ELIMINATE_GROUP_BY.name())));
         ctx.setStartTime();
         if (parentContext != null) {
             ctx.changeDefaultCatalog(parentContext.getDefaultCatalog());
@@ -296,8 +299,8 @@ public class MTMVPlanUtil {
                     DecimalV2Type.class, DecimalV2Type.SYSTEM_DEFAULT);
             if (s.isColumnFromTable()) {
                 // check if external table
-                if ((!((SlotReference) s).getTable().isPresent()
-                        || !((SlotReference) s).getTable().get().isManagedTable())) {
+                if ((!((SlotReference) s).getOriginalTable().isPresent()
+                        || !((SlotReference) s).getOriginalTable().get().isManagedTable())) {
                     if (s.getName().equals(partitionCol) || distributionColumnNames.contains(s.getName())) {
                         // String type can not be used in partition/distributed column
                         // so we replace it to varchar

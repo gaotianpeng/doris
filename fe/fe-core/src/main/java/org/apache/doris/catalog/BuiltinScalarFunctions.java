@@ -41,6 +41,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayExists;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFilter;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFirst;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFirstIndex;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFlatten;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayIntersect;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayJoin;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayLast;
@@ -73,7 +74,6 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayZip;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArraysOverlap;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Ascii;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Asin;
-import org.apache.doris.nereids.trees.expressions.functions.scalar.AssertTrue;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Atan;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Atan2;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.AutoPartitionName;
@@ -129,7 +129,9 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.Cosh;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CosineDistance;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Cot;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CountEqual;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.CountSubstring;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Crc32;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.Crc32Internal;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CreateMap;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CreateNamedStruct;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CreateStruct;
@@ -196,6 +198,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonBigInt
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonDouble;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonInt;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonString;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.GetVariantType;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Greatest;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Grouping;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GroupingId;
@@ -521,6 +524,7 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(ArrayFilter.class, "array_filter"),
             scalar(ArrayFirst.class, "array_first"),
             scalar(ArrayFirstIndex.class, "array_first_index"),
+            scalar(ArrayFlatten.class, "array_flatten"),
             scalar(ArrayIntersect.class, "array_intersect"),
             scalar(ArrayJoin.class, "array_join"),
             scalar(ArrayLast.class, "array_last"),
@@ -553,7 +557,6 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(ArraysOverlap.class, "arrays_overlap"),
             scalar(Ascii.class, "ascii"),
             scalar(Asin.class, "asin"),
-            scalar(AssertTrue.class, "assert_true"),
             scalar(Atan.class, "atan"),
             scalar(Atan2.class, "atan2"),
             scalar(AutoPartitionName.class, "auto_partition_name"),
@@ -609,6 +612,7 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(Cot.class, "cot"),
             scalar(CosineDistance.class, "cosine_distance"),
             scalar(CountEqual.class, "countequal"),
+            scalar(CountSubstring.class, "count_substrings"),
             scalar(CreateMap.class, "map"),
             scalar(CreateStruct.class, "struct"),
             scalar(CreateNamedStruct.class, "named_struct"),
@@ -772,6 +776,7 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(Left.class, "left", "strleft"),
             scalar(Length.class, "length"),
             scalar(Crc32.class, "crc32"),
+            scalar(Crc32Internal.class, "crc32_internal"),
             scalar(Like.class, "like"),
             scalar(Ln.class, "ln", "dlog1"),
             scalar(Locate.class, "locate"),
@@ -988,7 +993,8 @@ public class BuiltinScalarFunctions implements FunctionHelper {
             scalar(YearsSub.class, "years_sub"),
             scalar(MultiMatch.class, "multi_match"),
             scalar(SessionUser.class, "session_user"),
-            scalar(LastQueryId.class, "last_query_id"));
+            scalar(LastQueryId.class, "last_query_id"),
+            scalar(GetVariantType.class, "variant_type"));
 
     public static final BuiltinScalarFunctions INSTANCE = new BuiltinScalarFunctions();
 

@@ -502,6 +502,12 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
         return Optional.empty();
     }
 
+    private boolean isRegisteredRowCount(OlapScan olapScan) {
+        AnalysisManager analysisManager = Env.getCurrentEnv().getAnalysisManager();
+        TableStatsMeta tableMeta = analysisManager.findTableStatsStatus(olapScan.getTable().getId());
+        return tableMeta != null && tableMeta.userInjected;
+    }
+
     private Statistics computeOlapScan(OlapScan olapScan) {
         OlapTable olapTable = olapScan.getTable();
         double tableRowCount = getOlapTableRowCount(olapScan);
@@ -518,6 +524,12 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
                 LOG.info("computeOlapScan optStats is {}, selectedPartitionsRowCount is {}", optStats.get(),
                         selectedPartitionsRowCount);
                 if (selectedPartitionsRowCount == -1) {
+                    selectedPartitionsRowCount = tableRowCount;
+                }
+                if (isRegisteredRowCount(olapScan)) {
+                    // If a row count is injected for the materialized view, use it to fix the issue where
+                    // the materialized view cannot be selected by cbo stable due to selectedPartitionsRowCount being 0,
+                    // which is caused by delayed statistics reporting.
                     selectedPartitionsRowCount = tableRowCount;
                 }
                 // if estimated mv rowCount is more than actual row count, fall back to base table stats
@@ -537,10 +549,11 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
 
         StatisticsBuilder builder = new StatisticsBuilder();
 
-        // for system table or FeUt, use ColumnStatistic.UNKNOWN
+        // query for system table or FeUt or analysis, use ColumnStatistic.UNKNOWN
+
         if (StatisticConstants.isSystemTable(olapTable) || !FeConstants.enableInternalSchemaDb
                 || ConnectContext.get() == null
-                || ConnectContext.get().getSessionVariable().internalSession) {
+                || ConnectContext.get().getState().isPlanWithUnKnownColumnStats()) {
             for (Slot slot : ((Plan) olapScan).getOutput()) {
                 builder.putColumnStatistics(slot, ColumnStatistic.UNKNOWN);
             }
@@ -585,7 +598,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
                     ColumnStatistic cache;
                     cache = getColumnStatsFromTableCache((CatalogRelation) olapScan, slot);
 
-                    if (slot.getColumn().isPresent()) {
+                    if (slot.getOriginalColumn().isPresent()) {
                         cache = updateMinMaxForPartitionKey(olapTable, selectedPartitionNames, slot, cache);
                     }
                     ColumnStatisticBuilder colStatsBuilder = new ColumnStatisticBuilder(cache,
@@ -638,7 +651,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
     private ColumnStatistic updateMinMaxForListPartitionKey(OlapTable olapTable,
             List<String> selectedPartitionNames,
             SlotReference slot, ColumnStatistic cache) {
-        int partitionColumnIdx = olapTable.getPartitionColumns().indexOf(slot.getColumn().get());
+        int partitionColumnIdx = olapTable.getPartitionColumns().indexOf(slot.getOriginalColumn().get());
         if (partitionColumnIdx != -1) {
             try {
                 LiteralExpr minExpr = null;
@@ -687,7 +700,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
     private ColumnStatistic updateMinMaxForTheFirstRangePartitionKey(OlapTable olapTable,
             List<String> selectedPartitionNames,
             SlotReference slot, ColumnStatistic cache) {
-        int partitionColumnIdx = olapTable.getPartitionColumns().indexOf(slot.getColumn().get());
+        int partitionColumnIdx = olapTable.getPartitionColumns().indexOf(slot.getOriginalColumn().get());
         // for multi partition keys, only the first partition key need to adjust min/max
         if (partitionColumnIdx == 0) {
             // update partition column min/max by partition info
@@ -746,7 +759,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
 
     private boolean isVisibleSlotReference(Slot slot) {
         if (slot instanceof SlotReference) {
-            Optional<Column> colOpt = ((SlotReference) slot).getColumn();
+            Optional<Column> colOpt = ((SlotReference) slot).getOriginalColumn();
             if (colOpt.isPresent()) {
                 return colOpt.get().isVisible();
             }
@@ -1186,7 +1199,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
 
     private ColumnStatistic getColumnStatistic(TableIf table, String colName, long idxId) {
         ConnectContext connectContext = ConnectContext.get();
-        if (connectContext != null && connectContext.getSessionVariable().internalSession) {
+        if (connectContext != null && connectContext.getState().isPlanWithUnKnownColumnStats()) {
             return ColumnStatistic.UNKNOWN;
         }
         long catalogId;
@@ -1217,7 +1230,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
 
     private ColumnStatistic getColumnStatistic(TableIf table, String colName, long idxId, List<String> partitionNames) {
         ConnectContext connectContext = ConnectContext.get();
-        if (connectContext != null && connectContext.getSessionVariable().internalSession) {
+        if (connectContext != null && connectContext.getState().isPlanWithUnKnownColumnStats()) {
             return ColumnStatistic.UNKNOWN;
         }
         long catalogId;
@@ -1288,7 +1301,7 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
         // for FeUt, use ColumnStatistic.UNKNOWN
         if (!FeConstants.enableInternalSchemaDb
                 || ConnectContext.get() == null
-                || ConnectContext.get().getSessionVariable().internalSession) {
+                || ConnectContext.get().getState().isInternal()) {
             builder.setRowCount(Math.max(1, tableRowCount));
             for (Slot slot : catalogRelation.getOutput()) {
                 builder.putColumnStatistics(slot, ColumnStatistic.UNKNOWN);

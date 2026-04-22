@@ -19,14 +19,14 @@
 
 #include <gen_cpp/Data_types.h>
 #include <gen_cpp/Types_types.h>
-#include <stdint.h>
 
+#include <cstdint>
 #include <vector>
 
 #include "common/factory_creator.h"
 #include "common/global_types.h"
 #include "common/status.h"
-#include "vec/data_types/data_type.h"
+#include "vec/exec/format/generic_reader.h"
 #include "vec/exec/scan/vscanner.h"
 
 namespace doris {
@@ -64,8 +64,8 @@ protected:
 private:
     Status _fill_block_with_remote_data(const std::vector<MutableColumnPtr>& columns);
     Status _fetch_metadata(const TMetaScanRange& meta_scan_range);
-    Status _build_iceberg_metadata_request(const TMetaScanRange& meta_scan_range,
-                                           TFetchSchemaTableDataRequest* request);
+    Status _build_hudi_metadata_request(const TMetaScanRange& meta_scan_range,
+                                        TFetchSchemaTableDataRequest* request);
     Status _build_backends_metadata_request(const TMetaScanRange& meta_scan_range,
                                             TFetchSchemaTableDataRequest* request);
     Status _build_frontends_metadata_request(const TMetaScanRange& meta_scan_range,
@@ -94,5 +94,8 @@ private:
     const TupleDescriptor* _tuple_desc = nullptr;
     std::vector<TRow> _batch_data;
     const TScanRange& _scan_range;
+
+    // for reading metadata using reader from be
+    std::unique_ptr<GenericReader> _reader;
 };
 } // namespace doris::vectorized

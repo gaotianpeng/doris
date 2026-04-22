@@ -26,7 +26,7 @@ import org.apache.doris.mtmv.MTMVPartitionInfo.MTMVPartitionType;
 
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -103,7 +103,7 @@ public class MTMVRefreshPartitionSnapshot {
         if (!checkHasDataWithoutPartitionId()) {
             return;
         }
-        OlapTable relatedTable = (OlapTable) mtmv.getMvPartitionInfo().getRelatedTable();
+        OlapTable relatedTable = (OlapTable) relatedTableIf;
         for (Entry<String, MTMVSnapshotIf> entry : partitions.entrySet()) {
             MTMVVersionSnapshot versionSnapshot = (MTMVVersionSnapshot) entry.getValue();
             if (versionSnapshot.getId() == 0) {

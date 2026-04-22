@@ -171,15 +171,15 @@ Status ScannerContext::init() {
         // That will make the number of scan task can be submitted to the scheduler
         // in a vary large value. This logicl is kept from the older implementation.
         if (submit_many_scan_tasks_for_potential_performance_issue || _ignore_data_distribution) {
-            _max_thread_num = config::doris_scanner_thread_pool_thread_num / 1;
+            _max_thread_num = config::dynamic::doris_scanner_thread_pool_thread_num() / 1;
         } else {
             const size_t factor = _is_file_scan_operator ? 1 : 4;
-            _max_thread_num = factor * (config::doris_scanner_thread_pool_thread_num /
+            _max_thread_num = factor * (config::dynamic::doris_scanner_thread_pool_thread_num() /
                                         _num_parallel_instances);
             // In some rare cases, user may set num_parallel_instances to 1 handly to make many query could be executed
             // in parallel. We need to make sure the _max_thread_num is smaller than previous value.
-            _max_thread_num =
-                    std::min(_max_thread_num, config::doris_scanner_thread_pool_thread_num);
+            _max_thread_num = std::min(_max_thread_num,
+                                       config::dynamic::doris_scanner_thread_pool_thread_num());
         }
     }
 
@@ -193,6 +193,19 @@ Status ScannerContext::init() {
     if (_local_state->should_run_serial()) {
         _max_thread_num = 1;
     }
+
+    VLOG_CRITICAL << "debug num_scanner_threads: " << _state->num_scanner_threads()
+                  << ", potential_performance_issue: "
+                  << submit_many_scan_tasks_for_potential_performance_issue
+                  << ", _ignore_data_distribution: " << _ignore_data_distribution
+                  << ", _is_file_scan_operator: " << _is_file_scan_operator
+                  << ", doris_scanner_thread_pool_thread_num: "
+                  << config::dynamic::doris_scanner_thread_pool_thread_num()
+                  << ", _num_parallel_instances: " << _num_parallel_instances
+                  << ", _all_scanners.size: " << _all_scanners.size()
+                  << ", should_run_serial: " << _local_state->should_run_serial()
+                  << ", _max_thread_num: " << _max_thread_num
+                  << ", query id: " << print_id(_state->query_id());
 
     // when user not specify scan_thread_num, so we can try downgrade _max_thread_num.
     // becaue we found in a table with 5k columns, column reader may ocuppy too much memory.

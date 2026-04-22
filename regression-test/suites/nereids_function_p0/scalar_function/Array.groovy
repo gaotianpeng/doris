@@ -346,8 +346,6 @@ suite("nereids_scalar_fn_Array") {
     order_qt_sql_cosine_distance_SmallInt_notnull "select cosine_distance(kasint, kasint) from fn_test_not_nullable"
     order_qt_sql_cosine_distance_Integer "select cosine_distance(kaint, kaint) from fn_test"
     order_qt_sql_cosine_distance_Integer_notnull "select cosine_distance(kaint, kaint) from fn_test_not_nullable"
-    order_qt_sql_cosine_distance_TinyInt "select cosine_distance(katint, katint) from fn_test"
-    order_qt_sql_cosine_distance_TinyInt_notnull "select cosine_distance(katint, katint) from fn_test_not_nullable"
 
     // inner_product
     order_qt_sql_inner_product_Double "select inner_product(kadbl, kadbl) from fn_test"
@@ -1417,5 +1415,16 @@ suite("nereids_scalar_fn_Array") {
     qt_sql """ select map_contains_key(map(1,258), 257), map_contains_key(map(2,1), 258);"""
     // map_contains_value
     qt_sql """ select map_contains_value(map(1,1), 257), map_contains_value(map(1,2), 258);"""
+
+    qt_sql """select array_flatten([[1,2,3],[4,5]]);"""
+    qt_sql """select array_flatten([[],[]]);"""
+    qt_sql """select array_flatten([[1],[]]);"""
+    qt_sql """select array_flatten([[1,2,3],null]);"""
+    qt_sql """select array_flatten([[1,2,3],null,[4,5]]);"""
+    qt_sql """select array_flatten([null,null]);"""
+    qt_sql """select array_flatten([[1,2,3,4,5]]);"""
+    qt_sql """select array_flatten([[[1,2,3,4,5]]]);;"""
+    qt_sql """select array_flatten([ [[1,2,3,4,5]],[[6,7],[8,9]] ]);"""
+    qt_sql """select array_flatten([[[[[[1,2,3,4,5],[6,7],[8,9],[10,11],[12]]]]]]);"""
 
 }

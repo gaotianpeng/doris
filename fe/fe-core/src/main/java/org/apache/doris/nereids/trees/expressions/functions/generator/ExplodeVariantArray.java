@@ -43,6 +43,10 @@ import java.util.List;
 public class ExplodeVariantArray extends TableGeneratingFunction implements
         CustomSignature, ComputePrecision, AlwaysNullable {
 
+    public static final List<FunctionSignature> SIGNATURES = ImmutableList.of(
+            FunctionSignature.ret(new VariantType(0)).args(new VariantType(0))
+    );
+
     /**
      * constructor with one or more argument.
      */
@@ -71,13 +75,18 @@ public class ExplodeVariantArray extends TableGeneratingFunction implements
         for (int i = 0; i < children.size(); i++) {
             if (children.get(i).getDataType() instanceof VariantType) {
                 structFields.add(
-                    new StructField("col" + (i + 1), VariantType.INSTANCE, true, ""));
-                arguments.add(VariantType.INSTANCE);
+                    new StructField("col" + (i + 1), children.get(i).getDataType(), true, ""));
+                arguments.add(children.get(i).getDataType());
             } else {
                 SearchSignature.throwCanNotFoundFunctionException(this.getName(), getArguments());
             }
         }
-        return FunctionSignature.of(new StructType(structFields.build()), arguments);
+
+        StructType structType = new StructType(structFields.build());
+        if (arguments.size() == 1) {
+            return FunctionSignature.of(structType.getFields().get(0).getDataType(), arguments);
+        }
+        return FunctionSignature.of(structType, arguments);
     }
 
     @Override

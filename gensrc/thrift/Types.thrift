@@ -105,7 +105,7 @@ enum TTypeNodeType {
     ARRAY,
     MAP,
     STRUCT,
-    VARIANT,
+    VARIANT, // unused
 }
 
 enum TStorageBackendType {
@@ -122,9 +122,10 @@ enum TStorageBackendType {
 // This enum is used to distinguish between different organizational methods
 // of inverted index data, affecting how the index is stored and accessed.
 enum TInvertedIndexFileStorageFormat {
-    DEFAULT, // Default format, unspecified storage method.
-    V1,      // Index per idx: Each index is stored separately based on its identifier.
-    V2       // Segment id per idx: Indexes are organized based on segment identifiers, grouping indexes by their associated segment.
+    DEFAULT = 0, // Default format, unspecified storage method.
+    V1 = 1,      // Index per idx: Each index is stored separately based on its identifier.
+    V2 = 2       // Segment id per idx: Indexes are organized based on segment identifiers, grouping indexes by their associated segment.
+    V3 = 3       // Position and dictionary compression
 }
 
 struct TScalarType {
@@ -136,6 +137,9 @@ struct TScalarType {
     // Only set for DECIMAL
     3: optional i32 precision
     4: optional i32 scale
+
+    // Only set for VARIANT
+    5: optional i32 variant_max_subcolumns_count = 0;
 }
 
 // Represents a field in a STRUCT type.
@@ -237,6 +241,7 @@ enum TTaskType {
     CLEAN_TRASH,
     UPDATE_VISIBLE_VERSION,
     CLEAN_UDF_CACHE,
+    PUSH_INDEX_POLICY
 
     // CLOUD
     CALCULATE_DELETE_BITMAP = 1000
@@ -279,6 +284,7 @@ struct TColumnType {
   3: optional i32 index_len
   4: optional i32 precision
   5: optional i32 scale
+  6: optional i32 variant_max_subcolumns_count = 0;
 }
 
 // A TNetworkAddress is the standard host, port representation of a
@@ -722,6 +728,12 @@ enum TMergeType {
   DELETE
 }
 
+enum TUniqueKeyUpdateMode {
+  UPSERT,
+  UPDATE_FIXED_COLUMNS,
+  UPDATE_FLEXIBLE_COLUMNS
+}
+
 enum TSortType {
     LEXICAL,
     ZORDER,
@@ -738,11 +750,18 @@ enum TMetadataType {
   TASKS,
   WORKLOAD_SCHED_POLICY,
   PARTITIONS,
-  PARTITION_VALUES;
+  PARTITION_VALUES,
+  HUDI,
+  PAIMON
 }
 
+// deprecated
 enum TIcebergQueryType {
   SNAPSHOTS
+}
+
+enum THudiQueryType {
+  TIMELINE
 }
 
 // represent a user identity

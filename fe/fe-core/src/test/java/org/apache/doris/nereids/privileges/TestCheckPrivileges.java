@@ -23,10 +23,10 @@ import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.common.AuthorizationException;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.datasource.CatalogMgr;
 import org.apache.doris.datasource.test.TestExternalCatalog.TestCatalogProvider;
-import org.apache.doris.mysql.privilege.AccessControllerFactory;
 import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.CatalogAccessController;
 import org.apache.doris.mysql.privilege.DataMaskPolicy;
@@ -52,7 +52,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import mockit.Expectations;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -92,10 +92,20 @@ public class TestCheckPrivileges extends TestWithFeService implements GeneratedM
         String catalogProvider
                 = "org.apache.doris.nereids.privileges.TestCheckPrivileges$CustomCatalogProvider";
         String accessControllerFactory
-                = "org.apache.doris.nereids.privileges.TestCheckPrivileges$CustomAccessControllerFactory";
-
+                = "org.apache.doris.nereids.privileges.CustomAccessControllerFactory";
         String catalog = "custom_catalog";
         String db = "test_db";
+        String failedAccessControllerFactory
+                = "org.apache.doris.nereids.privileges.FailedAccessControllerFactory";
+        //try to create catalog with failed access controller
+        Assertions.assertThrows(DdlException.class, () -> {
+            createCatalog("create catalog " + catalog + " properties("
+                    + " \"type\"=\"test\","
+                    + " \"catalog_provider.class\"=\"" + catalogProvider + "\","
+                    + " \"" + CatalogMgr.ACCESS_CONTROLLER_CLASS_PROP + "\"=\"" + failedAccessControllerFactory + "\""
+                    + ")");
+        }, "Failed to init access controller");
+
         createCatalog("create catalog " + catalog + " properties("
                 + " \"type\"=\"test\","
                 + " \"catalog_provider.class\"=\"" + catalogProvider + "\","
@@ -311,13 +321,6 @@ public class TestCheckPrivileges extends TestWithFeService implements GeneratedM
         @Override
         public Map<String, Map<String, List<Column>>> getMetadata() {
             return CATALOG_META;
-        }
-    }
-
-    public static class CustomAccessControllerFactory implements AccessControllerFactory {
-        @Override
-        public CatalogAccessController createAccessController(Map<String, String> prop) {
-            return new SimpleCatalogAccessController();
         }
     }
 

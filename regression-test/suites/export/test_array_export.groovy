@@ -25,7 +25,12 @@ suite("test_array_export", "export") {
     // check whether the FE config 'enable_outfile_to_local' is true
     StringBuilder strBuilder = new StringBuilder()
     strBuilder.append("curl --location-trusted -u " + context.config.jdbcUser + ":" + context.config.jdbcPassword)
-    strBuilder.append(" http://" + context.config.feHttpAddress + "/rest/v1/config/fe")
+    if ((context.config.otherConfigs.get("enableTLS")?.toString()?.equalsIgnoreCase("true")) ?: false) {
+        strBuilder.append(" https://" + context.config.feHttpAddress + "/rest/v1/config/fe")
+        strBuilder.append(" --cert " + context.config.otherConfigs.get("trustCert") + " --cacert " + context.config.otherConfigs.get("trustCACert") + " --key " + context.config.otherConfigs.get("trustCAKey"))
+    } else {
+        strBuilder.append(" http://" + context.config.feHttpAddress + "/rest/v1/config/fe")
+    }
     String command = strBuilder.toString()
     def process = command.toString().execute()
     def code = process.waitFor()
@@ -118,10 +123,11 @@ suite("test_array_export", "export") {
     }
 
     def select_out_file = {exportTable, HdfsPath, outFormat, BrokerName, HdfsUserName, HdfsPasswd->
-        sql """
+
+        def sqlString = """
             SELECT * FROM ${exportTable}
             INTO OUTFILE "${HdfsPath}"
-            FORMAT AS "${outFormat}"
+            FORMAT AS ${outFormat}
             PROPERTIES
             (
                 "broker.name" = "${BrokerName}",
@@ -131,6 +137,8 @@ suite("test_array_export", "export") {
                 "broker.password"="${HdfsPasswd}"
             )
         """
+        logger.info("sqlString: ${sqlString}")
+        sql sqlString
     }
 
     def check_export_result = {checklabel->
@@ -223,8 +231,8 @@ suite("test_array_export", "export") {
             def currentTotalRows = resultCount[0][0]
 
             def label = UUID.randomUUID().toString().replaceAll("-", "")
-            def result = select_out_file(tableName, hdfsDataDir + "/" + label + "/export-data", "csv", brokerName, hdfsUser, hdfsPasswd)
-            result = downloadExportFromHdfs(label + "/export-data")
+            select_out_file(tableName, hdfsDataDir + "/" + label + "/export-data", "csv", brokerName, hdfsUser, hdfsPasswd)
+            def result = downloadExportFromHdfs(label + "/export-data")
             check_download_result(result, currentTotalRows)
         } finally {
             try_sql("DROP TABLE IF EXISTS ${tableName}")
@@ -235,7 +243,7 @@ suite("test_array_export", "export") {
             create_test_table.call(tableName)
 
             def resultCount = sql "select count(*) from ${tableName}"
-            def currentTotalRows = resultCount[0][0]
+            currentTotalRows = resultCount[0][0]
 
             def label = UUID.randomUUID().toString().replaceAll("-", "")
             export_to_hdfs.call(tableName, label, hdfsDataDir + "/" + label, '', brokerName, hdfsUser, hdfsPasswd)

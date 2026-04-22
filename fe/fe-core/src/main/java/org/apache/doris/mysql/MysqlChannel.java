@@ -253,6 +253,19 @@ public class MysqlChannel implements BytesChannel {
         return readLen;
     }
 
+    @Override
+    public int testReadWithTimeout(ByteBuffer dstBuf, long timeoutMs) {
+        Preconditions.checkArgument(dstBuf.remaining() == 1, dstBuf.remaining());
+        try {
+            return Channels.readBlocking(conn.getSourceChannel(), dstBuf, timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (IOException e) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Read channel exception, ignore.", e);
+            }
+            return -1;
+        }
+    }
+
     protected void decryptData(ByteBuffer dstBuf, boolean isHeader) throws SSLException {
         // after decrypt, we get a mysql packet with mysql header.
         if (!isSslMode || isHeader) {
@@ -263,6 +276,12 @@ public class MysqlChannel implements BytesChannel {
         // unwrap will remove ssl header.
         while (true) {
             SSLEngineResult result = sslEngine.unwrap(dstBuf, decryptAppData);
+            if (result.getStatus() == SSLEngineResult.Status.OK
+                    && result.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) {
+                LOG.warn("SSL renegotiation requested by {} is not supported. handshakeStatus={}",
+                        remoteHostPortString, result.getHandshakeStatus());
+                throw new SSLException("SSL renegotiation is not supported.");
+            }
             if (handleUnwrapResult(result) && !dstBuf.hasRemaining()) {
                 break;
             }
@@ -326,13 +345,23 @@ public class MysqlChannel implements BytesChannel {
             result.limit(result.position() + packetLen);
             readLen = readAll(result, false);
             if (isSslMode && remainingBuffer.position() == 0 && result.hasRemaining()) {
+                int available = result.limit();
+                if (available < PACKET_HEADER_LEN) {
+                    LOG.warn("SSL mode: invalid mysql packet header, available bytes: " + available);
+                    throw new IOException("Invalid mysql packet header.");
+                }
                 byte[] header = result.array();
+                int mysqlPacketLength = (header[0] & 0xFF) | ((header[1] & 0xFF) << 8) | ((header[2] & 0xFF) << 16);
+                if (mysqlPacketLength > MAX_PHYSICAL_PACKET_LENGTH) {
+                    LOG.warn("SSL mode: mysql packet length(" + mysqlPacketLength + ") is larger than max physical "
+                            + "packet length(" + MAX_PHYSICAL_PACKET_LENGTH + ")");
+                    throw new IOException("Mysql packet too large.");
+                }
                 int packetId = header[3] & 0xFF;
                 if (packetId != sequenceId) {
-                    LOG.warn("receive packet sequence id[" + packetId() + "] want to get[" + sequenceId + "]");
+                    LOG.warn("receive packet sequence id[" + packetId + "] want to get[" + sequenceId + "]");
                     throw new IOException("Bad packet sequence.");
                 }
-                int mysqlPacketLength = (header[0] & 0xFF) | ((header[1] & 0XFF) << 8) | ((header[2] & 0XFF) << 16);
                 // remove mysql packet header
                 result.position(4);
                 result.compact();
@@ -432,6 +461,12 @@ public class MysqlChannel implements BytesChannel {
         encryptNetData.clear();
         while (true) {
             SSLEngineResult result = sslEngine.wrap(dstBuf, encryptNetData);
+            if (result.getStatus() == SSLEngineResult.Status.OK
+                    && result.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) {
+                LOG.warn("SSL renegotiation requested by {} is not supported while writing. handshakeStatus={}",
+                        remoteHostPortString, result.getHandshakeStatus());
+                throw new SSLException("SSL renegotiation is not supported.");
+            }
             if (handleWrapResult(result) && !dstBuf.hasRemaining()) {
                 break;
             }
@@ -576,7 +611,7 @@ public class MysqlChannel implements BytesChannel {
             case OK:
                 return true;
             case CLOSED:
-                sslEngine.closeOutbound();
+                SslEngineHelper.checkClosedProgress("wrap", sslEngineResult, sslEngine, false);
                 return true;
             case BUFFER_OVERFLOW:
                 // Could attempt to drain the serverNetData buffer of any already obtained
@@ -594,13 +629,13 @@ public class MysqlChannel implements BytesChannel {
         }
     }
 
-    private boolean handleUnwrapResult(SSLEngineResult sslEngineResult) {
+    private boolean handleUnwrapResult(SSLEngineResult sslEngineResult) throws SSLException {
         switch (sslEngineResult.getStatus()) {
             // normal status.
             case OK:
                 return true;
             case CLOSED:
-                sslEngine.closeOutbound();
+                SslEngineHelper.checkClosedProgress("unwrap", sslEngineResult, sslEngine, true);
                 return true;
             case BUFFER_OVERFLOW:
                 // Could attempt to drain the clientAppData buffer of any already obtained

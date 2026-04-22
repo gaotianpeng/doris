@@ -53,6 +53,7 @@ static const char* META_KEY_INFIX_SCHEMA                = "schema";
 static const char* META_KEY_INFIX_DELETE_BITMAP         = "delete_bitmap";
 static const char* META_KEY_INFIX_DELETE_BITMAP_LOCK    = "delete_bitmap_lock";
 static const char* META_KEY_INFIX_DELETE_BITMAP_PENDING = "delete_bitmap_pending";
+static const char* META_KEY_INFIX_MOW_TABLET_JOB        = "mow_tablet_job";
 static const char* META_KEY_INFIX_SCHEMA_DICTIONARY     = "tablet_schema_pb_dict";
 
 static const char* RECYCLE_KEY_INFIX_INDEX              = "index";
@@ -63,6 +64,8 @@ static const char* STATS_KEY_INFIX_TABLET               = "tablet";
 
 static const char* JOB_KEY_INFIX_TABLET                 = "tablet";
 static const char* JOB_KEY_INFIX_RL_PROGRESS            = "routine_load_progress";
+static const char* JOB_KEY_INFIX_RESTORE_TABLET         = "restore_tablet";
+static const char* JOB_KEY_INFIX_RESTORE_ROWSET         = "restore_rowset";
 
 static const char* COPY_JOB_KEY_INFIX                   = "job";
 static const char* COPY_FILE_KEY_INFIX                  = "loading_file";
@@ -115,9 +118,10 @@ static void encode_prefix(const T& t, std::string* key) {
         MetaRowsetKeyInfo, MetaRowsetTmpKeyInfo, MetaTabletKeyInfo, MetaTabletIdxKeyInfo, MetaSchemaKeyInfo,
         MetaDeleteBitmapInfo, MetaDeleteBitmapUpdateLockInfo, MetaPendingDeleteBitmapInfo, PartitionVersionKeyInfo,
         RecycleIndexKeyInfo, RecyclePartKeyInfo, RecycleRowsetKeyInfo, RecycleTxnKeyInfo, RecycleStageKeyInfo,
-        StatsTabletKeyInfo, TableVersionKeyInfo,
+        StatsTabletKeyInfo, TableVersionKeyInfo, JobRestoreTabletKeyInfo, JobRestoreRowsetKeyInfo,
         JobTabletKeyInfo, JobRecycleKeyInfo, RLJobProgressKeyInfo,
-        CopyJobKeyInfo, CopyFileKeyInfo,  StorageVaultKeyInfo, MetaSchemaPBDictionaryInfo>);
+        CopyJobKeyInfo, CopyFileKeyInfo,  StorageVaultKeyInfo, MetaSchemaPBDictionaryInfo,
+        MowTabletJobInfo>);
 
     key->push_back(CLOUD_USER_KEY_SPACE01);
     // Prefixes for key families
@@ -136,7 +140,8 @@ static void encode_prefix(const T& t, std::string* key) {
                       || std::is_same_v<T, MetaSchemaPBDictionaryInfo>
                       || std::is_same_v<T, MetaDeleteBitmapInfo>
                       || std::is_same_v<T, MetaDeleteBitmapUpdateLockInfo>
-                      || std::is_same_v<T, MetaPendingDeleteBitmapInfo>) {
+                      || std::is_same_v<T, MetaPendingDeleteBitmapInfo>
+                      || std::is_same_v<T, MowTabletJobInfo>) {
         encode_bytes(META_KEY_PREFIX, key);
     } else if constexpr (std::is_same_v<T, PartitionVersionKeyInfo>
                       || std::is_same_v<T, TableVersionKeyInfo>) {
@@ -158,6 +163,9 @@ static void encode_prefix(const T& t, std::string* key) {
         encode_bytes(COPY_KEY_PREFIX, key);
     } else if constexpr (std::is_same_v<T, StorageVaultKeyInfo>) {
         encode_bytes(VAULT_KEY_PREFIX, key);
+    } else if constexpr (std::is_same_v<T, JobRestoreTabletKeyInfo>
+                      || std::is_same_v<T, JobRestoreRowsetKeyInfo>) {
+        encode_bytes(JOB_KEY_PREFIX, key);
     } else {
         // This branch mean to be unreachable, add an assert(false) here to
         // prevent missing branch match.
@@ -188,7 +196,7 @@ std::string txn_key_prefix(std::string_view instance_id) {
 
 void txn_label_key(const TxnLabelKeyInfo& in, std::string* out) {
     encode_prefix(in, out);                 // 0x01 "txn" ${instance_id}
-    encode_bytes(TXN_KEY_INFIX_LABEL, out); // "txn_index"
+    encode_bytes(TXN_KEY_INFIX_LABEL, out); // "txn_label"
     encode_int64(std::get<1>(in), out);     // db_id
     encode_bytes(std::get<2>(in), out);     // label
 }
@@ -299,6 +307,13 @@ void meta_delete_bitmap_update_lock_key(const MetaDeleteBitmapUpdateLockInfo& in
     encode_bytes(META_KEY_INFIX_DELETE_BITMAP_LOCK, out); // "delete_bitmap_lock"
     encode_int64(std::get<1>(in), out);                   // table_id
     encode_int64(std::get<2>(in), out);                   // partition_id
+}
+
+void mow_tablet_job_key(const MowTabletJobInfo& in, std::string* out) {
+    encode_prefix(in, out);                           // 0x01 "meta" ${instance_id}
+    encode_bytes(META_KEY_INFIX_MOW_TABLET_JOB, out); // "mow_tablet_job"
+    encode_int64(std::get<1>(in), out);               // table_id
+    encode_int64(std::get<2>(in), out);               // initiator
 }
 
 void meta_pending_delete_bitmap_key(const MetaPendingDeleteBitmapInfo& in, std::string* out) {
@@ -421,6 +436,19 @@ void rl_job_progress_key_info(const RLJobProgressKeyInfo& in, std::string* out) 
     encode_bytes(JOB_KEY_INFIX_RL_PROGRESS, out); // "routine_load_progress"
     encode_int64(std::get<1>(in), out);           // db_id
     encode_int64(std::get<2>(in), out);           // job_id
+}
+
+void job_restore_tablet_key(const JobRestoreTabletKeyInfo& in, std::string* out) {
+    encode_prefix(in, out);                          // 0x01 "job" ${instance_id}
+    encode_bytes(JOB_KEY_INFIX_RESTORE_TABLET, out); // "restore_tablet"
+    encode_int64(std::get<1>(in), out);              // tablet_id
+}
+
+void job_restore_rowset_key(const JobRestoreRowsetKeyInfo& in, std::string* out) {
+    encode_prefix(in, out);                          // 0x01 "job" ${instance_id}
+    encode_bytes(JOB_KEY_INFIX_RESTORE_ROWSET, out); // "restore_rowset"
+    encode_int64(std::get<1>(in), out);              // tablet_id
+    encode_int64(std::get<2>(in), out);              // version
 }
 
 //==============================================================================

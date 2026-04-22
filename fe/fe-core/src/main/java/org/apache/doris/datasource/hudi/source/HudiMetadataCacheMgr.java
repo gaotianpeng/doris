@@ -17,7 +17,8 @@
 
 package org.apache.doris.datasource.hudi.source;
 
-import org.apache.doris.datasource.ExternalCatalog;
+import org.apache.doris.datasource.CatalogIf;
+import org.apache.doris.datasource.ExternalTable;
 import org.apache.doris.datasource.hive.HMSExternalCatalog;
 
 import com.google.common.collect.Maps;
@@ -36,7 +37,7 @@ public class HudiMetadataCacheMgr {
         this.executor = executor;
     }
 
-    public HudiPartitionProcessor getPartitionProcessor(ExternalCatalog catalog) {
+    public HudiPartitionProcessor getPartitionProcessor(CatalogIf catalog) {
         return partitionProcessors.computeIfAbsent(catalog.getId(), catalogId -> {
             if (catalog instanceof HMSExternalCatalog) {
                 return new HudiCachedPartitionProcessor(catalogId, executor);
@@ -46,7 +47,7 @@ public class HudiMetadataCacheMgr {
         });
     }
 
-    public HudiCachedFsViewProcessor getFsViewProcessor(ExternalCatalog catalog) {
+    public HudiCachedFsViewProcessor getFsViewProcessor(CatalogIf catalog) {
         return fsViewProcessors.computeIfAbsent(catalog.getId(), catalogId -> {
             if (catalog instanceof HMSExternalCatalog) {
                 return new HudiCachedFsViewProcessor(executor);
@@ -56,7 +57,7 @@ public class HudiMetadataCacheMgr {
         });
     }
 
-    public HudiCachedMetaClientProcessor getHudiMetaClientProcessor(ExternalCatalog catalog) {
+    public HudiCachedMetaClientProcessor getHudiMetaClientProcessor(CatalogIf catalog) {
         return metaClientProcessors.computeIfAbsent(catalog.getId(), catalogId -> {
             if (catalog instanceof HMSExternalCatalog) {
                 return new HudiCachedMetaClientProcessor(executor);
@@ -111,22 +112,23 @@ public class HudiMetadataCacheMgr {
         }
     }
 
-    public void invalidateTableCache(long catalogId, String dbName, String tblName) {
+    public void invalidateTableCache(ExternalTable dorisTable) {
+        long catalogId = dorisTable.getCatalog().getId();
         HudiPartitionProcessor processor = partitionProcessors.get(catalogId);
         if (processor != null) {
-            processor.cleanTablePartitions(dbName, tblName);
+            processor.cleanTablePartitions(dorisTable);
         }
         HudiCachedFsViewProcessor fsViewProcessor = fsViewProcessors.get(catalogId);
         if (fsViewProcessor != null) {
-            fsViewProcessor.invalidateTableCache(dbName, tblName);
+            fsViewProcessor.invalidateTableCache(dorisTable);
         }
         HudiCachedMetaClientProcessor metaClientProcessor = metaClientProcessors.get(catalogId);
         if (metaClientProcessor != null) {
-            metaClientProcessor.invalidateTableCache(dbName, tblName);
+            metaClientProcessor.invalidateTableCache(dorisTable);
         }
     }
 
-    public Map<String, Map<String, String>> getCacheStats(ExternalCatalog catalog) {
+    public Map<String, Map<String, String>> getCacheStats(CatalogIf catalog) {
         Map<String, Map<String, String>> res = Maps.newHashMap();
 
         HudiCachedPartitionProcessor partitionProcessor = (HudiCachedPartitionProcessor) getPartitionProcessor(catalog);

@@ -60,6 +60,16 @@ public:
 
     static S3Environment& getInstance();
 
+    static Aws::Client::ClientConfiguration& getClientConfiguration() {
+        // The default constructor of ClientConfiguration will do some http call
+        // such as Aws::Internal::GetEC2MetadataClient and other init operation,
+        // which is unnecessary.
+        // So here we use a static instance, and deep copy every time
+        // to avoid unnecessary operations.
+        static Aws::Client::ClientConfiguration instance;
+        return instance;
+    }
+
     ~S3Environment();
 
 private:
@@ -143,6 +153,12 @@ protected:
     int list_prefix(const std::string& path_prefix, std::unique_ptr<ListIterator>* res);
 
     virtual int delete_prefix_impl(const std::string& path_prefix, int64_t expiration_time = 0);
+
+    std::shared_ptr<Aws::Auth::AWSCredentialsProvider> _get_aws_credentials_provider_v1(
+            const S3Conf& s3_conf);
+
+    std::shared_ptr<Aws::Auth::AWSCredentialsProvider> _get_aws_credentials_provider_v2(
+            const S3Conf& s3_conf);
 
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> get_aws_credentials_provider(
             const S3Conf& s3_conf);

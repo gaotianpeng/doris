@@ -30,6 +30,7 @@ import org.apache.doris.catalog.Index;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexState;
+import org.apache.doris.catalog.MaterializedIndexMeta;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.OlapTable.OlapTableState;
 import org.apache.doris.catalog.Partition;
@@ -51,6 +52,7 @@ import org.apache.doris.common.util.DbUtil;
 import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.persist.gson.GsonUtils;
+import org.apache.doris.statistics.AnalysisManager;
 import org.apache.doris.task.AgentBatchTask;
 import org.apache.doris.task.AgentTask;
 import org.apache.doris.task.AgentTaskExecutor;
@@ -72,7 +74,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Table;
 import com.google.common.collect.Table.Cell;
 import com.google.gson.annotations.SerializedName;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -144,6 +146,11 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
     @SerializedName(value = "hasRowStoreChange")
     protected boolean hasRowStoreChange = false;
 
+    @SerializedName(value = "enableUniqueKeySkipBitmap")
+    private boolean enableUniqueKeySkipBitmap = false;
+    @SerializedName(value = "hasEnableUniqueKeySkipBitmapChanged")
+    private boolean hasEnableUniqueKeySkipBitmapChanged = false;
+
     // save all schema change tasks
     AgentBatchTask schemaChangeBatchTask = new AgentBatchTask();
 
@@ -195,6 +202,12 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
         this.hasRowStoreChange = hasRowStoreChange;
         this.storeRowColumn = storeRowColumn;
         this.rowStoreColumns = rowStoreColumns;
+    }
+
+    public void setEnableUniqueKeySkipBitmapInfo(boolean enableUniqueKeySkipBitmap,
+            boolean hasEnableUniqueKeySkipBitmapChanged) {
+        this.enableUniqueKeySkipBitmap = enableUniqueKeySkipBitmap;
+        this.hasEnableUniqueKeySkipBitmapChanged = hasEnableUniqueKeySkipBitmapChanged;
     }
 
     public void setAlterIndexInfo(boolean indexChange, List<Index> indexes) {
@@ -321,7 +334,8 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
                                     objectPool,
                                     tbl.rowStorePageSize(),
                                     tbl.variantEnableFlattenNested(),
-                                    tbl.storagePageSize());
+                                    tbl.storagePageSize(), tbl.getTDEAlgorithm(),
+                                    tbl.storageDictPageSize());
 
                             createReplicaTask.setBaseTablet(partitionIndexTabletMap.get(partitionId, shadowIdxId)
                                     .get(shadowTabletId), originSchemaHash);
@@ -437,12 +451,15 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
         }
 
         for (long shadowIdxId : indexIdMap.keySet()) {
+            MaterializedIndexMeta originalIndexMeta = tbl.getIndexMetaByIndexId(indexIdMap.get(shadowIdxId));
             tbl.setIndexMeta(shadowIdxId, indexIdToName.get(shadowIdxId), indexSchemaMap.get(shadowIdxId),
                     indexSchemaVersionAndHashMap.get(shadowIdxId).schemaVersion,
                     indexSchemaVersionAndHashMap.get(shadowIdxId).schemaHash,
                     indexShortKeyMap.get(shadowIdxId), TStorageType.COLUMN,
-                    tbl.getKeysTypeByIndexId(indexIdMap.get(shadowIdxId)),
-                    indexChange ? indexes : tbl.getIndexMetaByIndexId(indexIdMap.get(shadowIdxId)).getIndexes());
+                    tbl.getKeysTypeByIndexId(indexIdMap.get(shadowIdxId)), originalIndexMeta.getDefineStmt(),
+                    null, indexChange ? indexes : originalIndexMeta.getIndexes());
+            MaterializedIndexMeta shadowIndexMeta = tbl.getIndexMetaByIndexId(shadowIdxId);
+            shadowIndexMeta.setWhereClause(originalIndexMeta.getWhereClause());
         }
 
         tbl.rebuildFullSchema();
@@ -478,7 +495,6 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
         }
 
         tbl.readLock();
-        Map<Object, Object> objectPool = new ConcurrentHashMap<Object, Object>();
         String vaultId = tbl.getStorageVaultId();
         try {
             long expiration = (createTimeMs + timeoutMs) / 1000;
@@ -490,6 +506,8 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
             }
 
             Preconditions.checkState(tbl.getState() == OlapTableState.SCHEMA_CHANGE);
+            // Create object pool per MaterializedIndex
+            Map<Long, Map<Object, Object>> indexObjectPoolMap = Maps.newHashMap();
             for (long partitionId : partitionIndexMap.rowKeySet()) {
                 Partition partition = tbl.getPartition(partitionId);
                 Preconditions.checkNotNull(partition, partitionId);
@@ -502,6 +520,13 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
                 for (Map.Entry<Long, MaterializedIndex> entry : shadowIndexMap.entrySet()) {
                     long shadowIdxId = entry.getKey();
                     MaterializedIndex shadowIdx = entry.getValue();
+
+                    // Get or create object pool for this MaterializedIndex
+                    Map<Object, Object> objectPool = indexObjectPoolMap.get(shadowIdxId);
+                    if (objectPool == null) {
+                        objectPool = new ConcurrentHashMap<Object, Object>();
+                        indexObjectPoolMap.put(shadowIdxId, objectPool);
+                    }
                     long originIdxId = indexIdMap.get(shadowIdxId);
                     Map<String, Expr> defineExprs = Maps.newHashMap();
                     List<Column> fullSchema = tbl.getSchemaByIndexId(originIdxId, true);
@@ -691,7 +716,11 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
         }
         postProcessOriginIndex();
         // Drop table column stats after schema change finished.
-        Env.getCurrentEnv().getAnalysisManager().dropStats(tbl, null);
+        if (!FeConstants.runningUnitTest) {
+            AnalysisManager manager = Env.getCurrentEnv().getAnalysisManager();
+            manager.removeTableStats(tbl.getId());
+            manager.dropStats(tbl, null);
+        }
     }
 
     private void onFinished(OlapTable tbl) {
@@ -780,6 +809,9 @@ public class SchemaChangeJobV2 extends AlterJobV2 {
         if (hasRowStoreChange) {
             tbl.setStoreRowColumn(storeRowColumn);
             tbl.setRowStoreColumns(rowStoreColumns);
+        }
+        if (hasEnableUniqueKeySkipBitmapChanged) {
+            tbl.setEnableUniqueKeySkipBitmap(enableUniqueKeySkipBitmap);
         }
 
         // set storage format of table, only set if format is v2

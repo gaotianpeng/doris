@@ -191,7 +191,7 @@ void JSONDataParser<ParserImpl>::traverseArrayElement(const Element& element,
     element_ctx.has_nested_in_flatten = ctx.has_nested_in_flatten;
     element_ctx.is_top_array = ctx.is_top_array;
     traverse(element, element_ctx);
-    auto& [_, paths, values, flatten_nested, __, is_top_array] = element_ctx;
+    auto& [_, paths, values, flatten_nested, has_nested, is_top_array] = element_ctx;
 
     if (element_ctx.has_nested_in_flatten && is_top_array) {
         checkAmbiguousStructure(ctx, paths);
@@ -222,7 +222,6 @@ void JSONDataParser<ParserImpl>::traverseArrayElement(const Element& element,
 
 // check if the structure of top_array is ambiguous like:
 // [{"a": {"b": {"c": 1}}}, {"a": {"b": 1}}] a.b is ambiguous
-// which can not recombine a right doc in ColumnVariant::get_json_by_column_tree
 template <typename ParserImpl>
 void JSONDataParser<ParserImpl>::checkAmbiguousStructure(
         const ParseArrayContext& ctx, const std::vector<PathInData::Parts>& paths) {
@@ -368,7 +367,7 @@ StringRef JSONDataParser<ParserImpl>::getNameOfNested(const PathInData::Parts& p
     /// `k3` and `k5` keys instead of `k2`.
     for (const auto& part : path) {
         if (part.is_nested) {
-            return StringRef(part.key.data(), part.key.size());
+            return {part.key.data(), part.key.size()};
         }
     }
     return {};

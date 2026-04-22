@@ -36,6 +36,7 @@
 #include "cloud/cloud_cumulative_compaction_policy.h"
 #include "cloud/cloud_full_compaction.h"
 #include "cloud/cloud_meta_mgr.h"
+#include "cloud/cloud_snapshot_mgr.h"
 #include "cloud/cloud_tablet_hotspot.h"
 #include "cloud/cloud_tablet_mgr.h"
 #include "cloud/cloud_txn_delete_bitmap_cache.h"
@@ -98,6 +99,7 @@ CloudStorageEngine::CloudStorageEngine(const EngineOptions& options)
             std::make_shared<CloudSizeBasedCumulativeCompactionPolicy>();
     _cumulative_compaction_policies[CUMULATIVE_TIME_SERIES_POLICY] =
             std::make_shared<CloudTimeSeriesCumulativeCompactionPolicy>();
+    _startup_timepoint = std::chrono::system_clock::now();
 }
 
 CloudStorageEngine::~CloudStorageEngine() {
@@ -223,6 +225,8 @@ Status CloudStorageEngine::open() {
     _schema_cloud_dictionary_cache =
             std::make_unique<SchemaCloudDictionaryCache>(config::schema_dict_cache_capacity);
 
+    _cloud_snapshot_mgr = std::make_unique<CloudSnapshotMgr>(*this);
+
     RETURN_NOT_OK_STATUS_WITH_WARN(
             init_stream_load_recorder(ExecEnv::GetInstance()->store_paths()[0].path),
             "init StreamLoadRecorder failed");
@@ -269,8 +273,8 @@ bool CloudStorageEngine::stopped() {
 
 Result<BaseTabletSPtr> CloudStorageEngine::get_tablet(int64_t tablet_id,
                                                       SyncRowsetStats* sync_stats,
-                                                      bool force_use_cache) {
-    return _tablet_mgr->get_tablet(tablet_id, false, true, sync_stats, force_use_cache)
+                                                      bool force_use_only_cached) {
+    return _tablet_mgr->get_tablet(tablet_id, false, true, sync_stats, force_use_only_cached)
             .transform([](auto&& t) { return static_pointer_cast<BaseTablet>(std::move(t)); });
 }
 
@@ -1035,7 +1039,6 @@ void CloudStorageEngine::_check_tablet_delete_bitmap_score_callback() {
         }
         uint64_t max_delete_bitmap_score = 0;
         uint64_t max_base_rowset_delete_bitmap_score = 0;
-        std::vector<CloudTabletSPtr> tablets;
         tablet_mgr().get_topn_tablet_delete_bitmap_score(&max_delete_bitmap_score,
                                                          &max_base_rowset_delete_bitmap_score);
         if (max_delete_bitmap_score > 0) {

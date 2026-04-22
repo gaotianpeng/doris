@@ -172,9 +172,6 @@ Status ExchangeSinkLocalState::open(RuntimeState* state) {
                     _local_channels_dependency.push_back(dep);
                     DCHECK(_local_channels_dependency[dep_id] != nullptr);
                     dep_id++;
-                } else {
-                    LOG(WARNING) << "local recvr is null: query id = "
-                                 << print_id(state->query_id()) << " node id = " << p.node_id();
                 }
             }
         }
@@ -609,7 +606,20 @@ Status ExchangeSinkOperatorX::sink(RuntimeState* state, vectorized::Block* block
         local_state._serializer.reset_block();
         for (auto& channel : local_state.channels) {
             Status st = channel->close(state);
-            if (!st.ok() && final_st.ok()) {
+            /**
+             * Consider this case below:
+             *
+             *                 +--- Channel0 (Running)
+             *                 |
+             * ExchangeSink ---+--- Channel1 (EOF)
+             *                 |
+             *                 +--- Channel2 (Running)
+             *
+             * Channel1 is EOF now and return `END_OF_FILE` here. However, Channel0 and Channel2
+             * still need new data. If ExchangeSink returns EOF, downstream tasks will no longer receive
+             * blocks including EOS signal. So we must ensure to return EOF iff all channels are EOF.
+             */
+            if (!st.ok() && !st.is<ErrorCode::END_OF_FILE>() && final_st.ok()) {
                 final_st = st;
             }
         }
@@ -701,8 +711,10 @@ Status ExchangeSinkLocalState::close(RuntimeState* state, Status exec_status) {
         COUNTER_UPDATE(_wait_broadcast_buffer_timer, _broadcast_dependency->watcher_elapse_time());
     }
     for (size_t i = 0; i < _local_channels_dependency.size(); i++) {
-        COUNTER_UPDATE(_wait_channel_timer[i],
-                       _local_channels_dependency[i]->watcher_elapse_time());
+        if (_wait_channel_timer[i] && _local_channels_dependency[i]) {
+            COUNTER_UPDATE(_wait_channel_timer[i],
+                           _local_channels_dependency[i]->watcher_elapse_time());
+        }
     }
     if (_sink_buffer) {
         _sink_buffer->update_profile(profile());

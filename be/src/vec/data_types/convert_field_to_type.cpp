@@ -43,6 +43,8 @@
 #include "vec/data_types/data_type.h"
 #include "vec/data_types/data_type_array.h"
 #include "vec/data_types/data_type_nullable.h"
+#include "vec/io/io_helper.h"
+#include "vec/runtime/ipv6_value.h"
 
 namespace doris::vectorized {
 /** Checking for a `Field from` of `From` type falls to a range of values of type `To`.
@@ -59,7 +61,12 @@ class FieldVisitorToStringSimple : public StaticVisitor<String> {
 public:
     String operator()(const Null& x) const { return "NULL"; }
     String operator()(const UInt64& x) const { return std::to_string(x); }
+    String operator()(const IPv6& x) const {
+        auto value = IPv6Value(x);
+        return value.to_string();
+    }
     String operator()(const Int64& x) const { return std::to_string(x); }
+    String operator()(const Int128& x) const { return int128_to_string(x); }
     String operator()(const Float64& x) const { return std::to_string(x); }
     String operator()(const String& x) const { return x; }
     [[noreturn]] String operator()(const UInt128& x) const {
@@ -69,6 +76,9 @@ public:
         throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR, "Not implemeted");
     }
     [[noreturn]] String operator()(const Tuple& x) const {
+        throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR, "Not implemeted");
+    }
+    [[noreturn]] String operator()(const VariantField& x) const {
         throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR, "Not implemeted");
     }
     [[noreturn]] String operator()(const DecimalField<Decimal32>& x) const {
@@ -113,13 +123,19 @@ public:
         writer->writeEndString();
     }
     void operator()(const JsonbField& x, JsonbWriter* writer) const {
-        JsonbDocument* doc;
-        THROW_IF_ERROR(JsonbDocument::checkAndCreateDocument(x.get_value(), x.get_size(), &doc));
-        writer->writeValue(doc->getValue());
+        const JsonbValue* value = JsonbDocument::createValue(x.get_value(), x.get_size());
+        if (value == nullptr) {
+            throw doris::Exception(ErrorCode::INVALID_ARGUMENT, "Failed to create JsonbValue");
+        }
+        writer->writeValue(value);
     }
+
     void operator()(const Array& x, JsonbWriter* writer) const;
 
     void operator()(const Tuple& x, JsonbWriter* writer) const {
+        throw doris::Exception(doris::ErrorCode::NOT_IMPLEMENTED_ERROR, "Not implemeted");
+    }
+    void operator()(const VariantField& x, JsonbWriter* writer) const {
         throw doris::Exception(doris::ErrorCode::NOT_IMPLEMENTED_ERROR, "Not implemeted");
     }
     void operator()(const DecimalField<Decimal32>& x, JsonbWriter* writer) const {

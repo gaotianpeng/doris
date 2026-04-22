@@ -121,6 +121,8 @@ suite("test_backup_restore_mv_write", "backup_restore") {
     // DefineExpr: date_format(hours_add(`k2`, 1), '%Y-%m-%d %H:00:00')
     // WhereClause: (`k1` > '2025-06-12 00:00:00')
 
+    logger.info("res0: ${res0}")
+    logger.info("res: ${res}")
     assertEquals(res0.toString(), res.toString())
 
     sql "insert into ${tableNamePrefix} values (1, '2025-06-12 01:00:00', '2025-06-12 02:00:00', 'test_vin_0')"
@@ -128,7 +130,7 @@ suite("test_backup_restore_mv_write", "backup_restore") {
     sql "insert into ${tableNamePrefix} values (3, '2025-06-14 03:00:00', '2025-06-14 04:00:00', 'test_vin_2')"
 
     def select_res = sql "select * from ${tableNamePrefix}"
-    assertEquals(select_res.size(), 3)
+    assertTrue(select_res.size() == 3)
 
     sql "DROP REPOSITORY `${repoName}`"
 }

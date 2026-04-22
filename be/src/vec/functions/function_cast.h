@@ -748,6 +748,11 @@ struct ConvertImplStringToJsonbAsJsonbString {
         ColumnString* dst_str = assert_cast<ColumnString*>(dst.get());
         const auto* from_string = assert_cast<const ColumnString*>(&col_from);
         JsonbWriter writer;
+        if (from_string->size() < input_rows_count) {
+            return Status::RuntimeError(
+                    "Illegal column {} of first argument of conversion function",
+                    col_from.get_name());
+        }
         for (size_t i = 0; i < input_rows_count; i++) {
             auto str_ref = from_string->get_data_at(i);
             writer.reset();
@@ -926,16 +931,12 @@ struct ConvertImplFromJsonb {
             auto& null_map = null_map_col->get_data();
             auto col_to = ColumnType::create();
 
-            //IColumn & col_to = *res;
-            // size_t size = col_from.size();
             col_to->reserve(input_rows_count);
             auto& res = col_to->get_data();
             res.resize(input_rows_count);
 
             for (size_t i = 0; i < input_rows_count; ++i) {
                 const auto& val = column_string->get_data_at(i);
-                // ReadBuffer read_buffer((char*)(val.data), val.size);
-                // RETURN_IF_ERROR(data_type_to->from_string(read_buffer, col_to));
 
                 if (val.size == 0) {
                     null_map[i] = 1;
@@ -959,18 +960,15 @@ struct ConvertImplFromJsonb {
                     res[i] = 0;
                     continue;
                 }
-
-                // if value is string, convert by parse, otherwise the result is null if ToDataType is not string
                 if (value->isString()) {
-                    const auto* blob = static_cast<const JsonbBlobVal*>(value);
-                    const auto& data = blob->getBlob();
-                    size_t len = blob->getBlobLen();
+                    // convert by parse
+                    const auto& data = static_cast<const JsonbBlobVal*>(value)->getBlob();
+                    size_t len = static_cast<const JsonbBlobVal*>(value)->getBlobLen();
                     ReadBuffer rb((char*)(data), len);
                     bool parsed = try_parse_impl<ToDataType>(res[i], rb, context);
                     null_map[i] = !parsed;
                     continue;
                 }
-
                 if constexpr (type_index == TypeIndex::UInt8) {
                     // cast from json value to boolean type
                     if (value->isTrue()) {
@@ -2173,8 +2171,7 @@ private:
                             {0}, 1, input_rows_count);
                 }
             } else {
-                if (variant.empty()) {
-                    // TODO not found root cause, a tmp fix
+                if (variant.only_have_default_values()) {
                     col_to->assume_mutable()->insert_many_defaults(input_rows_count);
                     col_to = make_nullable(col_to, true);
                 } else if (WhichDataType(data_type_to).is_string()) {
@@ -2209,12 +2206,13 @@ private:
         static Status execute(FunctionContext* context, Block& block,
                               const ColumnNumbers& arguments, const size_t result,
                               size_t input_rows_count) {
-            // auto& data_type_to = block.get_by_position(result).type;
+            auto& data_type_to = block.get_by_position(result).type;
             const auto& col_with_type_and_name = block.get_by_position(arguments[0]);
             auto& from_type = col_with_type_and_name.type;
             auto& col_from = col_with_type_and_name.column;
             // set variant root column/type to from column/type
-            auto variant = ColumnObject::create(true /*always nullable*/);
+            const auto& data_type_object = assert_cast<const DataTypeObject&>(*data_type_to);
+            auto variant = ColumnObject::create(data_type_object.variant_max_subcolumns_count());
             variant->create_root(from_type, col_from->assume_mutable());
             block.replace_by_position(result, std::move(variant));
             return Status::OK();
@@ -2528,10 +2526,10 @@ private:
 
         // variant needs to be judged first
         if (to_type->get_type_id() == TypeIndex::VARIANT) {
-            return create_variant_wrapper(from_type, static_cast<const DataTypeObject&>(*to_type));
+            return create_variant_wrapper(from_type, assert_cast<const DataTypeObject&>(*to_type));
         }
         if (from_type->get_type_id() == TypeIndex::VARIANT) {
-            return create_variant_wrapper(static_cast<const DataTypeObject&>(*from_type), to_type);
+            return create_variant_wrapper(assert_cast<const DataTypeObject&>(*from_type), to_type);
         }
 
         switch (from_type->get_type_id()) {

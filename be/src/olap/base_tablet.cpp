@@ -27,6 +27,7 @@
 
 #include "cloud/cloud_tablet.h"
 #include "cloud/config.h"
+#include "common/cast_set.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "olap/calc_delete_bitmap_executor.h"
@@ -34,6 +35,7 @@
 #include "olap/delete_bitmap_calculator.h"
 #include "olap/iterators.h"
 #include "olap/memtable.h"
+#include "olap/olap_common.h"
 #include "olap/partial_update_info.h"
 #include "olap/primary_key_index.h"
 #include "olap/rowid_conversion.h"
@@ -164,6 +166,30 @@ TabletSchemaSPtr BaseTablet::tablet_schema_with_merged_max_schema_version(
         VLOG_DEBUG << "dump schema: " << target_schema->dump_full_schema();
     }
     return target_schema;
+}
+
+Status BaseTablet::get_compaction_schema(const std::vector<RowsetMetaSharedPtr>& rowset_metas,
+                                         TabletSchemaSPtr& target_schema) {
+    RowsetMetaSharedPtr max_schema_version_rs = *std::max_element(
+            rowset_metas.begin(), rowset_metas.end(),
+            [](const RowsetMetaSharedPtr& a, const RowsetMetaSharedPtr& b) {
+                return !a->tablet_schema()
+                               ? true
+                               : (!b->tablet_schema()
+                                          ? false
+                                          : a->tablet_schema()->schema_version() <
+                                                    b->tablet_schema()->schema_version());
+            });
+    target_schema = max_schema_version_rs->tablet_schema();
+    if (target_schema->num_variant_columns() > 0) {
+        RowsetIdUnorderedSet rowset_ids;
+        for (const RowsetMetaSharedPtr& rs_meta : rowset_metas) {
+            rowset_ids.emplace(rs_meta->rowset_id());
+        }
+        RETURN_IF_ERROR(vectorized::schema_util::get_compaction_schema(
+                get_rowset_by_ids(&rowset_ids), target_schema));
+    }
+    return Status::OK();
 }
 
 Status BaseTablet::set_tablet_state(TabletState state) {
@@ -463,7 +489,7 @@ Status BaseTablet::lookup_row_key(const Slice& encoded_key, TabletSchema* latest
                                   RowLocation* row_location, uint32_t version,
                                   std::vector<std::unique_ptr<SegmentCacheHandle>>& segment_caches,
                                   RowsetSharedPtr* rowset, bool with_rowid,
-                                  OlapReaderStatistics* stats) {
+                                  std::string* encoded_seq_value, OlapReaderStatistics* stats) {
     SCOPED_BVAR_LATENCY(g_tablet_lookup_rowkey_latency);
     size_t seq_col_length = 0;
     // use the latest tablet schema to decide if the tablet has sequence column currently
@@ -512,14 +538,14 @@ Status BaseTablet::lookup_row_key(const Slice& encoded_key, TabletSchema* latest
 
         for (auto id : picked_segments) {
             Status s = segments[id]->lookup_row_key(encoded_key, schema, with_seq_col, with_rowid,
-                                                    &loc, stats);
+                                                    &loc, stats, encoded_seq_value);
             if (s.is<KEY_NOT_FOUND>()) {
                 continue;
             }
             if (!s.ok() && !s.is<KEY_ALREADY_EXISTS>()) {
                 return s;
             }
-            if (s.ok() && _tablet_meta->delete_bitmap()->contains_agg_without_cache(
+            if (s.ok() && _tablet_meta->delete_bitmap()->contains_agg_with_cache_if_eligible(
                                   {loc.rowset_id, loc.segment_id, version}, loc.row_id)) {
                 // if has sequence col, we continue to compare the sequence_id of
                 // all rowsets, util we find an existing key.
@@ -582,16 +608,27 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
     auto rowset_id = rowset->rowset_id();
     Version dummy_version(end_version + 1, end_version + 1);
     auto rowset_schema = rowset->tablet_schema();
+
+    PartialUpdateInfo* partial_update_info {nullptr};
     bool is_partial_update = rowset_writer && rowset_writer->is_partial_update();
+    // `have_input_seq_column` is for fixed partial update only. For flexible partial update, we should use
+    // the skip bitmap to determine wheather a row has specified the sequence column
     bool have_input_seq_column = false;
-    if (is_partial_update && rowset_schema->has_sequence_col()) {
-        std::vector<uint32_t> including_cids =
-                rowset_writer->get_partial_update_info()->update_cids;
-        have_input_seq_column =
-                rowset_schema->has_sequence_col() &&
-                (std::find(including_cids.cbegin(), including_cids.cend(),
-                           rowset_schema->sequence_col_idx()) != including_cids.cend());
+    // `rids_be_overwritten` is for flexible partial update only, it records row ids that is overwritten by
+    // another row with higher seqeucne value
+    std::set<uint32_t> rids_be_overwritten;
+    if (is_partial_update) {
+        partial_update_info = rowset_writer->get_partial_update_info().get();
+        if (partial_update_info->is_fixed_partial_update() && rowset_schema->has_sequence_col()) {
+            std::vector<uint32_t> including_cids =
+                    rowset_writer->get_partial_update_info()->update_cids;
+            have_input_seq_column =
+                    rowset_schema->has_sequence_col() &&
+                    (std::find(including_cids.cbegin(), including_cids.cend(),
+                               rowset_schema->sequence_col_idx()) != including_cids.cend());
+        }
     }
+
     if (rowset_schema->num_variant_columns() > 0) {
         // During partial updates, the extracted columns of a variant should not be included in the rowset schema.
         // This is because the partial update for a variant needs to ignore the extracted columns.
@@ -600,8 +637,8 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
         rowset_schema = rowset_schema->copy_without_variant_extracted_columns();
     }
     // use for partial update
-    PartialUpdateReadPlan read_plan_ori;
-    PartialUpdateReadPlan read_plan_update;
+    FixedReadPlan read_plan_ori;
+    FixedReadPlan read_plan_update;
     int64_t conflict_rows = 0;
     int64_t new_generated_rows = 0;
 
@@ -706,7 +743,10 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
                 continue;
             }
 
-            if (st.is<KEY_ALREADY_EXISTS>() && (!is_partial_update || have_input_seq_column)) {
+            ++conflict_rows;
+            if (st.is<KEY_ALREADY_EXISTS>() &&
+                (!is_partial_update ||
+                 (partial_update_info->is_fixed_partial_update() && have_input_seq_column))) {
                 // `st.is<KEY_ALREADY_EXISTS>()` means that there exists a row with the same key and larger value
                 // in seqeunce column.
                 // - If the current load is not a partial update, we just delete current row.
@@ -721,7 +761,6 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
                 //       of the including columns in the current row into a new row.
                 delete_bitmap->add({rowset_id, seg->id(), DeleteBitmap::TEMP_VERSION_COMMON},
                                    row_id);
-                ++conflict_rows;
                 continue;
                 // NOTE: for partial update which doesn't specify the sequence column, we can't use the sequence column value filled in flush phase
                 // as its final value. Otherwise it may cause inconsistency between replicas.
@@ -734,10 +773,26 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
                 // So here we should read version 5's columns and build a new row, which is
                 // consists of version 6's update columns and version 5's origin columns
                 // here we build 2 read plan for ori values and update values
+
+                // - for fixed partial update, we should read update columns from current load's rowset
+                // and read missing columns from previous rowsets to create the final block
+                // - for flexible partial update, we should read all columns from current load's rowset
+                // and read non sort key columns from previous rowsets to create the final block
+                // So we only need to record rows to read for both mode partial update
                 read_plan_ori.prepare_to_read(loc, pos);
                 read_plan_update.prepare_to_read(RowLocation {rowset_id, seg->id(), row_id}, pos);
+
+                // For flexible partial update, we should use skip bitmap to determine wheather
+                // a row has specified the sequence column. But skip bitmap should be read from the segment.
+                // So we record these row ids and process and filter them in `generate_new_block_for_flexible_partial_update()`
+                if (st.is<KEY_ALREADY_EXISTS>() &&
+                    partial_update_info->is_flexible_partial_update()) {
+                    rids_be_overwritten.insert(pos);
+                }
+
                 rsid_to_rowset[rowset_find->rowset_id()] = rowset_find;
                 ++pos;
+
                 // delete bitmap will be calculate when memtable flush and
                 // publish. The two stages may see different versions.
                 // When there is sequence column, the currently imported data
@@ -751,14 +806,12 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
                         loc.row_id);
                 delete_bitmap->add({rowset_id, seg->id(), DeleteBitmap::TEMP_VERSION_COMMON},
                                    row_id);
-                ++conflict_rows;
                 ++new_generated_rows;
                 continue;
             }
             // when st = ok
             delete_bitmap->add({loc.rowset_id, loc.segment_id, DeleteBitmap::TEMP_VERSION_COMMON},
                                loc.row_id);
-            ++conflict_rows;
         }
         remaining -= num_read;
     }
@@ -776,19 +829,25 @@ Status BaseTablet::calc_segment_delete_bitmap(RowsetSharedPtr rowset,
     }
 
     if (pos > 0) {
-        auto partial_update_info = rowset_writer->get_partial_update_info();
         DCHECK(partial_update_info);
-        RETURN_IF_ERROR(generate_new_block_for_partial_update(
-                rowset_schema, partial_update_info.get(), read_plan_ori, read_plan_update,
-                rsid_to_rowset, &block));
+        if (partial_update_info->is_fixed_partial_update()) {
+            RETURN_IF_ERROR(generate_new_block_for_partial_update(
+                    rowset_schema, partial_update_info, read_plan_ori, read_plan_update,
+                    rsid_to_rowset, &block));
+        } else {
+            RETURN_IF_ERROR(generate_new_block_for_flexible_partial_update(
+                    rowset_schema, partial_update_info, rids_be_overwritten, read_plan_ori,
+                    read_plan_update, rsid_to_rowset, &block));
+        }
         RETURN_IF_ERROR(sort_block(block, ordered_block));
         RETURN_IF_ERROR(rowset_writer->flush_single_block(&ordered_block));
         auto cost_us = watch.get_elapse_time_us();
         if (config::enable_mow_verbose_log || cost_us > 10 * 1000) {
-            LOG(INFO) << "calc segment delete bitmap for partial update, tablet: " << tablet_id()
-                      << " rowset: " << rowset_id << " seg_id: " << seg->id()
-                      << " dummy_version: " << end_version + 1 << " rows: " << seg->num_rows()
-                      << " conflict rows: " << conflict_rows
+            LOG(INFO) << "calc segment delete bitmap for "
+                      << partial_update_info->partial_update_mode_str()
+                      << ", tablet: " << tablet_id() << " rowset: " << rowset_id
+                      << " seg_id: " << seg->id() << " dummy_version: " << end_version + 1
+                      << " rows: " << seg->num_rows() << " conflict rows: " << conflict_rows
                       << " new generated rows: " << new_generated_rows
                       << " bitmap num: " << delete_bitmap->get_delete_bitmap_count()
                       << " bitmap cardinality: " << delete_bitmap->cardinality()
@@ -910,7 +969,7 @@ Status BaseTablet::fetch_value_by_rowids(RowsetSharedPtr input_rowset, uint32_t 
     return Status::OK();
 }
 
-const signed char* BaseTablet::get_delete_sign_column_data(vectorized::Block& block,
+const signed char* BaseTablet::get_delete_sign_column_data(const vectorized::Block& block,
                                                            size_t rows_at_least) {
     if (const vectorized::ColumnWithTypeAndName* delete_sign_column =
                 block.try_get_by_name(DELETE_SIGN);
@@ -946,7 +1005,7 @@ Status BaseTablet::generate_default_value_block(const TabletSchema& schema,
 
 Status BaseTablet::generate_new_block_for_partial_update(
         TabletSchemaSPtr rowset_schema, const PartialUpdateInfo* partial_update_info,
-        const PartialUpdateReadPlan& read_plan_ori, const PartialUpdateReadPlan& read_plan_update,
+        const FixedReadPlan& read_plan_ori, const FixedReadPlan& read_plan_update,
         const std::map<RowsetId, RowsetSharedPtr>& rsid_to_rowset,
         vectorized::Block* output_block) {
     // do partial update related works
@@ -961,6 +1020,13 @@ Status BaseTablet::generate_new_block_for_partial_update(
     auto old_block = rowset_schema->create_block_by_cids(missing_cids);
     auto update_block = rowset_schema->create_block_by_cids(update_cids);
 
+    bool have_input_seq_column = false;
+    if (rowset_schema->has_sequence_col()) {
+        have_input_seq_column =
+                (std::find(update_cids.cbegin(), update_cids.cend(),
+                           rowset_schema->sequence_col_idx()) != update_cids.cend());
+    }
+
     // rowid in the final block(start from 0, increase continuously) -> rowid to read in update_block
     std::map<uint32_t, uint32_t> read_index_update;
 
@@ -972,8 +1038,7 @@ Status BaseTablet::generate_new_block_for_partial_update(
     for (auto i = 0; i < update_cids.size(); ++i) {
         for (auto idx = 0; idx < update_rows; ++idx) {
             full_mutable_columns[update_cids[i]]->insert_from(
-                    *update_block.get_columns_with_type_and_name()[i].column.get(),
-                    read_index_update[idx]);
+                    *update_block.get_by_position(i).column, read_index_update[idx]);
         }
     }
 
@@ -998,7 +1063,6 @@ Status BaseTablet::generate_new_block_for_partial_update(
     RETURN_IF_ERROR(BaseTablet::generate_default_value_block(*rowset_schema, missing_cids,
                                                              partial_update_info->default_values,
                                                              old_block, default_value_block));
-    auto mutable_default_value_columns = default_value_block.mutate_columns();
 
     CHECK(update_rows >= old_rows);
 
@@ -1016,26 +1080,203 @@ Status BaseTablet::generate_new_block_for_partial_update(
             //         before, even the `strict_mode` is true (which requires partial update
             //         load job can't insert new keys), this "new" key MUST be written into
             //         the new generated segment file.
-            if (new_block_delete_signs != nullptr && new_block_delete_signs[idx]) {
+            bool new_row_delete_sign =
+                    (new_block_delete_signs != nullptr && new_block_delete_signs[idx]);
+            if (new_row_delete_sign) {
                 mutable_column->insert_default();
-            } else if (old_block_delete_signs != nullptr &&
-                       old_block_delete_signs[read_index_old[idx]] != 0) {
-                if (rs_column.has_default_value()) {
-                    mutable_column->insert_from(*mutable_default_value_columns[i].get(), 0);
-                } else if (rs_column.is_nullable()) {
-                    assert_cast<vectorized::ColumnNullable*, TypeCheckOnRelease::DISABLE>(
-                            mutable_column.get())
-                            ->insert_null_elements(1);
-                } else {
-                    mutable_column->insert(rs_column.get_vec_type()->get_default());
-                }
             } else {
-                mutable_column->insert_from(
-                        *old_block.get_columns_with_type_and_name()[i].column.get(),
-                        read_index_old[idx]);
+                bool use_default = false;
+                bool old_row_delete_sign = (old_block_delete_signs != nullptr &&
+                                            old_block_delete_signs[read_index_old.at(idx)] != 0);
+                if (old_row_delete_sign) {
+                    if (!rowset_schema->has_sequence_col()) {
+                        use_default = true;
+                    } else if (have_input_seq_column || !rs_column.is_seqeunce_col()) {
+                        // to keep the sequence column value not decreasing, we should read values of seq column
+                        // from old rows even if the old row is deleted when the input don't specify the sequence column, otherwise
+                        // it may cause the merge-on-read based compaction to produce incorrect results
+                        use_default = true;
+                    }
+                }
+
+                if (use_default) {
+                    if (rs_column.has_default_value()) {
+                        mutable_column->insert_from(*default_value_block.get_by_position(i).column,
+                                                    0);
+                    } else if (rs_column.is_nullable()) {
+                        assert_cast<vectorized::ColumnNullable*, TypeCheckOnRelease::DISABLE>(
+                                mutable_column.get())
+                                ->insert_null_elements(1);
+                    } else {
+                        mutable_column->insert(rs_column.get_vec_type()->get_default());
+                    }
+                } else {
+                    mutable_column->insert_from(*old_block.get_by_position(i).column,
+                                                read_index_old[idx]);
+                }
             }
         }
     }
+    output_block->set_columns(std::move(full_mutable_columns));
+    VLOG_DEBUG << "full block when publish: " << output_block->dump_data();
+    return Status::OK();
+}
+
+Status BaseTablet::generate_new_block_for_flexible_partial_update(
+        TabletSchemaSPtr rowset_schema, const PartialUpdateInfo* partial_update_info,
+        std::set<uint32_t>& rids_be_overwritten, const FixedReadPlan& read_plan_ori,
+        const FixedReadPlan& read_plan_update,
+        const std::map<RowsetId, RowsetSharedPtr>& rsid_to_rowset,
+        vectorized::Block* output_block) {
+    CHECK(output_block);
+
+    int32_t seq_col_unique_id = -1;
+    if (rowset_schema->has_sequence_col()) {
+        seq_col_unique_id = rowset_schema->column(rowset_schema->sequence_col_idx()).unique_id();
+    }
+    const auto& non_sort_key_cids = partial_update_info->missing_cids;
+    std::vector<uint32_t> all_cids(rowset_schema->num_columns());
+    std::iota(all_cids.begin(), all_cids.end(), 0);
+    auto old_block = rowset_schema->create_block_by_cids(non_sort_key_cids);
+    auto update_block = rowset_schema->create_block_by_cids(all_cids);
+
+    // rowid in the final block(start from 0, increase continuously) -> rowid to read in update_block
+    std::map<uint32_t, uint32_t> read_index_update;
+
+    // 1. read the current rowset first, if a row in the current rowset has delete sign mark
+    // we don't need to read values from old block for that row
+    RETURN_IF_ERROR(read_plan_update.read_columns_by_plan(*rowset_schema, all_cids, rsid_to_rowset,
+                                                          update_block, &read_index_update, true));
+    size_t update_rows = read_index_update.size();
+
+    // TODO(bobhan1): add the delete sign optimazation here
+    // // if there is sequence column in the table, we need to read the sequence column,
+    // // otherwise it may cause the merge-on-read based compaction policy to produce incorrect results
+    // const auto* __restrict new_block_delete_signs =
+    //         rowset_schema->has_sequence_col()
+    //                 ? nullptr
+    //                 : get_delete_sign_column_data(update_block, update_rows);
+
+    // 2. read previous rowsets
+    // rowid in the final block(start from 0, increase, may not continuous becasue we skip to read some rows) -> rowid to read in old_block
+    std::map<uint32_t, uint32_t> read_index_old;
+    RETURN_IF_ERROR(read_plan_ori.read_columns_by_plan(
+            *rowset_schema, non_sort_key_cids, rsid_to_rowset, old_block, &read_index_old, true));
+    size_t old_rows = read_index_old.size();
+    DCHECK(update_rows == old_rows);
+    const auto* __restrict old_block_delete_signs =
+            get_delete_sign_column_data(old_block, old_rows);
+    DCHECK(old_block_delete_signs != nullptr);
+
+    // 3. build default value block
+    auto default_value_block = old_block.clone_empty();
+    RETURN_IF_ERROR(BaseTablet::generate_default_value_block(*rowset_schema, non_sort_key_cids,
+                                                             partial_update_info->default_values,
+                                                             old_block, default_value_block));
+
+    // 4. build the final block
+    auto full_mutable_columns = output_block->mutate_columns();
+    DCHECK(rowset_schema->has_skip_bitmap_col());
+    auto skip_bitmap_col_idx = rowset_schema->skip_bitmap_col_idx();
+    const std::vector<BitmapValue>* skip_bitmaps =
+            &(assert_cast<const vectorized::ColumnBitmap*, TypeCheckOnRelease::DISABLE>(
+                      update_block.get_by_position(skip_bitmap_col_idx).column->get_ptr().get())
+                      ->get_data());
+
+    if (rowset_schema->has_sequence_col() && !rids_be_overwritten.empty()) {
+        // If the row specifies the sequence column, we should delete the current row becase the
+        // flexible partial update on the current row has been `overwritten` by the previous one with larger sequence
+        // column value.
+        for (auto it = rids_be_overwritten.begin(); it != rids_be_overwritten.end();) {
+            auto rid = *it;
+            if (!skip_bitmaps->at(rid).contains(seq_col_unique_id)) {
+                ++it;
+            } else {
+                it = rids_be_overwritten.erase(it);
+            }
+        }
+    }
+
+    auto fill_one_cell = [&read_index_old, &read_index_update, &rowset_schema, partial_update_info](
+                                 const TabletColumn& tablet_column, std::size_t idx,
+                                 vectorized::MutableColumnPtr& new_col,
+                                 const vectorized::IColumn& default_value_col,
+                                 const vectorized::IColumn& old_value_col,
+                                 const vectorized::IColumn& cur_col, bool skipped,
+                                 bool row_has_sequence_col,
+                                 const signed char* delete_sign_column_data) {
+        if (skipped) {
+            bool use_default = false;
+            bool old_row_delete_sign =
+                    (delete_sign_column_data != nullptr &&
+                     delete_sign_column_data[read_index_old[cast_set<uint32_t>(idx)]] != 0);
+            if (old_row_delete_sign) {
+                if (!rowset_schema->has_sequence_col()) {
+                    use_default = true;
+                } else if (row_has_sequence_col ||
+                           (!tablet_column.is_seqeunce_col() &&
+                            (tablet_column.unique_id() !=
+                             partial_update_info->sequence_map_col_uid()))) {
+                    // to keep the sequence column value not decreasing, we should read values of seq column(and seq map column)
+                    // from old rows even if the old row is deleted when the input don't specify the sequence column, otherwise
+                    // it may cause the merge-on-read based compaction to produce incorrect results
+                    use_default = true;
+                }
+            }
+            if (use_default) {
+                if (tablet_column.has_default_value()) {
+                    new_col->insert_from(default_value_col, 0);
+                } else if (tablet_column.is_nullable()) {
+                    assert_cast<vectorized::ColumnNullable*, TypeCheckOnRelease::DISABLE>(
+                            new_col.get())
+                            ->insert_many_defaults(1);
+                } else if (tablet_column.is_auto_increment()) {
+                    // For auto-increment column, its default value(generated value) is filled in current block in flush phase
+                    // when the load doesn't specify the auto-increment column
+                    //     - if the previous conflicting row is deleted, we should use the value in current block as its final value
+                    //     - if the previous conflicting row is an insert, we should use the value in old block as its final value to
+                    //       keep consistency between replicas
+                    new_col->insert_from(cur_col, read_index_update[cast_set<uint32_t>(idx)]);
+                } else {
+                    new_col->insert_default();
+                }
+            } else {
+                new_col->insert_from(old_value_col, read_index_old[cast_set<uint32_t>(idx)]);
+            }
+        } else {
+            new_col->insert_from(cur_col, read_index_update[cast_set<uint32_t>(idx)]);
+        }
+    };
+
+    for (std::size_t cid {0}; cid < rowset_schema->num_columns(); cid++) {
+        vectorized::MutableColumnPtr& new_col = full_mutable_columns[cid];
+        const vectorized::IColumn& cur_col = *update_block.get_by_position(cid).column;
+        const auto& rs_column = rowset_schema->column(cid);
+        auto col_uid = rs_column.unique_id();
+        for (auto idx = 0; idx < update_rows; ++idx) {
+            if (cid < rowset_schema->num_key_columns()) {
+                new_col->insert_from(cur_col, read_index_update[idx]);
+            } else {
+                const vectorized::IColumn& default_value_col =
+                        *default_value_block.get_by_position(cid - rowset_schema->num_key_columns())
+                                 .column;
+                const vectorized::IColumn& old_value_col =
+                        *old_block.get_by_position(cid - rowset_schema->num_key_columns()).column;
+                if (rids_be_overwritten.contains(idx)) {
+                    new_col->insert_from(old_value_col, read_index_old[idx]);
+                } else {
+                    fill_one_cell(rs_column, idx, new_col, default_value_col, old_value_col,
+                                  cur_col, skip_bitmaps->at(idx).contains(col_uid),
+                                  rowset_schema->has_sequence_col()
+                                          ? !skip_bitmaps->at(idx).contains(seq_col_unique_id)
+                                          : false,
+                                  old_block_delete_signs);
+                }
+            }
+        }
+        DCHECK_EQ(full_mutable_columns[cid]->size(), update_rows);
+    }
+
     output_block->set_columns(std::move(full_mutable_columns));
     VLOG_DEBUG << "full block when publish: " << output_block->dump_data();
     return Status::OK();
@@ -1196,7 +1437,7 @@ Status BaseTablet::update_delete_bitmap(const BaseTabletSPtr& self, TabletTxnInf
     std::unique_ptr<RowsetWriter> transient_rs_writer;
     DeleteBitmapPtr delete_bitmap = txn_info->delete_bitmap;
     bool is_partial_update =
-            txn_info->partial_update_info && txn_info->partial_update_info->is_partial_update;
+            txn_info->partial_update_info && txn_info->partial_update_info->is_partial_update();
     if (is_partial_update) {
         transient_rs_writer = DORIS_TRY(self->create_transient_rowset_writer(
                 *rowset, txn_info->partial_update_info, txn_expiration));
@@ -1270,6 +1511,8 @@ Status BaseTablet::update_delete_bitmap(const BaseTabletSPtr& self, TabletTxnInf
                     "BaseTablet::update_delete_bitmap.block");
             if (block_dp) {
                 auto wait_token = block_dp->param<std::string>("wait_token", "");
+                LOG(INFO) << "BaseTablet::update_delete_bitmap.enable_spin_wait, wait_token: "
+                          << wait_token << ", token: " << token;
                 if (wait_token != token) {
                     break;
                 }
@@ -1332,7 +1575,8 @@ Status BaseTablet::update_delete_bitmap(const BaseTabletSPtr& self, TabletTxnInf
         auto old_segments = rowset->num_segments();
         rowset->merge_rowset_meta(*transient_rowset->rowset_meta());
         auto new_segments = rowset->num_segments();
-        ss << ", partial update flush rowset (old segment num: " << old_segments
+        ss << ", " << txn_info->partial_update_info->partial_update_mode_str()
+           << " flush rowset (old segment num: " << old_segments
            << ", new segment num: " << new_segments << ")"
            << ", cost:" << watch.get_elapse_time_us() - t4 << "(us)";
 
@@ -1543,6 +1787,161 @@ Status BaseTablet::update_delete_bitmap_without_lock(
     return Status::OK();
 }
 
+void BaseTablet::agg_delete_bitmap_for_stale_rowsets(
+        Version version, DeleteBitmapKeyRanges& remove_delete_bitmap_key_ranges) {
+    if (!config::enable_agg_and_remove_pre_rowsets_delete_bitmap) {
+        return;
+    }
+    if (!(keys_type() == UNIQUE_KEYS && enable_unique_key_merge_on_write())) {
+        return;
+    }
+    int64_t start_version = version.first;
+    int64_t end_version = version.second;
+    if (start_version == end_version) {
+        return;
+    }
+    DCHECK(start_version < end_version)
+            << ". start_version: " << start_version << ", end_version: " << end_version;
+    // get pre rowsets
+    std::vector<RowsetSharedPtr> pre_rowsets {};
+    {
+        std::shared_lock rdlock(_meta_lock);
+        for (const auto& it2 : _rs_version_map) {
+            if (it2.first.second < start_version) {
+                pre_rowsets.emplace_back(it2.second);
+            }
+        }
+    }
+    std::sort(pre_rowsets.begin(), pre_rowsets.end(), Rowset::comparator);
+    // do agg for pre rowsets
+    DeleteBitmapPtr new_delete_bitmap = std::make_shared<DeleteBitmap>(tablet_id());
+    for (auto& rowset : pre_rowsets) {
+        for (uint32_t seg_id = 0; seg_id < rowset->num_segments(); ++seg_id) {
+            auto d = tablet_meta()->delete_bitmap()->get_agg_without_cache(
+                    {rowset->rowset_id(), seg_id, end_version}, start_version);
+            if (d->isEmpty()) {
+                continue;
+            }
+            VLOG_DEBUG << "agg delete bitmap for tablet_id=" << tablet_id()
+                       << ", rowset_id=" << rowset->rowset_id() << ", seg_id=" << seg_id
+                       << ", rowset_version=" << rowset->version().to_string()
+                       << ". compaction start_version=" << start_version
+                       << ", end_version=" << end_version << ", delete_bitmap=" << d->cardinality();
+            DeleteBitmap::BitmapKey start_key {rowset->rowset_id(), seg_id, start_version};
+            DeleteBitmap::BitmapKey end_key {rowset->rowset_id(), seg_id, end_version};
+            new_delete_bitmap->set(end_key, *d);
+            remove_delete_bitmap_key_ranges.emplace_back(start_key, end_key);
+        }
+    }
+    tablet_meta()->delete_bitmap()->merge(*new_delete_bitmap);
+}
+
+void BaseTablet::check_agg_delete_bitmap_for_stale_rowsets(int64_t& useless_rowset_count,
+                                                           int64_t& useless_rowset_version_count) {
+    std::map<RowsetId, Version> rowset_ids;
+    std::set<int64_t> end_versions;
+    traverse_rowsets(
+            [&rowset_ids, &end_versions](const RowsetSharedPtr& rs) {
+                rowset_ids[rs->rowset_id()] = rs->version();
+                end_versions.emplace(rs->end_version());
+            },
+            true);
+
+    std::set<RowsetId> useless_rowsets;
+    std::map<RowsetId, std::vector<int64_t>> useless_rowset_versions;
+    {
+        _tablet_meta->delete_bitmap()->traverse_rowset_and_version(
+                // 0: rowset and rowset with version exists
+                // -1: rowset does not exist
+                // -2: find next <rowset, version>
+                //     rowset exist, rowset with version does not exist
+                //     sequence table
+                [&](const RowsetId& rowset_id, int64_t version) {
+                    auto rowset_it = rowset_ids.find(rowset_id);
+                    if (rowset_it == rowset_ids.end()) {
+                        useless_rowsets.emplace(rowset_id);
+                        return -1;
+                    }
+                    if (end_versions.find(version) == end_versions.end()) {
+                        if (tablet_schema()->has_sequence_col()) {
+                            auto rowset_version = rowset_it->second;
+                            if (version >= rowset_version.first &&
+                                version <= rowset_version.second) {
+                                return -2;
+                            }
+                        }
+                        if (useless_rowset_versions.find(rowset_id) ==
+                            useless_rowset_versions.end()) {
+                            useless_rowset_versions[rowset_id] = {};
+                        }
+                        useless_rowset_versions[rowset_id].emplace_back(version);
+                        return -2;
+                    }
+                    return 0;
+                });
+    }
+    useless_rowset_count = useless_rowsets.size();
+    useless_rowset_version_count = useless_rowset_versions.size();
+    if (!useless_rowsets.empty() || !useless_rowset_versions.empty()) {
+        std::stringstream ss;
+        if (!useless_rowsets.empty()) {
+            ss << "useless rowsets: {";
+            for (auto it = useless_rowsets.begin(); it != useless_rowsets.end(); ++it) {
+                if (it != useless_rowsets.begin()) {
+                    ss << ", ";
+                }
+                ss << it->to_string();
+            }
+            ss << "}. ";
+        }
+        if (!useless_rowset_versions.empty()) {
+            ss << "useless rowset versions: {";
+            for (auto iter = useless_rowset_versions.begin(); iter != useless_rowset_versions.end();
+                 ++iter) {
+                if (iter != useless_rowset_versions.begin()) {
+                    ss << ", ";
+                }
+                ss << iter->first.to_string() << ": [";
+                // some versions are continuous, such as [8, 9, 10, 11, 13, 17, 18]
+                // print as [8-11, 13, 17-18]
+                int64_t last_start_version = -1;
+                int64_t last_end_version = -1;
+                for (int64_t version : iter->second) {
+                    if (last_start_version == -1) {
+                        last_start_version = version;
+                        last_end_version = version;
+                        continue;
+                    }
+                    if (last_end_version + 1 == version) {
+                        last_end_version = version;
+                    } else {
+                        if (last_start_version == last_end_version) {
+                            ss << last_start_version << ", ";
+                        } else {
+                            ss << last_start_version << "-" << last_end_version << ", ";
+                        }
+                        last_start_version = version;
+                        last_end_version = version;
+                    }
+                }
+                if (last_start_version == last_end_version) {
+                    ss << last_start_version;
+                } else {
+                    ss << last_start_version << "-" << last_end_version;
+                }
+
+                ss << "]";
+            }
+            ss << "}.";
+        }
+        LOG(WARNING) << "failed check_agg_delete_bitmap_for_stale_rowsets for tablet_id="
+                     << tablet_id() << ". " << ss.str();
+    } else {
+        LOG(INFO) << "succeed check_agg_delete_bitmap_for_stale_rowsets for tablet_id="
+                  << tablet_id();
+    }
+}
+
 RowsetSharedPtr BaseTablet::get_rowset(const RowsetId& rowset_id) {
     std::shared_lock rdlock(_meta_lock);
     for (auto& version_rowset : _rs_version_map) {
@@ -1725,6 +2124,42 @@ int32_t BaseTablet::max_version_config() {
                                              config::max_tablet_version_num)
                                   : config::max_tablet_version_num;
     return max_version;
+}
+
+TabletSchemaSPtr BaseTablet::calculate_variant_extended_schema() const {
+    std::vector<RowsetSharedPtr> rowsets;
+    {
+        std::shared_lock rdlock(_meta_lock);
+        for (const auto& it : _rs_version_map) {
+            rowsets.emplace_back(it.second);
+        }
+    }
+    return vectorized::schema_util::calculate_variant_extended_schema(rowsets, _max_version_schema);
+}
+
+void BaseTablet::prefill_dbm_agg_cache(const RowsetSharedPtr& rowset, int64_t version) {
+    for (std::size_t i = 0; i < rowset->num_segments(); i++) {
+        tablet_meta()->delete_bitmap()->get_agg({rowset->rowset_id(), i, version});
+    }
+}
+
+void BaseTablet::prefill_dbm_agg_cache_after_compaction(const RowsetSharedPtr& output_rowset) {
+    if (keys_type() == KeysType::UNIQUE_KEYS && enable_unique_key_merge_on_write() &&
+        (config::enable_prefill_output_dbm_agg_cache_after_compaction ||
+         config::enable_prefill_all_dbm_agg_cache_after_compaction)) {
+        int64_t cur_max_version {-1};
+        {
+            std::shared_lock rlock(get_header_lock());
+            cur_max_version = max_version_unlocked();
+        }
+        if (config::enable_prefill_all_dbm_agg_cache_after_compaction) {
+            traverse_rowsets(
+                    [&](const RowsetSharedPtr& rs) { prefill_dbm_agg_cache(rs, cur_max_version); },
+                    false);
+        } else if (config::enable_prefill_output_dbm_agg_cache_after_compaction) {
+            prefill_dbm_agg_cache(output_rowset, cur_max_version);
+        }
+    }
 }
 
 } // namespace doris

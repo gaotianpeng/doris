@@ -23,6 +23,7 @@ import org.apache.doris.analysis.OutFileClause;
 import org.apache.doris.analysis.Separator;
 import org.apache.doris.analysis.StmtType;
 import org.apache.doris.analysis.StorageBackend;
+import org.apache.doris.analysis.StorageBackend.StorageType;
 import org.apache.doris.analysis.TableName;
 import org.apache.doris.catalog.BrokerMgr;
 import org.apache.doris.catalog.DatabaseIf;
@@ -60,6 +61,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * EXPORT statement, export data to dirs by broker.
@@ -70,7 +72,7 @@ import java.util.UUID;
  *          [PROPERTIES("key"="value")]
  *          WITH BROKER 'broker_name' [( $broker_attrs)]
  */
-public class ExportCommand extends Command implements ForwardWithSync {
+public class ExportCommand extends Command implements NeedAuditEncryption, ForwardWithSync {
     public static final String PARALLELISM = "parallelism";
     public static final String LABEL = "label";
     public static final String DATA_CONSISTENCY = "data_consistency";
@@ -184,6 +186,10 @@ public class ExportCommand extends Command implements ForwardWithSync {
 
         DatabaseIf db = catalog.getDbOrAnalysisException(tblName.getDb());
         Table table = (Table) db.getTableOrAnalysisException(tblName.getTbl());
+        if (table.isTemporary()) {
+            throw new AnalysisException("Table[" + tblName.getTbl() + "] is "
+                + "temporary table, do not support EXPORT.");
+        }
 
         if (this.partitionsNames.size() > Config.maximum_number_of_export_partitions) {
             throw new AnalysisException("The partitions number of this export job is larger than the maximum number"
@@ -198,10 +204,13 @@ public class ExportCommand extends Command implements ForwardWithSync {
                 case ODBC:
                 case JDBC:
                 case OLAP:
+                    if (table.isTemporary()) {
+                        throw new AnalysisException("Do not support exporting temporary partitions");
+                    }
                     break;
                 case VIEW: // We support export view, so we do not need to check partition here.
                     if (this.partitionsNames.size() > 0) {
-                        throw new AnalysisException("Table[" + tblName.getTbl() + "] is VIEW type, "
+                        throw new AnalysisException("Table[" + tblName.getTbl() + "] is " + tblType + " type, "
                                 + "do not support export PARTITION.");
                     }
                     return;
@@ -250,6 +259,9 @@ public class ExportCommand extends Command implements ForwardWithSync {
         CatalogIf catalog = ctx.getEnv().getCatalogMgr().getCatalogOrAnalysisException(tblName.getCtl());
         DatabaseIf db = catalog.getDbOrAnalysisException(tblName.getDb());
         TableIf table = db.getTableOrAnalysisException(tblName.getTbl());
+        if (table.isTemporary()) {
+            throw new AnalysisException("Table[" + tblName.getTbl() + "] is temporary table, do not support export.");
+        }
 
         exportJob.setDbId(db.getId());
         exportJob.setTableName(tblName);
@@ -295,9 +307,6 @@ public class ExportCommand extends Command implements ForwardWithSync {
 
         // set max_file_size
         exportJob.setMaxFileSize(fileProperties.getOrDefault(OutFileClause.PROP_MAX_FILE_SIZE, ""));
-        // set delete_existing_files
-        exportJob.setDeleteExistingFiles(fileProperties.getOrDefault(
-                OutFileClause.PROP_DELETE_EXISTING_FILES, ""));
 
         // null means not specified
         // "" means user specified zero columns
@@ -311,6 +320,23 @@ public class ExportCommand extends Command implements ForwardWithSync {
 
         // set broker desc
         exportJob.setBrokerDesc(this.brokerDesc.get());
+
+        // set delete_existing_files
+        exportJob.setDeleteExistingFiles(fileProperties.getOrDefault(
+                OutFileClause.PROP_DELETE_EXISTING_FILES, ""));
+
+        if (!Config.enable_delete_existing_files && exportJob.getDeleteExistingFiles().equalsIgnoreCase("true")) {
+            throw new AnalysisException(("Deleting existing files is not allowed."
+                    + " To enable this feature, you need to add `enable_delete_existing_files=true`"
+                    + " in fe.conf"));
+        }
+
+        if (exportJob.getDeleteExistingFiles().equalsIgnoreCase("true")
+                && (exportJob.getBrokerDesc() == null
+                || exportJob.getBrokerDesc().storageType() == StorageType.LOCAL)) {
+            throw new org.apache.doris.common.AnalysisException(
+                    "Local file system does not support delete existing files");
+        }
 
         // set sessions
         exportJob.setQualifiedUser(ctx.getQualifiedUser());
@@ -380,4 +406,22 @@ public class ExportCommand extends Command implements ForwardWithSync {
     public StmtType stmtType() {
         return StmtType.EXPORT;
     }
+
+    @Override
+    public boolean needAuditEncryption() {
+        return true;
+    }
+
+    @Override
+    public String toDigest() {
+        StringBuilder sb = new StringBuilder("EXPORT TABLE ");
+        sb.append(nameParts.stream().collect(Collectors.joining(".")));
+        if (expr.isPresent()) {
+            sb.append(" WHERE ")
+                    .append(expr.get().toDigest());
+        }
+        sb.append(" TO ?");
+        return sb.toString();
+    }
 }
+

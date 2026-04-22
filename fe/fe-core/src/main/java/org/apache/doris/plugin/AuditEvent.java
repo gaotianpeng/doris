@@ -98,13 +98,42 @@ public class AuditEvent {
     public long shuffleSendRows = -1;
     @AuditField(value = "ShuffleSendBytes", colName = "shuffle_send_bytes")
     public long shuffleSendBytes = -1;
+    @AuditField(value = "SpillWriteBytesToLocalStorage", colName = "spill_write_bytes_from_local_storage")
+    public long spillWriteBytesToLocalStorage = -1;
+    @AuditField(value = "SpillReadBytesFromLocalStorage", colName = "spill_read_bytes_from_local_storage")
+    public long spillReadBytesFromLocalStorage = -1;
     @AuditField(value = "ScanBytesFromLocalStorage", colName = "scan_bytes_from_local_storage")
     public long scanBytesFromLocalStorage = -1;
     @AuditField(value = "ScanBytesFromRemoteStorage", colName = "scan_bytes_from_remote_storage")
     public long scanBytesFromRemoteStorage = -1;
 
+    // plan info
+    @AuditField(value = "ParseTimeMs", colName = "parse_time_ms")
+    public int parseTimeMs = -1;
+    @AuditField(value = "PlanTimesMs", colName = "plan_times_ms")
+    public String planTimesMs = "";
+    @AuditField(value = "GetMetaTimesMs", colName = "get_meta_times_ms")
+    public String getMetaTimesMs = "";
+    @AuditField(value = "ScheduleTimesMs", colName = "schedule_times_ms")
+    public String scheduleTimesMs = "";
+    @AuditField(value = "HitSqlCache", colName = "hit_sql_cache")
+    public boolean hitSqlCache = false;
+    @AuditField(value = "isHandledInFe", colName = "handled_in_fe")
+    public boolean isHandledInFe = false;
+
+    // table, view, m-view
+    @AuditField(value = "queriedTablesAndViews", colName = "queried_tables_and_views")
+    public String queriedTablesAndViews = "";
+    @AuditField(value = "chosenMViews", colName = "chosen_m_views")
+    public String chosenMViews = "";
+
+    // variable and configs
+    @AuditField(value = "ChangedVariables", colName = "changed_variables")
+    public String changedVariables = "";
     @AuditField(value = "FuzzyVariables")
     public String fuzzyVariables = "";
+    @AuditField(value = "SqlMode", colName = "sql_mode")
+    public String sqlMode = "";
 
     // type and digest
     @AuditField(value = "CommandType")
@@ -121,6 +150,8 @@ public class AuditEvent {
     public boolean isQuery = false;
     @AuditField(value = "IsNereids", colName = "is_nereids")
     public boolean isNereids = false;
+    @AuditField(value = "IsInternal", colName = "is_internal")
+    public boolean isInternal = false;
 
     // resource
     @AuditField(value = "WorkloadGroup", colName = "workload_group")
@@ -245,6 +276,11 @@ public class AuditEvent {
             return this;
         }
 
+        public AuditEventBuilder setisInternal(boolean isInternal) {
+            auditEvent.isInternal = isInternal;
+            return this;
+        }
+
         public AuditEventBuilder setFeIp(String feIp) {
             auditEvent.feIp = feIp;
             return this;
@@ -292,6 +328,56 @@ public class AuditEvent {
 
         public AuditEventBuilder setCommandType(String commandType) {
             auditEvent.commandType = commandType;
+            return this;
+        }
+
+        public AuditEventBuilder setParseTimeMs(int parseTimeMs) {
+            auditEvent.parseTimeMs = parseTimeMs;
+            return this;
+        }
+
+        public AuditEventBuilder setPlanTimesMs(String planTimesMs) {
+            auditEvent.planTimesMs = planTimesMs;
+            return this;
+        }
+
+        public AuditEventBuilder setGetMetaTimeMs(String getMetaTimeMs) {
+            auditEvent.getMetaTimesMs = getMetaTimeMs;
+            return this;
+        }
+
+        public AuditEventBuilder setScheduleTimeMs(String scheduleTimeMs) {
+            auditEvent.scheduleTimesMs = scheduleTimeMs;
+            return this;
+        }
+
+        public AuditEventBuilder setHitSqlCache(boolean hitSqlCache) {
+            auditEvent.hitSqlCache = hitSqlCache;
+            return this;
+        }
+
+        public AuditEventBuilder setHandledInFe(boolean handledInFe) {
+            auditEvent.isHandledInFe = handledInFe;
+            return this;
+        }
+
+        public AuditEventBuilder setChangedVariables(String changedVariables) {
+            auditEvent.changedVariables = changedVariables;
+            return this;
+        }
+
+        public AuditEventBuilder setSqlMode(String sqlMode) {
+            auditEvent.sqlMode = sqlMode;
+            return this;
+        }
+
+        public AuditEventBuilder setQueriedTablesAndViews(String queriedTablesAndViews) {
+            auditEvent.queriedTablesAndViews = queriedTablesAndViews;
+            return this;
+        }
+
+        public AuditEventBuilder setChosenMViews(String chosenMViews) {
+            auditEvent.chosenMViews = chosenMViews;
             return this;
         }
 

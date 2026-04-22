@@ -49,11 +49,13 @@ public class AdminSetConfigStmt extends DdlStmt implements NotFallbackInParser {
         }
         this.applyToAll = applyToAll;
 
-        // we have to analyze configs here to determine whether to forward it to master
-        for (String key : this.configs.keySet()) {
-            if (ConfigBase.checkIsMasterOnly(key)) {
-                redirectStatus = RedirectStatus.FORWARD_NO_SYNC;
-                this.applyToAll = false;
+        if (!this.applyToAll) {
+            // we have to analyze configs here to determine whether to forward it to master
+            for (String key : this.configs.keySet()) {
+                if (ConfigBase.checkIsMasterOnly(key)) {
+                    redirectStatus = RedirectStatus.FORWARD_NO_SYNC;
+                    break;
+                }
             }
         }
     }
@@ -95,7 +97,7 @@ public class AdminSetConfigStmt extends DdlStmt implements NotFallbackInParser {
     public OriginStatement getLocalSetStmt() {
         OriginStatement stmt = this.getOrigStmt();
         Object[] keyArr = configs.keySet().toArray();
-        String sql = String.format("ADMIN SET FRONTEND CONFIG (\"%s\" = \"%s\");",
+        String sql = String.format("ADMIN SET %s CONFIG (\"%s\" = \"%s\");", applyToAll ? "ALL FRONTENDS" : "FRONTEND",
                 keyArr[0].toString(), configs.get(keyArr[0].toString()));
 
         return new OriginStatement(sql, stmt.idx);

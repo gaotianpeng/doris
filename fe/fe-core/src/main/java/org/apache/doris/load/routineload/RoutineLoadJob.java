@@ -48,6 +48,9 @@ import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
 import org.apache.doris.common.util.SqlParserUtils;
 import org.apache.doris.common.util.TimeUtils;
+import org.apache.doris.datasource.property.fileformat.CsvFileFormatProperties;
+import org.apache.doris.datasource.property.fileformat.FileFormatProperties;
+import org.apache.doris.datasource.property.fileformat.JsonFileFormatProperties;
 import org.apache.doris.load.RoutineLoadDesc;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.load.routineload.kafka.KafkaConfiguration;
@@ -64,8 +67,10 @@ import org.apache.doris.qe.SqlModeHelper;
 import org.apache.doris.task.LoadTaskInfo;
 import org.apache.doris.thrift.TFileFormatType;
 import org.apache.doris.thrift.TFileType;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 import org.apache.doris.thrift.TPipelineFragmentParams;
 import org.apache.doris.thrift.TUniqueId;
+import org.apache.doris.thrift.TUniqueKeyUpdateMode;
 import org.apache.doris.transaction.AbstractTxnStateChangeCallback;
 import org.apache.doris.transaction.TransactionException;
 import org.apache.doris.transaction.TransactionState;
@@ -219,25 +224,12 @@ public abstract class RoutineLoadJob
     @SerializedName("mbsb")
     protected long maxBatchSizeBytes = DEFAULT_MAX_BATCH_SIZE;
 
-    protected boolean isPartialUpdate = false;
+    protected TUniqueKeyUpdateMode uniquekeyUpdateMode = TUniqueKeyUpdateMode.UPSERT;
+    protected TPartialUpdateNewRowPolicy partialUpdateNewKeyPolicy = TPartialUpdateNewRowPolicy.APPEND;
 
     protected String sequenceCol;
 
     protected boolean memtableOnSinkNode = false;
-
-    /**
-     * RoutineLoad support json data.
-     * Require Params:
-     * 1) format = "json"
-     * 2) jsonPath = "$.XXX.xxx"
-     */
-    private static final String PROPS_FORMAT = "format";
-    private static final String PROPS_STRIP_OUTER_ARRAY = "strip_outer_array";
-    private static final String PROPS_NUM_AS_STRING = "num_as_string";
-    private static final String PROPS_JSONPATHS = "jsonpaths";
-    private static final String PROPS_JSONROOT = "json_root";
-    private static final String PROPS_FUZZY_PARSE = "fuzzy_parse";
-
 
     protected int currentTaskConcurrentNum;
     @SerializedName("pg")
@@ -292,6 +284,8 @@ public abstract class RoutineLoadJob
     protected byte escape = 0;
 
     // use for cloud cluster mode
+    protected String qualifiedUser;
+    @SerializedName("ccn")
     protected String cloudCluster;
 
     public void setTypeRead(boolean isTypeRead) {
@@ -303,6 +297,13 @@ public abstract class RoutineLoadJob
         this.dataSourceType = type;
         if (ConnectContext.get() != null) {
             this.memtableOnSinkNode = ConnectContext.get().getSessionVariable().enableMemtableOnSinkNode;
+            if (Config.isCloudMode()) {
+                try {
+                    this.cloudCluster = ConnectContext.get().getCloudCluster();
+                } catch (ComputeGroupException e) {
+                    LOG.warn("failed to get cloud cluster", e);
+                }
+            }
         }
     }
 
@@ -320,6 +321,13 @@ public abstract class RoutineLoadJob
             SessionVariable var = ConnectContext.get().getSessionVariable();
             sessionVariables.put(SessionVariable.SQL_MODE, Long.toString(var.getSqlMode()));
             this.memtableOnSinkNode = ConnectContext.get().getSessionVariable().enableMemtableOnSinkNode;
+            if (Config.isCloudMode()) {
+                try {
+                    this.cloudCluster = ConnectContext.get().getCloudCluster();
+                } catch (ComputeGroupException e) {
+                    LOG.warn("failed to get cloud cluster", e);
+                }
+            }
         } else {
             sessionVariables.put(SessionVariable.SQL_MODE, String.valueOf(SqlModeHelper.MODE_DEFAULT));
         }
@@ -388,50 +396,36 @@ public abstract class RoutineLoadJob
         jobProperties.put(LoadStmt.LOAD_TO_SINGLE_TABLET, String.valueOf(this.loadToSingleTablet));
         jobProperties.put(CreateRoutineLoadStmt.PARTIAL_COLUMNS, stmt.isPartialUpdate() ? "true" : "false");
         if (stmt.isPartialUpdate()) {
-            this.isPartialUpdate = true;
+            this.uniquekeyUpdateMode = TUniqueKeyUpdateMode.UPDATE_FIXED_COLUMNS;
+            this.partialUpdateNewKeyPolicy = stmt.getPartialUpdateNewKeyPolicy();
+            jobProperties.put(CreateRoutineLoadStmt.PARTIAL_UPDATE_NEW_KEY_POLICY,
+                    this.partialUpdateNewKeyPolicy == TPartialUpdateNewRowPolicy.ERROR ? "ERROR" : "APPEND");
         }
         jobProperties.put(CreateRoutineLoadStmt.MAX_FILTER_RATIO_PROPERTY, String.valueOf(maxFilterRatio));
-        if (Strings.isNullOrEmpty(stmt.getFormat()) || stmt.getFormat().equals("csv")) {
-            jobProperties.put(PROPS_FORMAT, "csv");
-        } else if (stmt.getFormat().equals("json")) {
-            jobProperties.put(PROPS_FORMAT, "json");
+
+        FileFormatProperties fileFormatProperties = stmt.getFileFormatProperties();
+        if (fileFormatProperties instanceof CsvFileFormatProperties) {
+            CsvFileFormatProperties csvFileFormatProperties = (CsvFileFormatProperties) fileFormatProperties;
+            jobProperties.put(FileFormatProperties.PROP_FORMAT, "csv");
+            jobProperties.put(LoadStmt.KEY_ENCLOSE, new String(new byte[]{csvFileFormatProperties.getEnclose()}));
+            jobProperties.put(LoadStmt.KEY_ESCAPE, new String(new byte[]{csvFileFormatProperties.getEscape()}));
+            this.enclose = csvFileFormatProperties.getEnclose();
+            this.escape = csvFileFormatProperties.getEscape();
+        } else if (fileFormatProperties instanceof JsonFileFormatProperties) {
+            JsonFileFormatProperties jsonFileFormatProperties = (JsonFileFormatProperties) fileFormatProperties;
+            jobProperties.put(FileFormatProperties.PROP_FORMAT, "json");
+            jobProperties.put(JsonFileFormatProperties.PROP_JSON_PATHS, jsonFileFormatProperties.getJsonPaths());
+            jobProperties.put(JsonFileFormatProperties.PROP_JSON_ROOT, jsonFileFormatProperties.getJsonRoot());
+            jobProperties.put(JsonFileFormatProperties.PROP_STRIP_OUTER_ARRAY,
+                    String.valueOf(jsonFileFormatProperties.isStripOuterArray()));
+            jobProperties.put(JsonFileFormatProperties.PROP_NUM_AS_STRING,
+                    String.valueOf(jsonFileFormatProperties.isNumAsString()));
+            jobProperties.put(JsonFileFormatProperties.PROP_FUZZY_PARSE,
+                    String.valueOf(jsonFileFormatProperties.isFuzzyParse()));
         } else {
             throw new UserException("Invalid format type.");
         }
 
-        if (!Strings.isNullOrEmpty(stmt.getJsonPaths())) {
-            jobProperties.put(PROPS_JSONPATHS, stmt.getJsonPaths());
-        } else {
-            jobProperties.put(PROPS_JSONPATHS, "");
-        }
-        if (!Strings.isNullOrEmpty(stmt.getJsonRoot())) {
-            jobProperties.put(PROPS_JSONROOT, stmt.getJsonRoot());
-        } else {
-            jobProperties.put(PROPS_JSONROOT, "");
-        }
-        if (stmt.isStripOuterArray()) {
-            jobProperties.put(PROPS_STRIP_OUTER_ARRAY, "true");
-        } else {
-            jobProperties.put(PROPS_STRIP_OUTER_ARRAY, "false");
-        }
-        if (stmt.isNumAsString()) {
-            jobProperties.put(PROPS_NUM_AS_STRING, "true");
-        } else {
-            jobProperties.put(PROPS_NUM_AS_STRING, "false");
-        }
-        if (stmt.isFuzzyParse()) {
-            jobProperties.put(PROPS_FUZZY_PARSE, "true");
-        } else {
-            jobProperties.put(PROPS_FUZZY_PARSE, "false");
-        }
-        if (String.valueOf(stmt.getEnclose()) != null) {
-            this.enclose = stmt.getEnclose();
-            jobProperties.put(LoadStmt.KEY_ENCLOSE, String.valueOf(stmt.getEnclose()));
-        }
-        if (String.valueOf(stmt.getEscape()) != null) {
-            this.escape = stmt.getEscape();
-            jobProperties.put(LoadStmt.KEY_ESCAPE, String.valueOf(stmt.getEscape()));
-        }
         if (stmt.getWorkloadGroupId() > 0) {
             jobProperties.put(WORKLOAD_GROUP, String.valueOf(stmt.getWorkloadGroupId()));
         }
@@ -683,7 +677,7 @@ public abstract class RoutineLoadJob
     }
 
     public String getFormat() {
-        String value = jobProperties.get(PROPS_FORMAT);
+        String value = jobProperties.get(FileFormatProperties.PROP_FORMAT);
         if (value == null) {
             return "csv";
         }
@@ -692,17 +686,17 @@ public abstract class RoutineLoadJob
 
     @Override
     public boolean isStripOuterArray() {
-        return Boolean.parseBoolean(jobProperties.get(PROPS_STRIP_OUTER_ARRAY));
+        return Boolean.parseBoolean(jobProperties.get(JsonFileFormatProperties.PROP_STRIP_OUTER_ARRAY));
     }
 
     @Override
     public boolean isNumAsString() {
-        return Boolean.parseBoolean(jobProperties.get(PROPS_NUM_AS_STRING));
+        return Boolean.parseBoolean(jobProperties.get(JsonFileFormatProperties.PROP_NUM_AS_STRING));
     }
 
     @Override
     public boolean isFuzzyParse() {
-        return Boolean.parseBoolean(jobProperties.get(PROPS_FUZZY_PARSE));
+        return Boolean.parseBoolean(jobProperties.get(JsonFileFormatProperties.PROP_FUZZY_PARSE));
     }
 
     @Override
@@ -737,8 +731,23 @@ public abstract class RoutineLoadJob
     }
 
     @Override
-    public boolean isPartialUpdate() {
-        return isPartialUpdate;
+    public boolean isFixedPartialUpdate() {
+        return uniquekeyUpdateMode == TUniqueKeyUpdateMode.UPDATE_FIXED_COLUMNS;
+    }
+
+    @Override
+    public TUniqueKeyUpdateMode getUniqueKeyUpdateMode() {
+        return uniquekeyUpdateMode;
+    }
+
+    @Override
+    public boolean isFlexiblePartialUpdate() {
+        return uniquekeyUpdateMode == TUniqueKeyUpdateMode.UPDATE_FLEXIBLE_COLUMNS;
+    }
+
+    @Override
+    public TPartialUpdateNewRowPolicy getPartialUpdateNewRowPolicy() {
+        return partialUpdateNewKeyPolicy;
     }
 
     @Override
@@ -750,7 +759,7 @@ public abstract class RoutineLoadJob
     }
 
     public String getJsonPaths() {
-        String value = jobProperties.get(PROPS_JSONPATHS);
+        String value = jobProperties.get(JsonFileFormatProperties.PROP_JSON_PATHS);
         if (value == null) {
             return "";
         }
@@ -758,7 +767,7 @@ public abstract class RoutineLoadJob
     }
 
     public String getJsonRoot() {
-        String value = jobProperties.get(PROPS_JSONROOT);
+        String value = jobProperties.get(JsonFileFormatProperties.PROP_JSON_ROOT);
         if (value == null) {
             return "";
         }
@@ -816,7 +825,7 @@ public abstract class RoutineLoadJob
                     // and after renew, the previous task is removed from routineLoadTaskInfoList,
                     // so task can no longer be committed successfully.
                     // the already committed task will not be handled here.
-                    RoutineLoadTaskInfo newTask = unprotectRenewTask(routineLoadTaskInfo);
+                    RoutineLoadTaskInfo newTask = unprotectRenewTask(routineLoadTaskInfo, false);
                     Env.getCurrentEnv().getRoutineLoadTaskScheduler().addTaskInQueue(newTask);
                 }
             }
@@ -996,7 +1005,7 @@ public abstract class RoutineLoadJob
         return 0L;
     }
 
-    abstract RoutineLoadTaskInfo unprotectRenewTask(RoutineLoadTaskInfo routineLoadTaskInfo);
+    abstract RoutineLoadTaskInfo unprotectRenewTask(RoutineLoadTaskInfo routineLoadTaskInfo, boolean delaySchedule);
 
     // call before first scheduling
     // derived class can override this.
@@ -1010,21 +1019,13 @@ public abstract class RoutineLoadJob
         table.readLock();
         try {
             if (Config.isCloudMode()) {
-                String clusterName = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
-                        .getClusterNameByClusterId(cloudClusterId);
-                if (Strings.isNullOrEmpty(clusterName)) {
-                    String err = String.format("cluster name is empty, cluster id is %s", cloudClusterId);
-                    LOG.warn(err);
-                    throw new UserException(err);
-                }
-
                 if (ConnectContext.get() == null) {
                     ConnectContext ctx = new ConnectContext();
                     ctx.setThreadLocalInfo();
-                    ctx.setCloudCluster(clusterName);
+                    ctx.setCloudCluster(cloudCluster);
                     needCleanCtx = true;
                 } else {
-                    ConnectContext.get().setCloudCluster(clusterName);
+                    ConnectContext.get().setCloudCluster(cloudCluster);
                 }
             }
 
@@ -1035,7 +1036,7 @@ public abstract class RoutineLoadJob
                 throw new UserException("txn does not exist: " + txnId);
             }
             txnState.addTableIndexes(planner.getDestTable());
-            if (isPartialUpdate) {
+            if (isFixedPartialUpdate()) {
                 txnState.setSchemaForPartialUpdate((OlapTable) table);
             }
 
@@ -1224,7 +1225,7 @@ public abstract class RoutineLoadJob
             }
 
             // create new task
-            RoutineLoadTaskInfo newRoutineLoadTaskInfo = unprotectRenewTask(routineLoadTaskInfo);
+            RoutineLoadTaskInfo newRoutineLoadTaskInfo = unprotectRenewTask(routineLoadTaskInfo, false);
             Env.getCurrentEnv().getRoutineLoadTaskScheduler().addTaskInQueue(newRoutineLoadTaskInfo);
         } finally {
             writeUnlock();
@@ -1376,7 +1377,7 @@ public abstract class RoutineLoadJob
 
         if (state == JobState.RUNNING) {
             if (txnStatus == TransactionStatus.ABORTED) {
-                RoutineLoadTaskInfo newRoutineLoadTaskInfo = unprotectRenewTask(routineLoadTaskInfo);
+                RoutineLoadTaskInfo newRoutineLoadTaskInfo = unprotectRenewTask(routineLoadTaskInfo, true);
                 Env.getCurrentEnv().getRoutineLoadTaskScheduler().addTaskInQueue(newRoutineLoadTaskInfo);
             } else if (txnStatus == TransactionStatus.COMMITTED) {
                 // this txn is just COMMITTED, create new task when the this txn is VISIBLE
@@ -1396,6 +1397,10 @@ public abstract class RoutineLoadJob
             return;
         }
 
+        if (olapTable.isTemporary()) {
+            throw new DdlException("Cannot create routine load for temporary table "
+                + olapTable.getDisplayName());
+        }
         // check partitions
         olapTable.readLock();
         try {
@@ -1599,27 +1604,15 @@ public abstract class RoutineLoadJob
         this.origStmt = origStmt;
     }
 
-    public void setCloudCluster(String cloudClusterName) throws UserException {
-        if (Strings.isNullOrEmpty(cloudClusterName)) {
-            LOG.warn("cluster name is empty");
-            throw new UserException("cluster name is empty");
-        }
-
-        this.cloudClusterId = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
-                .getCloudClusterIdByName(cloudClusterName);
-        if (Strings.isNullOrEmpty(this.cloudClusterId)) {
-            LOG.warn("cluster id is empty, cluster name {}", cloudClusterName);
-            throw new UserException("cluster id is empty, cluster name: " + cloudClusterName);
+    public void setCloudCluster() {
+        if (Strings.isNullOrEmpty(cloudCluster)) {
+            this.cloudCluster = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                    .getClusterNameByClusterId(cloudClusterId);
         }
     }
 
-    public String getCloudClusterId() {
-        return cloudClusterId;
-    }
-
-    public void setCloudClusterById() {
-        this.cloudCluster = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
-                        .getClusterNameByClusterId(cloudClusterId);
+    public void setCloudCluster(String cloudCluster) {
+        this.cloudCluster = cloudCluster;
     }
 
     // check the correctness of commit info
@@ -1760,15 +1753,15 @@ public abstract class RoutineLoadJob
         appendProperties(sb, CreateRoutineLoadStmt.MAX_BATCH_INTERVAL_SEC_PROPERTY, maxBatchIntervalS, false);
         appendProperties(sb, CreateRoutineLoadStmt.MAX_BATCH_ROWS_PROPERTY, maxBatchRows, false);
         appendProperties(sb, CreateRoutineLoadStmt.MAX_BATCH_SIZE_PROPERTY, maxBatchSizeBytes, false);
-        appendProperties(sb, PROPS_FORMAT, getFormat(), false);
-        if (isPartialUpdate) {
-            appendProperties(sb, CreateRoutineLoadStmt.PARTIAL_COLUMNS, isPartialUpdate, false);
+        appendProperties(sb, FileFormatProperties.PROP_FORMAT, getFormat(), false);
+        if (isFixedPartialUpdate()) {
+            appendProperties(sb, CreateRoutineLoadStmt.PARTIAL_COLUMNS, isFixedPartialUpdate(), false);
         }
-        appendProperties(sb, PROPS_JSONPATHS, getJsonPaths(), false);
-        appendProperties(sb, PROPS_STRIP_OUTER_ARRAY, isStripOuterArray(), false);
-        appendProperties(sb, PROPS_NUM_AS_STRING, isNumAsString(), false);
-        appendProperties(sb, PROPS_FUZZY_PARSE, isFuzzyParse(), false);
-        appendProperties(sb, PROPS_JSONROOT, getJsonRoot(), false);
+        appendProperties(sb, JsonFileFormatProperties.PROP_JSON_PATHS, getJsonPaths(), false);
+        appendProperties(sb, JsonFileFormatProperties.PROP_STRIP_OUTER_ARRAY, isStripOuterArray(), false);
+        appendProperties(sb, JsonFileFormatProperties.PROP_NUM_AS_STRING, isNumAsString(), false);
+        appendProperties(sb, JsonFileFormatProperties.PROP_FUZZY_PARSE, isFuzzyParse(), false);
+        appendProperties(sb, JsonFileFormatProperties.PROP_JSON_ROOT, getJsonRoot(), false);
         appendProperties(sb, LoadStmt.STRICT_MODE, isStrictMode(), false);
         appendProperties(sb, LoadStmt.TIMEZONE, getTimezone(), false);
         appendProperties(sb, LoadStmt.EXEC_MEM_LIMIT, getMemLimit(), true);
@@ -1844,7 +1837,7 @@ public abstract class RoutineLoadJob
         jobProperties.put("precedingFilter", precedingFilter == null ? STAR_STRING : precedingFilter.toSqlWithoutTbl());
         jobProperties.put("whereExpr", whereExpr == null ? STAR_STRING : whereExpr.toSqlWithoutTbl());
         if (getFormat().equalsIgnoreCase("json")) {
-            jobProperties.put(PROPS_FORMAT, "json");
+            jobProperties.put(FileFormatProperties.PROP_FORMAT, "json");
         } else {
             jobProperties.put(LoadStmt.KEY_IN_PARAM_COLUMN_SEPARATOR,
                     columnSeparator == null ? "\t" : columnSeparator.toString());
@@ -1857,7 +1850,11 @@ public abstract class RoutineLoadJob
                 sequenceCol == null ? STAR_STRING : sequenceCol);
 
         // job properties defined in CreateRoutineLoadStmt
-        jobProperties.put(CreateRoutineLoadStmt.PARTIAL_COLUMNS, String.valueOf(isPartialUpdate));
+        jobProperties.put(CreateRoutineLoadStmt.PARTIAL_COLUMNS, String.valueOf(isFixedPartialUpdate()));
+        if (isFixedPartialUpdate()) {
+            jobProperties.put(CreateRoutineLoadStmt.PARTIAL_UPDATE_NEW_KEY_POLICY,
+                    partialUpdateNewKeyPolicy == TPartialUpdateNewRowPolicy.ERROR ? "ERROR" : "APPEND");
+        }
         jobProperties.put(CreateRoutineLoadStmt.MAX_ERROR_NUMBER_PROPERTY, String.valueOf(maxErrorNum));
         jobProperties.put(CreateRoutineLoadStmt.MAX_BATCH_INTERVAL_SEC_PROPERTY, String.valueOf(maxBatchIntervalS));
         jobProperties.put(CreateRoutineLoadStmt.MAX_BATCH_ROWS_PROPERTY, String.valueOf(maxBatchRows));
@@ -1923,7 +1920,16 @@ public abstract class RoutineLoadJob
         }
         jobProperties.forEach((k, v) -> {
             if (k.equals(CreateRoutineLoadStmt.PARTIAL_COLUMNS)) {
-                isPartialUpdate = Boolean.parseBoolean(v);
+                boolean isPartialUpdate = Boolean.parseBoolean(v);
+                if (isPartialUpdate) {
+                    this.uniquekeyUpdateMode = TUniqueKeyUpdateMode.UPDATE_FIXED_COLUMNS;
+                }
+            } else if (k.equals(CreateRoutineLoadStmt.PARTIAL_UPDATE_NEW_KEY_POLICY)) {
+                if ("ERROR".equalsIgnoreCase(v)) {
+                    partialUpdateNewKeyPolicy = TPartialUpdateNewRowPolicy.ERROR;
+                } else {
+                    partialUpdateNewKeyPolicy = TPartialUpdateNewRowPolicy.APPEND;
+                }
             }
         });
         SqlParser parser = new SqlParser(new SqlScanner(new StringReader(origStmt.originStmt),
@@ -2000,7 +2006,10 @@ public abstract class RoutineLoadJob
             String value = Text.readString(in);
             jobProperties.put(key, value);
             if (key.equals(CreateRoutineLoadStmt.PARTIAL_COLUMNS)) {
-                isPartialUpdate = Boolean.parseBoolean(value);
+                boolean isPartialUpdate = Boolean.parseBoolean(value);
+                if (isPartialUpdate) {
+                    this.uniquekeyUpdateMode = TUniqueKeyUpdateMode.UPDATE_FIXED_COLUMNS;
+                }
             }
         }
 

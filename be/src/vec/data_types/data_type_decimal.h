@@ -237,6 +237,13 @@ public:
     DataTypeSerDeSPtr get_serde(int nesting_level = 1) const override {
         return std::make_shared<DataTypeDecimalSerDe<T>>(scale, precision, nesting_level);
     };
+    Field get_type_field(const IColumn& column, size_t row) const override {
+        const auto& decimal_column = static_cast<const ColumnDecimal<T>&>(column);
+        Field field;
+        decimal_column.get(row, field);
+        return VariantField(std::move(field), TypeId<T>::value, static_cast<int>(precision),
+                            static_cast<int>(scale));
+    }
 
     /// Decimal specific
 
@@ -597,13 +604,8 @@ void convert_from_decimal(typename ToDataType::FieldType* dst,
         } else {
             auto multiplier = FromDataType::get_scale_multiplier(scale);
             for (size_t i = 0; i < size; ++i) {
-                if constexpr (IsDecimal256<FromFieldType>) {
-                    dst[i] = static_cast<ToFieldType>(static_cast<long double>(src[i].value) /
-                                                      static_cast<long double>(multiplier.value));
-                } else {
-                    dst[i] = static_cast<ToFieldType>(static_cast<double>(src[i].value) /
-                                                      static_cast<double>(multiplier.value));
-                }
+                dst[i] = static_cast<ToFieldType>(static_cast<double>(src[i].value) /
+                                                  static_cast<double>(multiplier.value));
             }
         }
         if constexpr (narrow_integral) {
@@ -637,6 +639,11 @@ void convert_to_decimal(typename ToDataType::FieldType* dst,
 
     if constexpr (std::is_floating_point_v<FromFieldType>) {
         auto multiplier = ToDataType::get_scale_multiplier(to_scale);
+        // For decimal256, we need to use long double to avoid overflow when
+        // static casting the multiplier to floating type, and also to be as precise as possible;
+        // For other decimal types, we use double to be as precise as possible.
+        using DoubleType = std::conditional_t<IsDecimal256<typename ToDataType::FieldType>,
+                                              long double, double>;
         if constexpr (narrow_integral) {
             for (size_t i = 0; i < size; ++i) {
                 if (!std::isfinite(src[i])) {
@@ -644,8 +651,8 @@ void convert_to_decimal(typename ToDataType::FieldType* dst,
                             ErrorCode::ARITHMETIC_OVERFLOW_ERRROR,
                             "Decimal convert overflow. Cannot convert infinity or NaN to decimal");
                 }
-                FromFieldType tmp = src[i] * multiplier;
-                if (tmp <= FromFieldType(min_result) || tmp >= FromFieldType(max_result)) {
+                DoubleType tmp = src[i] * static_cast<DoubleType>(multiplier.value);
+                if (tmp <= DoubleType(min_result.value) || tmp >= DoubleType(max_result.value)) {
                     ToDataType to_data_type(to_precision, to_scale);
                     throw Exception(
                             ErrorCode::ARITHMETIC_OVERFLOW_ERRROR,
@@ -655,8 +662,9 @@ void convert_to_decimal(typename ToDataType::FieldType* dst,
             }
         }
         for (size_t i = 0; i < size; ++i) {
-            dst[i].value = typename ToDataType::FieldType::NativeType(
-                    FromFieldType(src[i] * multiplier.value + ((src[i] >= 0) ? 0.5 : -0.5)));
+            dst[i].value = static_cast<ToDataType::FieldType::NativeType>(
+                    static_cast<double>(src[i] * static_cast<DoubleType>(multiplier.value) +
+                                        ((src[i] >= 0) ? 0.5 : -0.5)));
         }
     } else {
         using DecimalFrom =

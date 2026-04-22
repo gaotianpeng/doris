@@ -17,9 +17,7 @@
 
 #pragma once
 
-#include <stddef.h>
-
-#include <memory>
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,7 +38,7 @@ struct TypeDescriptor;
 } // namespace doris
 
 namespace doris::vectorized {
-
+#include "common/compile_check_begin.h"
 class TrinoConnectorJniReader : public JniReader {
     ENABLE_FACTORY_CREATOR(TrinoConnectorJniReader);
 
@@ -52,15 +50,11 @@ public:
 
     ~TrinoConnectorJniReader() override = default;
 
-    Status get_next_block(Block* block, size_t* read_rows, bool* eof) override;
-
-    Status get_columns(std::unordered_map<std::string, TypeDescriptor>* name_to_type,
-                       std::unordered_set<std::string>* missing_cols) override;
-
     Status init_reader(
             const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
 
 private:
     Status _set_spi_plugins_dir();
 };
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

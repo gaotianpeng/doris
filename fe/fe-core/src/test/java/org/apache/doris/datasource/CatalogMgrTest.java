@@ -34,7 +34,6 @@ import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.EsResource;
 import org.apache.doris.catalog.ListPartitionItem;
 import org.apache.doris.catalog.PartitionItem;
-import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ResourceMgr;
 import org.apache.doris.catalog.Type;
@@ -54,21 +53,16 @@ import org.apache.doris.datasource.hive.HiveMetaStoreCache.FileCacheValue;
 import org.apache.doris.datasource.hive.HiveMetaStoreCache.HivePartitionValues;
 import org.apache.doris.datasource.hive.HiveMetaStoreCache.PartitionValueCacheKey;
 import org.apache.doris.mysql.privilege.Auth;
-import org.apache.doris.planner.ColumnBound;
 import org.apache.doris.planner.ListPartitionPrunerV2;
-import org.apache.doris.planner.PartitionPrunerV2Base.UniqueId;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSet;
 import org.apache.doris.utframe.TestWithFeService;
 
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Range;
-import com.google.common.collect.RangeMap;
 import org.junit.Assert;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -125,7 +119,7 @@ public class CatalogMgrTest extends TestWithFeService {
         env.getCatalogMgr().createCatalog(hiveCatalog2);
 
         CreateCatalogStmt iceBergCatalog = (CreateCatalogStmt) parseAndAnalyzeStmt(
-                "create catalog iceberg properties('type' = 'hms', 'iceberg.hive.metastore.uris' = 'thrift://192.168.0.1:9083');",
+                "create catalog iceberg properties('type' = 'hms', 'hive.metastore.uris' = 'thrift://192.168.0.1:9083');",
                 rootCtx);
         env.getCatalogMgr().createCatalog(iceBergCatalog);
 
@@ -436,12 +430,14 @@ public class CatalogMgrTest extends TestWithFeService {
     public void testAddMultiColumnPartitionsCache() {
         HMSExternalCatalog hiveCatalog = (HMSExternalCatalog) mgr.getCatalog("hive");
         HiveMetaStoreCache metaStoreCache = externalMetaCacheMgr.getMetaStoreCache(hiveCatalog);
-        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey("hiveDb", "hiveTable",
+        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey(
+                NameMapping.createForTest("hiveDb", "hiveTable"),
                 Lists.newArrayList(Type.INT, Type.SMALLINT));
         HivePartitionValues hivePartitionValues = loadPartitionValues(partitionValueCacheKey,
                 Lists.newArrayList("y=2020/m=1", "y=2020/m=2"), metaStoreCache);
         metaStoreCache.putPartitionValuesCacheForTest(partitionValueCacheKey, hivePartitionValues);
-        metaStoreCache.addPartitionsCache("hiveDb", "hiveTable", Lists.newArrayList("y=2020/m=3", "y=2020/m=4"),
+        metaStoreCache.addPartitionsCache(NameMapping.createForTest("hiveDb", "hiveTable"),
+                Lists.newArrayList("y=2020/m=3", "y=2020/m=4"),
                 partitionValueCacheKey.getTypes());
         HivePartitionValues partitionValues = metaStoreCache.getPartitionValues(partitionValueCacheKey);
         Assert.assertEquals(partitionValues.getPartitionNameToIdMap().size(), 4);
@@ -450,13 +446,16 @@ public class CatalogMgrTest extends TestWithFeService {
     @Test
     public void testDropMultiColumnPartitionsCache() {
         HMSExternalCatalog hiveCatalog = (HMSExternalCatalog) mgr.getCatalog("hive");
+        HMSExternalDatabase dorisDb = new HMSExternalDatabase(hiveCatalog, 0, "hiveDb", "hiveDb");
+        HMSExternalTable dorisTable = new HMSExternalTable(1, "hiveTable", "hiveTable", hiveCatalog, dorisDb);
         HiveMetaStoreCache metaStoreCache = externalMetaCacheMgr.getMetaStoreCache(hiveCatalog);
-        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey("hiveDb", "hiveTable",
+        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey(
+                dorisTable.getOrBuildNameMapping(),
                 Lists.newArrayList(Type.INT, Type.SMALLINT));
         HivePartitionValues hivePartitionValues = loadPartitionValues(partitionValueCacheKey,
                 Lists.newArrayList("y=2020/m=1", "y=2020/m=2"), metaStoreCache);
         metaStoreCache.putPartitionValuesCacheForTest(partitionValueCacheKey, hivePartitionValues);
-        metaStoreCache.dropPartitionsCache("hiveDb", "hiveTable", Lists.newArrayList("y=2020/m=1", "y=2020/m=2"),
+        metaStoreCache.dropPartitionsCache(dorisTable, Lists.newArrayList("y=2020/m=1", "y=2020/m=2"),
                 false);
         HivePartitionValues partitionValues = metaStoreCache.getPartitionValues(partitionValueCacheKey);
         Assert.assertEquals(partitionValues.getPartitionNameToIdMap().size(), 0);
@@ -466,12 +465,14 @@ public class CatalogMgrTest extends TestWithFeService {
     public void testAddSingleColumnPartitionsCache() {
         HMSExternalCatalog hiveCatalog = (HMSExternalCatalog) mgr.getCatalog("hive");
         HiveMetaStoreCache metaStoreCache = externalMetaCacheMgr.getMetaStoreCache(hiveCatalog);
-        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey("hiveDb", "hiveTable",
+        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey(
+                NameMapping.createForTest("hiveDb", "hiveTable"),
                 Lists.newArrayList(Type.SMALLINT));
         HivePartitionValues hivePartitionValues = loadPartitionValues(partitionValueCacheKey,
                 Lists.newArrayList("m=1", "m=2"), metaStoreCache);
         metaStoreCache.putPartitionValuesCacheForTest(partitionValueCacheKey, hivePartitionValues);
-        metaStoreCache.addPartitionsCache("hiveDb", "hiveTable", Lists.newArrayList("m=3", "m=4"),
+        metaStoreCache.addPartitionsCache(
+                NameMapping.createForTest("hiveDb", "hiveTable"), Lists.newArrayList("m=3", "m=4"),
                 partitionValueCacheKey.getTypes());
         HivePartitionValues partitionValues = metaStoreCache.getPartitionValues(partitionValueCacheKey);
         Assert.assertEquals(partitionValues.getPartitionNameToIdMap().size(), 4);
@@ -481,13 +482,16 @@ public class CatalogMgrTest extends TestWithFeService {
     @Test
     public void testDropSingleColumnPartitionsCache() {
         HMSExternalCatalog hiveCatalog = (HMSExternalCatalog) mgr.getCatalog("hive");
+        HMSExternalDatabase dorisDb = new HMSExternalDatabase(hiveCatalog, 0, "hiveDb", "hiveDb");
+        HMSExternalTable dorisTable = new HMSExternalTable(1, "hiveTable", "hiveTable", hiveCatalog, dorisDb);
         HiveMetaStoreCache metaStoreCache = externalMetaCacheMgr.getMetaStoreCache(hiveCatalog);
-        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey("hiveDb", "hiveTable",
+        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey(
+                dorisTable.getOrBuildNameMapping(),
                 Lists.newArrayList(Type.SMALLINT));
         HivePartitionValues hivePartitionValues = loadPartitionValues(partitionValueCacheKey,
                 Lists.newArrayList("m=1", "m=2"), metaStoreCache);
         metaStoreCache.putPartitionValuesCacheForTest(partitionValueCacheKey, hivePartitionValues);
-        metaStoreCache.dropPartitionsCache("hiveDb", "hiveTable", Lists.newArrayList("m=1", "m=2"),
+        metaStoreCache.dropPartitionsCache(dorisTable, Lists.newArrayList("m=1", "m=2"),
                 false);
         HivePartitionValues partitionValues = metaStoreCache.getPartitionValues(partitionValueCacheKey);
         Assert.assertEquals(partitionValues.getPartitionNameToIdMap().size(), 0);
@@ -497,7 +501,8 @@ public class CatalogMgrTest extends TestWithFeService {
     public void testAddPartitionsCacheToLargeTable() {
         HMSExternalCatalog hiveCatalog = (HMSExternalCatalog) mgr.getCatalog("hive");
         HiveMetaStoreCache metaStoreCache = externalMetaCacheMgr.getMetaStoreCache(hiveCatalog);
-        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey("hiveDb", "hiveTable",
+        PartitionValueCacheKey partitionValueCacheKey = new PartitionValueCacheKey(
+                NameMapping.createForTest("hiveDb", "hiveTable"),
                 Lists.newArrayList(Type.INT));
         List<String> pNames = new ArrayList<>(100000);
         for (int i = 1; i <= 100000; i++) {
@@ -507,7 +512,8 @@ public class CatalogMgrTest extends TestWithFeService {
                 pNames, metaStoreCache);
         metaStoreCache.putPartitionValuesCacheForTest(partitionValueCacheKey, hivePartitionValues);
         long start = System.currentTimeMillis();
-        metaStoreCache.addPartitionsCache("hiveDb", "hiveTable", Lists.newArrayList("m=100001"),
+        metaStoreCache.addPartitionsCache(NameMapping.createForTest("hiveDb", "hiveTable"),
+                Lists.newArrayList("m=100001"),
                 partitionValueCacheKey.getTypes());
         //387 in 4c16g
         System.out.println("testAddPartitionsCacheToLargeTable use time mills:" + (System.currentTimeMillis() - start));
@@ -520,7 +526,6 @@ public class CatalogMgrTest extends TestWithFeService {
         // partition name format: nation=cn/city=beijing
         Map<Long, PartitionItem> idToPartitionItem = Maps.newHashMapWithExpectedSize(partitionNames.size());
         BiMap<String, Long> partitionNameToIdMap = HashBiMap.create(partitionNames.size());
-        Map<Long, List<UniqueId>> idToUniqueIdsMap = Maps.newHashMapWithExpectedSize(partitionNames.size());
         long idx = 0;
         for (String partitionName : partitionNames) {
             long partitionId = idx++;
@@ -529,23 +534,8 @@ public class CatalogMgrTest extends TestWithFeService {
             partitionNameToIdMap.put(partitionName, partitionId);
         }
 
-        Map<UniqueId, Range<PartitionKey>> uidToPartitionRange = null;
-        Map<Range<PartitionKey>, UniqueId> rangeToId = null;
-        RangeMap<ColumnBound, UniqueId> singleColumnRangeMap = null;
-        Map<UniqueId, Range<ColumnBound>> singleUidToColumnRangeMap = null;
-        if (key.getTypes().size() > 1) {
-            // uidToPartitionRange and rangeToId are only used for multi-column partition
-            uidToPartitionRange = ListPartitionPrunerV2.genUidToPartitionRange(idToPartitionItem, idToUniqueIdsMap);
-            rangeToId = ListPartitionPrunerV2.genRangeToId(uidToPartitionRange);
-        } else {
-            Preconditions.checkState(key.getTypes().size() == 1, key.getTypes());
-            // singleColumnRangeMap is only used for single-column partition
-            singleColumnRangeMap = ListPartitionPrunerV2.genSingleColumnRangeMap(idToPartitionItem, idToUniqueIdsMap);
-            singleUidToColumnRangeMap = ListPartitionPrunerV2.genSingleUidToColumnRange(singleColumnRangeMap);
-        }
         Map<Long, List<String>> partitionValuesMap = ListPartitionPrunerV2.getPartitionValuesMap(idToPartitionItem);
-        return new HivePartitionValues(idToPartitionItem, uidToPartitionRange, rangeToId, singleColumnRangeMap,
-                partitionNameToIdMap, idToUniqueIdsMap, singleUidToColumnRangeMap, partitionValuesMap);
+        return new HivePartitionValues(idToPartitionItem, partitionNameToIdMap, partitionValuesMap);
     }
 
     @Test
@@ -561,7 +551,7 @@ public class CatalogMgrTest extends TestWithFeService {
                 + "='org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider'\n"
                 + ");";
         CreateCatalogStmt createStmt1 = (CreateCatalogStmt) parseAndAnalyzeStmt(createCatalogSql);
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class, "Missing dfs.ha.namenodes.your-nameservice property",
+        ExceptionChecker.expectThrowsWithMsg(IllegalArgumentException.class, "Missing property: dfs.ha.namenodes.your-nameservice",
                 () -> mgr.createCatalog(createStmt1));
 
         createCatalogSql = "CREATE CATALOG bad_hive2 PROPERTIES (\n"
@@ -575,8 +565,8 @@ public class CatalogMgrTest extends TestWithFeService {
                 + "='org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider'\n"
                 + ");";
         CreateCatalogStmt createStmt2 = (CreateCatalogStmt) parseAndAnalyzeStmt(createCatalogSql);
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
-                "Missing dfs.namenode.rpc-address.your-nameservice.nn1 property",
+        ExceptionChecker.expectThrowsWithMsg(IllegalArgumentException.class,
+                "Missing property: dfs.namenode.rpc-address.your-nameservice.nn1 (expected format: host:port)",
                 () -> mgr.createCatalog(createStmt2));
 
         createCatalogSql = "CREATE CATALOG good_hive PROPERTIES (\n"
@@ -589,8 +579,8 @@ public class CatalogMgrTest extends TestWithFeService {
                 + "    'dfs.namenode.rpc-address.your-nameservice.nn2'='172.21.0.3:4007'\n"
                 + ");";
         CreateCatalogStmt createStmt3 = (CreateCatalogStmt) parseAndAnalyzeStmt(createCatalogSql);
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
-                "Missing dfs.client.failover.proxy.provider.your-nameservice property",
+        ExceptionChecker.expectThrowsWithMsg(IllegalArgumentException.class,
+                "Missing property: dfs.client.failover.proxy.provider.your-nameservice",
                 () -> mgr.createCatalog(createStmt3));
 
         createCatalogSql = "CREATE CATALOG bad_jdbc PROPERTIES (\n"
@@ -678,8 +668,8 @@ public class CatalogMgrTest extends TestWithFeService {
                 + ");";
         AlterCatalogPropertyStmt alterCatalogPropertyStmt1 = (AlterCatalogPropertyStmt) parseAndAnalyzeStmt(
                 alterCatalogSql);
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
-                "Missing dfs.ha.namenodes.HANN property",
+        ExceptionChecker.expectThrowsWithMsg(IllegalArgumentException.class,
+                "Missing property: dfs.ha.namenodes.HANN",
                 () -> mgr.alterCatalogProps(alterCatalogPropertyStmt1));
 
         alterCatalogSql = "ALTER CATALOG test_hive1 SET PROPERTIES (\n"
@@ -694,8 +684,8 @@ public class CatalogMgrTest extends TestWithFeService {
                 + ");";
         AlterCatalogPropertyStmt alterCatalogPropertyStmt2 = (AlterCatalogPropertyStmt) parseAndAnalyzeStmt(
                 alterCatalogSql);
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
-                "Missing dfs.client.failover.proxy.provider.HANN property",
+        ExceptionChecker.expectThrowsWithMsg(IllegalArgumentException.class,
+                "Missing property: dfs.client.failover.proxy.provider.HANN",
                 () -> mgr.alterCatalogProps(alterCatalogPropertyStmt2));
 
         alterCatalogSql = "ALTER CATALOG test_hive1 SET PROPERTIES (\n"

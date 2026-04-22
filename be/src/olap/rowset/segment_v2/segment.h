@@ -31,20 +31,21 @@
 
 #include "agent/be_exec_version_manager.h"
 #include "common/status.h" // Status
+#include "io/fs/file_reader.h"
 #include "io/fs/file_reader_writer_fwd.h"
 #include "io/fs/file_system.h"
 #include "olap/field.h"
 #include "olap/olap_common.h"
+#include "olap/page_cache.h"
 #include "olap/rowset/segment_v2/column_reader.h" // ColumnReader
 #include "olap/rowset/segment_v2/page_handle.h"
-#include "olap/rowset/segment_v2/stream_reader.h"
+#include "olap/rowset/segment_v2/variant/variant_column_reader.h"
 #include "olap/schema.h"
 #include "olap/tablet_schema.h"
 #include "runtime/descriptors.h"
 #include "util/once.h"
 #include "util/slice.h"
 #include "vec/columns/column.h"
-#include "vec/columns/subcolumn_tree.h"
 #include "vec/data_types/data_type.h"
 #include "vec/data_types/data_type_nullable.h"
 #include "vec/json/path_in_data.h"
@@ -67,6 +68,8 @@ class BitmapIndexIterator;
 class Segment;
 class InvertedIndexIterator;
 class InvertedIndexFileReader;
+struct VariantStatistics;
+class ColumnReaderCache;
 
 using SegmentSharedPtr = std::shared_ptr<Segment>;
 // A Segment is used to represent a segment in memory format. When segment is
@@ -98,22 +101,20 @@ public:
     Status new_iterator(SchemaSPtr schema, const StorageReadOptions& read_options,
                         std::unique_ptr<RowwiseIterator>* iter);
 
+    static Status new_default_iterator(const TabletColumn& tablet_column,
+                                       std::unique_ptr<ColumnIterator>* iter);
+
     uint32_t id() const { return _segment_id; }
 
     RowsetId rowset_id() const { return _rowset_id; }
 
     uint32_t num_rows() const { return _num_rows; }
 
+    // if variant_sparse_column_cache is nullptr, means the sparse column cache is not used
     Status new_column_iterator(const TabletColumn& tablet_column,
-                               std::unique_ptr<ColumnIterator>* iter,
-                               const StorageReadOptions* opt);
-
-    Status new_column_iterator_with_path(const TabletColumn& tablet_column,
-                                         std::unique_ptr<ColumnIterator>* iter,
-                                         const StorageReadOptions* opt);
-
-    Status new_column_iterator(int32_t unique_id, const StorageReadOptions* opt,
-                               std::unique_ptr<ColumnIterator>* iter);
+                               std::unique_ptr<ColumnIterator>* iter, const StorageReadOptions* opt,
+                               const std::unordered_map<int32_t, PathToSparseColumnCacheUPtr>*
+                                       variant_sparse_column_cache = nullptr);
 
     Status new_bitmap_index_iterator(const TabletColumn& tablet_column,
                                      const StorageReadOptions& read_options,
@@ -135,12 +136,14 @@ public:
     }
 
     Status lookup_row_key(const Slice& key, const TabletSchema* latest_schema, bool with_seq_col,
-                          bool with_rowid, RowLocation* row_location, OlapReaderStatistics* stats);
+                          bool with_rowid, RowLocation* row_location, OlapReaderStatistics* stats,
+                          std::string* encoded_seq_value = nullptr);
 
     Status read_key_by_rowid(uint32_t row_id, std::string* key);
 
     Status seek_and_read_by_rowid(const TabletSchema& schema, SlotDescriptor* slot, uint32_t row_id,
-                                  vectorized::MutableColumnPtr& result, OlapReaderStatistics& stats,
+                                  vectorized::MutableColumnPtr& result,
+                                  StorageReadOptions& storage_read_options,
                                   std::unique_ptr<ColumnIterator>& iterator_hint);
 
     Status load_index(OlapReaderStatistics* stats);
@@ -168,33 +171,22 @@ public:
     // another method `get_metadata_size` not include the column reader, only the segment object itself.
     int64_t meta_mem_usage() const { return _meta_mem_usage; }
 
-    // Identify the column by unique id or path info
-    struct ColumnIdentifier {
-        int32_t unique_id = -1;
-        int32_t parent_unique_id = -1;
-        vectorized::PathInDataPtr path;
-        bool is_nullable = false;
-    };
     // Get the inner file column's data type
     // ignore_chidren set to false will treat field as variant
     // when it contains children with field paths.
     // nullptr will returned if storage type does not contains such column
-    std::shared_ptr<const vectorized::IDataType> get_data_type_of(
-            const ColumnIdentifier& identifier, bool read_flat_leaves) const;
+    std::shared_ptr<const vectorized::IDataType> get_data_type_of(const TabletColumn& column,
+                                                                  bool read_flat_leaves);
     // Check is schema read type equals storage column type
-    bool same_with_storage_type(int32_t cid, const Schema& schema, bool read_flat_leaves) const;
+    bool same_with_storage_type(int32_t cid, const Schema& schema, bool read_flat_leaves);
 
     // If column in segment is the same type in schema, then it is safe to apply predicate
     template <typename Predicate>
     bool can_apply_predicate_safely(int cid, Predicate* pred, const Schema& schema,
-                                    ReaderType read_type) const {
-        const Field* col = schema.column(cid);
+                                    ReaderType read_type) {
+        const doris::Field* col = schema.column(cid);
         vectorized::DataTypePtr storage_column_type =
-                get_data_type_of(ColumnIdentifier {.unique_id = col->unique_id(),
-                                                   .parent_unique_id = col->parent_unique_id(),
-                                                   .path = col->path(),
-                                                   .is_nullable = col->is_nullable()},
-                                 read_type != ReaderType::READER_QUERY);
+                get_data_type_of(col->get_desc(), read_type != ReaderType::READER_QUERY);
         if (storage_column_type == nullptr) {
             // Default column iterator
             return true;
@@ -214,6 +206,15 @@ public:
 
     const TabletSchemaSPtr& tablet_schema() { return _tablet_schema; }
 
+    Status get_column_reader(const TabletColumn& col, std::shared_ptr<ColumnReader>* column_reader,
+                             OlapReaderStatistics* stats);
+
+    Status get_column_reader(int32_t col_uid, std::shared_ptr<ColumnReader>* column_reader,
+                             OlapReaderStatistics* stats);
+
+    static StoragePageCache::CacheKey get_segment_footer_cache_key(
+            const io::FileReaderSPtr& file_reader);
+
 private:
     DISALLOW_COPY_AND_ASSIGN(Segment);
     Segment(uint32_t segment_id, RowsetId rowset_id, TabletSchemaSPtr tablet_schema,
@@ -225,25 +226,27 @@ private:
                         OlapReaderStatistics* stats = nullptr);
     // open segment file and read the minimum amount of necessary information (footer)
     Status _open(OlapReaderStatistics* stats);
-    Status _parse_footer(SegmentFooterPB* footer, OlapReaderStatistics* stats = nullptr);
-    Status _create_column_readers(const SegmentFooterPB& footer);
+    Status _parse_footer(std::shared_ptr<SegmentFooterPB>& footer,
+                         OlapReaderStatistics* stats = nullptr);
+    Status _create_column_meta(const SegmentFooterPB& footer);
     Status _load_pk_bloom_filter(OlapReaderStatistics* stats);
-    ColumnReader* _get_column_reader(const TabletColumn& col);
 
-    // Get Iterator which will read variant root column and extract with paths and types info
-    Status _new_iterator_with_variant_root(const TabletColumn& tablet_column,
-                                           std::unique_ptr<ColumnIterator>* iter,
-                                           const SubcolumnColumnReaders::Node* root,
-                                           vectorized::DataTypePtr target_type_hint);
     Status _write_error_file(size_t file_size, size_t offset, size_t bytes_read, char* data,
                              io::IOContext& io_ctx);
 
     Status _open_inverted_index();
 
-    Status _create_column_readers_once(OlapReaderStatistics* stats);
+    Status _create_column_meta_once(OlapReaderStatistics* stats);
 
-private:
+    virtual Status _get_segment_footer(std::shared_ptr<SegmentFooterPB>&,
+                                       OlapReaderStatistics* stats);
+
+    StoragePageCache::CacheKey get_segment_footer_cache_key() const;
+
     friend class SegmentIterator;
+    friend class ColumnReaderCache;
+    friend class MockSegment;
+
     io::FileSystemSPtr _fs;
     io::FileReaderSPtr _file_reader;
     uint32_t _segment_id;
@@ -262,33 +265,24 @@ private:
     std::unique_ptr<PrimaryKeyIndexMetaPB> _pk_index_meta;
     PagePointerPB _sk_index_page;
 
-    // map column unique id ---> column reader
-    // ColumnReader for each column in TabletSchema. If ColumnReader is nullptr,
-    // This means that this segment has no data for that column, which may be added
-    // after this segment is generated.
-    std::map<int32_t, std::unique_ptr<ColumnReader>> _column_readers;
+    // Limited cache for column readers
+    std::unique_ptr<ColumnReaderCache> _column_reader_cache;
+
+    // map column unique id ---> it's footer ordinal
+    std::unordered_map<int32_t, size_t> _column_uid_to_footer_ordinal;
 
     // Init from ColumnMetaPB in SegmentFooterPB
     // map column unique id ---> it's inner data type
     std::map<int32_t, std::shared_ptr<const vectorized::IDataType>> _file_column_types;
-
-    // Each node in the tree represents the sub column reader and type
-    // for variants.
-    // map column unique id --> it's sub column readers
-    std::map<int32_t, SubcolumnColumnReaders> _sub_column_tree;
-
-    // each sprase column's path and types info
-    // map column unique id --> it's sparse sub column readers
-    std::map<int32_t, SubcolumnColumnReaders> _sparse_column_tree;
 
     // used to guarantee that short key index will be loaded at most once in a thread-safe way
     DorisCallOnce<Status> _load_index_once;
     // used to guarantee that primary key bloom filter will be loaded at most once in a thread-safe way
     DorisCallOnce<Status> _load_pk_bf_once;
 
-    DorisCallOnce<Status> _create_column_readers_once_call;
+    DorisCallOnce<Status> _create_column_meta_once_call;
 
-    std::unique_ptr<SegmentFooterPB> _footer_pb;
+    std::weak_ptr<SegmentFooterPB> _footer_pb;
 
     // used to hold short key index page in memory
     PageHandle _sk_index_handle;

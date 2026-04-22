@@ -28,6 +28,8 @@
 #include <string>
 #include <tuple>
 
+#include "common/bvars.h"
+#include "common/config.h"
 #include "common/encryption_util.h"
 #include "common/logging.h"
 #include "common/network_util.h"
@@ -74,7 +76,7 @@ static int encrypt_ak_sk_helper(const std::string plain_ak, const std::string pl
                                 MetaServiceCode& code, std::string& msg) {
     std::string key;
     int64_t key_id;
-    LOG_INFO("enter encrypt_ak_sk_helper, plain_ak {}", plain_ak);
+    LOG_INFO("enter encrypt_ak_sk_helper, plain_ak {}", hide_access_key(plain_ak));
     int ret = get_newest_encryption_key_for_ak_sk(&key_id, &key);
     TEST_SYNC_POINT_CALLBACK("encrypt_ak_sk:get_encryption_key", &ret, &key, &key_id);
     if (ret != 0) {
@@ -357,6 +359,17 @@ bool normalize_hdfs_fs_name(std::string& fs_name) {
 static int add_hdfs_storage_vault(InstanceInfoPB& instance, Transaction* txn,
                                   StorageVaultPB& hdfs_param, MetaServiceCode& code,
                                   std::string& msg) {
+#ifndef ENABLE_HDFS_STORAGE_VAULT
+    code = MetaServiceCode::INVALID_ARGUMENT;
+    msg = fmt::format(
+            "HDFS is disabled (via the ENABLE_HDFS_STORAGE_VAULT build option), "
+            "but HDFS storage vaults were detected: {}",
+            hdfs_param.name());
+    LOG(ERROR) << "HDFS is disabled (via the ENABLE_HDFS_STORAGE_VAULT build option), "
+               << "but HDFS storage vaults were detected: " << hdfs_param.name();
+    return -1;
+#endif
+
     if (!hdfs_param.has_hdfs_info()) {
         code = MetaServiceCode::INVALID_ARGUMENT;
         msg = fmt::format("vault_name={} passed invalid argument", hdfs_param.name());
@@ -1659,7 +1672,10 @@ void MetaServiceImpl::create_instance(google::protobuf::RpcController* controlle
                                       const CreateInstanceRequest* request,
                                       CreateInstanceResponse* response,
                                       ::google::protobuf::Closure* done) {
+    TEST_SYNC_POINT_CALLBACK("create_instance_sk_request",
+                             const_cast<CreateInstanceRequest**>(&request));
     RPC_PREPROCESS(create_instance, get, put);
+    TEST_SYNC_POINT_RETURN_WITH_VOID("create_instance_sk_request_return");
     if (request->has_ram_user()) {
         auto& ram_user = request->ram_user();
         std::string ram_user_id = ram_user.has_user_id() ? ram_user.user_id() : "";
@@ -1735,6 +1751,10 @@ void MetaServiceImpl::create_instance(google::protobuf::RpcController* controlle
         msg = "failed to serialize";
         LOG(ERROR) << msg;
         return;
+    }
+
+    for (auto& obj_info : *instance.mutable_obj_info()) {
+        obj_info.set_ak(hide_access_key(obj_info.ak()));
     }
 
     LOG(INFO) << "xxx instance json=" << proto_to_json(instance);
@@ -1976,6 +1996,8 @@ void MetaServiceImpl::get_instance(google::protobuf::RpcController* controller,
                                    const GetInstanceRequest* request, GetInstanceResponse* response,
                                    ::google::protobuf::Closure* done) {
     RPC_PREPROCESS(get_instance, get);
+    TEST_SYNC_POINT_CALLBACK("get_instance_sk_response", &response);
+    TEST_SYNC_POINT_RETURN_WITH_VOID("get_instance_sk_response_return");
     std::string cloud_unique_id = request->has_cloud_unique_id() ? request->cloud_unique_id() : "";
     if (cloud_unique_id.empty()) {
         code = MetaServiceCode::INVALID_ARGUMENT;
@@ -2404,7 +2426,7 @@ void handle_set_cluster_status(const std::string& instance_id, const ClusterInfo
             });
 }
 
-void handle_alter_vcluster_Info(const std::string& instance_id, const ClusterInfo& cluster,
+void handle_alter_vcluster_info(const std::string& instance_id, const ClusterInfo& cluster,
                                 std::shared_ptr<ResourceManager> resource_mgr, std::string& msg,
                                 MetaServiceCode& code) {
     msg = resource_mgr->update_cluster(
@@ -2488,6 +2510,26 @@ void handle_alter_vcluster_Info(const std::string& instance_id, const ClusterInf
                     return msg; // Return validation error
                 }
                 return msg; // Return success or empty message
+            });
+}
+
+void handle_alter_properties(const std::string& instance_id, const ClusterInfo& cluster,
+                             std::shared_ptr<ResourceManager> resource_mgr, std::string& msg,
+                             MetaServiceCode& code) {
+    msg = resource_mgr->update_cluster(
+            instance_id, cluster,
+            [&](const ClusterPB& i) { return i.cluster_id() == cluster.cluster.cluster_id(); },
+            [&](ClusterPB& c, std::vector<ClusterPB>&) {
+                std::string msg;
+                std::stringstream ss;
+                if (ClusterPB::COMPUTE != c.type()) {
+                    code = MetaServiceCode::INVALID_ARGUMENT;
+                    ss << "just support set COMPUTE cluster status";
+                    msg = ss.str();
+                    return msg;
+                }
+                *c.mutable_properties() = cluster.cluster.properties();
+                return msg;
             });
 }
 
@@ -2575,7 +2617,10 @@ void MetaServiceImpl::alter_cluster(google::protobuf::RpcController* controller,
         handle_set_cluster_status(instance_id, cluster, resource_mgr(), msg, code);
         break;
     case AlterClusterRequest::ALTER_VCLUSTER_INFO:
-        handle_alter_vcluster_Info(instance_id, cluster, resource_mgr(), msg, code);
+        handle_alter_vcluster_info(instance_id, cluster, resource_mgr(), msg, code);
+        break;
+    case AlterClusterRequest::ALTER_PROPERTIES:
+        handle_alter_properties(instance_id, cluster, resource_mgr(), msg, code);
         break;
     default:
         code = MetaServiceCode::INVALID_ARGUMENT;
@@ -2761,7 +2806,9 @@ void MetaServiceImpl::get_cluster(google::protobuf::RpcController* controller,
 void MetaServiceImpl::create_stage(::google::protobuf::RpcController* controller,
                                    const CreateStageRequest* request, CreateStageResponse* response,
                                    ::google::protobuf::Closure* done) {
+    TEST_SYNC_POINT_CALLBACK("create_stage_sk_request", const_cast<CreateStageRequest**>(&request));
     RPC_PREPROCESS(create_stage, get, put);
+    TEST_SYNC_POINT_RETURN_WITH_VOID("create_stage_sk_request_return");
     std::string cloud_unique_id = request->has_cloud_unique_id() ? request->cloud_unique_id() : "";
     if (cloud_unique_id.empty()) {
         code = MetaServiceCode::INVALID_ARGUMENT;
@@ -3439,7 +3486,6 @@ void MetaServiceImpl::alter_iam(google::protobuf::RpcController* controller,
         msg = "invalid argument";
         return;
     }
-
     RPC_RATE_LIMIT(alter_iam)
 
     // for metric, give it a common instance id
@@ -4053,7 +4099,6 @@ void MetaServiceImpl::get_cluster_status(google::protobuf::RpcController* contro
             LOG(WARNING) << "failed to get instance, instance_id=" << instance_id << " err=" << err;
             return;
         }
-
         InstanceInfoPB instance;
         if (!instance.ParseFromString(val)) {
             LOG(WARNING) << "failed to parse InstanceInfoPB";

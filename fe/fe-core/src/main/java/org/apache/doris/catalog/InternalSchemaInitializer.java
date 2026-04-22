@@ -26,7 +26,6 @@ import org.apache.doris.analysis.CreateDbStmt;
 import org.apache.doris.analysis.CreateTableStmt;
 import org.apache.doris.analysis.DbName;
 import org.apache.doris.analysis.DistributionDesc;
-import org.apache.doris.analysis.DropTableStmt;
 import org.apache.doris.analysis.HashDistributionDesc;
 import org.apache.doris.analysis.KeysDesc;
 import org.apache.doris.analysis.ModifyColumnClause;
@@ -279,6 +278,7 @@ public class InternalSchemaInitializer extends Thread {
             {
                 put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, String.valueOf(
                         Math.max(1, Config.min_replication_num_per_tablet)));
+                put(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN, "false");
             }
         };
 
@@ -335,38 +335,38 @@ public class InternalSchemaInitializer extends Thread {
             return false;
         }
         Database db = optionalDatabase.get();
-        Optional<Table> optionalStatsTbl = db.getTable(StatisticConstants.TABLE_STATISTIC_TBL_NAME);
-        if (!optionalStatsTbl.isPresent()) {
+        Optional<Table> optionalTable = db.getTable(StatisticConstants.TABLE_STATISTIC_TBL_NAME);
+        if (!optionalTable.isPresent()) {
             return false;
         }
 
         // 2. check statistic tables
-        Table statsTbl = optionalStatsTbl.get();
+        Table statsTbl = optionalTable.get();
         Optional<Column> optionalColumn =
                 statsTbl.fullSchema.stream().filter(c -> c.getName().equals("count")).findFirst();
         if (!optionalColumn.isPresent() || !optionalColumn.get().isAllowNull()) {
             try {
                 Env.getCurrentEnv().getInternalCatalog()
-                        .dropTable(new DropTableStmt(true, new TableName(null,
-                                StatisticConstants.DB_NAME, StatisticConstants.TABLE_STATISTIC_TBL_NAME), true));
+                        .dropTable(StatisticConstants.DB_NAME, StatisticConstants.TABLE_STATISTIC_TBL_NAME,
+                                false, false, true, false, true);
             } catch (Exception e) {
                 LOG.warn("Failed to drop outdated table", e);
             }
             return false;
         }
-        optionalStatsTbl = db.getTable(StatisticConstants.PARTITION_STATISTIC_TBL_NAME);
-        if (!optionalStatsTbl.isPresent()) {
+        optionalTable = db.getTable(StatisticConstants.PARTITION_STATISTIC_TBL_NAME);
+        if (!optionalTable.isPresent()) {
             return false;
         }
 
         // 3. check audit table
-        optionalStatsTbl = db.getTable(AuditLoader.AUDIT_LOG_TABLE);
-        if (!optionalStatsTbl.isPresent()) {
+        optionalTable = db.getTable(AuditLoader.AUDIT_LOG_TABLE);
+        if (!optionalTable.isPresent()) {
             return false;
         }
 
         // 4. check and update audit table schema
-        OlapTable auditTable = (OlapTable) optionalStatsTbl.get();
+        OlapTable auditTable = (OlapTable) optionalTable.get();
 
         // 5. check if we need to add new columns
         return alterAuditSchemaIfNeeded(auditTable);

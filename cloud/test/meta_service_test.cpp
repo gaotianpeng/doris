@@ -26,6 +26,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -3781,7 +3782,7 @@ TEST(MetaServiceTest, FilterCopyFilesTest) {
 
 extern std::vector<std::pair<int64_t, int64_t>> calc_sync_versions(
         int64_t req_bc_cnt, int64_t bc_cnt, int64_t req_cc_cnt, int64_t cc_cnt, int64_t req_cp,
-        int64_t cp, int64_t req_start, int64_t req_end);
+        int64_t cp, int64_t req_fc_cnt, int64_t fc_cnt, int64_t req_start, int64_t req_end);
 
 TEST(MetaServiceTest, CalcSyncVersionsTest) {
     using Versions = std::vector<std::pair<int64_t, int64_t>>;
@@ -3797,7 +3798,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 1};
         auto [req_cp, cp] = std::tuple {5, 5};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{8, 12}}));
     }
@@ -3813,7 +3814,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
         auto [req_cp, cp] = std::tuple {5, 10};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{5, 12}})); // [5, 9] v [8, 12]
     }
@@ -3822,7 +3823,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
         auto [req_cp, cp] = std::tuple {5, 15};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{5, 14}})); // [5, 14] v [8, 12]
     }
@@ -3839,7 +3840,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
         auto [req_cp, cp] = std::tuple {5, 5};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{5, INT64_MAX - 1}})); // [5, max] v [8, 12]
     }
@@ -3855,7 +3856,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 3};
         auto [req_cp, cp] = std::tuple {5, 5};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{5, INT64_MAX - 1}})); // [5, max] v [8, 12]
     }
@@ -3870,7 +3871,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 3};
         auto [req_cp, cp] = std::tuple {5, 15};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{5, INT64_MAX - 1}})); // [5, max] v [8, 12]
     }
@@ -3886,7 +3887,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 1};
         auto [req_cp, cp] = std::tuple {5, 5};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{0, 4}, {8, 12}}));
     }
@@ -3895,7 +3896,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 1};
         auto [req_cp, cp] = std::tuple {8, 8};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{0, 12}})); // [0, 7] v [8, 12]
     }
@@ -3904,7 +3905,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
         auto [req_cp, cp] = std::tuple {5, 10};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{0, 12}})); // [0, 4] v [5, 9] v [8, 12]
     }
@@ -3913,7 +3914,7 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
         auto [req_cp, cp] = std::tuple {5, 15};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         ASSERT_EQ(versions, (Versions {{0, 14}})); // [0, 4] v [5, 14] v [8, 12]
     }
@@ -3922,10 +3923,41 @@ TEST(MetaServiceTest, CalcSyncVersionsTest) {
         auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
         auto [req_cp, cp] = std::tuple {5, 5};
         auto [req_start, req_end] = std::tuple {8, 12};
-        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp,
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
                                            req_start, req_end);
         // [0, 4] v [5, max] v [8, 12]
         ASSERT_EQ(versions, (Versions {{0, INT64_MAX - 1}}));
+    }
+
+    {
+        // when there exists full compaction, we can't optimize by "* only one CC happened and CP changed"
+
+        // * one CC happened and CP changed, and full compaction happened
+        // BE  [=][=][=][=][=][=][=][=][=][=]
+        //                  ^~~~~ req_cp
+        // MS  [xxxxxxxxxxxxxx][xxxxxxxxxxxxxx][=======][=][=]
+        //                      ^~~~~~~ ms_cp
+        //                  ^___________________________^ related_versions: [req_cp, max]
+        //
+        auto [req_bc_cnt, bc_cnt] = std::tuple {0, 1};
+        auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
+        auto [req_cp, cp] = std::tuple {4, 7};
+        auto [req_start, req_end] = std::tuple {9, 12};
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 1,
+                                           req_start, req_end);
+        ASSERT_EQ(versions, (Versions {{0, INT64_MAX - 1}}));
+    }
+
+    {
+        // abnormal case:
+        auto [req_bc_cnt, bc_cnt] = std::tuple {0, 1};
+        auto [req_cc_cnt, cc_cnt] = std::tuple {1, 2};
+        auto [req_cp, cp] = std::tuple {4, 7};
+        auto [req_start, req_end] = std::tuple {9, 12};
+        auto versions = calc_sync_versions(req_bc_cnt, bc_cnt, req_cc_cnt, cc_cnt, req_cp, cp, 0, 0,
+                                           req_start, req_end);
+        // when not considering full compaction, the returned versions is wrong becasue rowsets in [7-8] are missed
+        ASSERT_EQ(versions, (Versions {{0, 6}, {9, 12}}));
     }
 }
 
@@ -4651,6 +4683,292 @@ TEST(MetaServiceTest, GetTabletStatsTest) {
     EXPECT_EQ(res.tablet_stats(0).segment_size(), 40000);
 }
 
+void remove_delete_bitmap_lock(MetaServiceProxy* meta_service, int64_t table_id) {
+    std::string lock_key = meta_delete_bitmap_update_lock_key({"test_instance", table_id, -1});
+    std::unique_ptr<Transaction> txn;
+    ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+    txn->remove(lock_key);
+    std::string tablet_job_key_begin = mow_tablet_job_key({"test_instance", table_id, 0});
+    std::string tablet_job_key_end = mow_tablet_job_key({"test_instance", table_id, INT64_MAX});
+    txn->remove(tablet_job_key_begin, tablet_job_key_end);
+    ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+}
+
+void testGetDeleteBitmapUpdateLock(int lock_version, int job_lock_id) {
+    config::delete_bitmap_lock_v2_white_list = lock_version == 1 ? "" : "*";
+    auto meta_service = get_meta_service();
+    [[maybe_unused]] auto sp = SyncPoint::get_instance();
+    DORIS_CLOUD_DEFER {
+        SyncPoint::get_instance()->clear_all_call_backs();
+    };
+    remove_delete_bitmap_lock(meta_service.get(), 1);
+    remove_delete_bitmap_lock(meta_service.get(), 2);
+    int64_t table_id = 9;
+
+    // case 1: lock key does not exist, get and remove load lock
+    brpc::Controller cntl;
+    GetDeleteBitmapUpdateLockRequest req;
+    GetDeleteBitmapUpdateLockResponse res;
+    req.set_cloud_unique_id("test_cloud_unique_id");
+    req.set_table_id(table_id);
+    req.add_partition_ids(123);
+    req.set_expiration(5);
+    req.set_lock_id(888);
+    req.set_initiator(-1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    RemoveDeleteBitmapUpdateLockRequest remove_req;
+    RemoveDeleteBitmapUpdateLockResponse remove_res;
+    remove_req.set_cloud_unique_id("test_cloud_unique_id");
+    remove_req.set_table_id(table_id);
+    remove_req.set_lock_id(888);
+    remove_req.set_initiator(-1);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 2: lock key does not exist, get and remove compaction lock
+    req.add_partition_ids(123);
+    req.set_expiration(600);
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(100);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    remove_req.set_tablet_id(2);
+    remove_req.set_lock_id(job_lock_id);
+    remove_req.set_initiator(100);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 3: lock key owned by load1, load2 get lock
+    req.add_partition_ids(123);
+    req.set_expiration(600);
+    req.set_lock_id(888);
+    req.set_initiator(-1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    req.set_lock_id(889);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::LOCK_CONFLICT);
+
+    // case 4: lock key owned by load1, compaction1 get lock
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(100);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::LOCK_CONFLICT);
+
+    remove_req.set_tablet_id(2);
+    remove_req.set_lock_id(888);
+    remove_req.set_initiator(-1);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 5: lock key owned by load1 but expired, load2 get lock
+    req.add_partition_ids(123);
+    req.set_expiration(1);
+    req.set_lock_id(888);
+    req.set_initiator(-1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    sleep(2);
+    req.set_lock_id(889);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    remove_req.set_lock_id(889);
+    remove_req.set_initiator(-1);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 6: lock key owned by load1 but expired, compaction1 get lock
+    req.add_partition_ids(123);
+    req.set_expiration(1);
+    req.set_lock_id(888);
+    req.set_initiator(-1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    sleep(2);
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(888);
+    req.set_expiration(1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    remove_req.set_lock_id(job_lock_id);
+    remove_req.set_initiator(888);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 7: lock key owned by compaction, new compaction get lock
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(100);
+    req.set_expiration(100);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(101);
+    req.set_expiration(1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    // new compaction get lock again
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    // case 8: lock key owned by compaction, load1 get lock
+    req.set_lock_id(888);
+    req.set_initiator(-1);
+    req.set_expiration(60);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::LOCK_CONFLICT);
+
+    remove_req.set_lock_id(job_lock_id);
+    remove_req.set_initiator(100);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 9: lock key owned by compaction but all expired (101 900), load1 get lock
+    req.set_table_id(table_id);
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(900);
+    req.set_expiration(1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    sleep(2);
+    req.set_table_id(table_id);
+    req.set_lock_id(888);
+    req.set_initiator(-1);
+    req.set_expiration(60);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    remove_req.set_lock_id(888);
+    remove_req.set_initiator(-1);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 10: lock key owned by compaction but all expired (101 900), schema change get lock
+    req.set_table_id(table_id);
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(900);
+    req.set_expiration(1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    sleep(2);
+    req.set_table_id(table_id);
+    int other_job_lock_id = job_lock_id == COMPACTION_DELETE_BITMAP_LOCK_ID
+                                    ? SCHEMA_CHANGE_DELETE_BITMAP_LOCK_ID
+                                    : COMPACTION_DELETE_BITMAP_LOCK_ID;
+    req.set_lock_id(other_job_lock_id);
+    req.set_initiator(100);
+    req.set_expiration(1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    remove_req.set_lock_id(other_job_lock_id);
+    remove_req.set_initiator(100);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 11: lock by schema change but expired, compaction get lock but txn commit conflict, do fast retry
+    sp->set_call_back("get_delete_bitmap_update_lock:commit:conflict", [&](auto&& args) {
+        auto* first_retry = try_any_cast<bool*>(args[0]);
+        auto lock_id = (try_any_cast<const GetDeleteBitmapUpdateLockRequest*>(args[1]))->lock_id();
+        if (*first_retry && is_job_delete_bitmap_lock_id(lock_id)) {
+            *try_any_cast<TxnErrorCode*>(args[2]) = TxnErrorCode::TXN_CONFLICT;
+        } else {
+            *try_any_cast<TxnErrorCode*>(args[2]) = TxnErrorCode::TXN_OK;
+        }
+    });
+    sp->enable_processing();
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(100);
+    req.set_expiration(10);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+    remove_req.set_lock_id(job_lock_id);
+    remove_req.set_initiator(100);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_req, &remove_res,
+            nullptr);
+    ASSERT_EQ(remove_res.status().code(), MetaServiceCode::OK);
+
+    // case 12: lock by load but expired, compaction get lock but txn commit conflict, do fast retry
+    req.set_lock_id(300);
+    req.set_initiator(-1);
+    req.set_expiration(1);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    sleep(2);
+    req.set_lock_id(job_lock_id);
+    req.set_initiator(100);
+    req.set_expiration(10);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+    remove_delete_bitmap_lock(meta_service.get(), table_id);
+
+    // case 13: lock key does not exist, compaction get lock but txn commit conflict, do fast retry
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    sp->clear_all_call_backs();
+    sp->clear_trace();
+    sp->disable_processing();
+    remove_delete_bitmap_lock(meta_service.get(), table_id);
+}
+
+TEST(MetaServiceTest, GetDeleteBitmapUpdateLock) {
+    testGetDeleteBitmapUpdateLock(2, COMPACTION_DELETE_BITMAP_LOCK_ID);
+    testGetDeleteBitmapUpdateLock(2, SCHEMA_CHANGE_DELETE_BITMAP_LOCK_ID);
+    testGetDeleteBitmapUpdateLock(1, COMPACTION_DELETE_BITMAP_LOCK_ID);
+    testGetDeleteBitmapUpdateLock(1, SCHEMA_CHANGE_DELETE_BITMAP_LOCK_ID);
+}
+
 TEST(MetaServiceTest, GetDeleteBitmapUpdateLockNoReadStats) {
     auto meta_service = get_meta_service();
 
@@ -4945,7 +5263,7 @@ static std::string generate_random_string(int length) {
 }
 
 TEST(MetaServiceTest, UpdateDeleteBitmapWithBigKeys) {
-    auto meta_service = get_fdb_meta_service();
+    auto meta_service = get_meta_service();
     // get delete bitmap update lock
     brpc::Controller cntl;
     GetDeleteBitmapUpdateLockRequest get_lock_req;
@@ -5462,8 +5780,10 @@ TEST(MetaServiceTest, UpdateDeleteBitmapScOverrideExistingKey) {
     }
 }
 
-TEST(MetaServiceTest, UpdateDeleteBitmap) {
+void testUpdateDeleteBitmap(int lock_version) {
+    config::delete_bitmap_lock_v2_white_list = lock_version == 1 ? "" : "*";
     auto meta_service = get_meta_service();
+    remove_delete_bitmap_lock(meta_service.get(), 112);
 
     // get delete bitmap update lock
     brpc::Controller cntl;
@@ -5762,6 +6082,98 @@ TEST(MetaServiceTest, UpdateDeleteBitmap) {
         ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps(0), large_value);
     }
 
+    RemoveDeleteBitmapUpdateLockRequest remove_lock_req;
+    RemoveDeleteBitmapUpdateLockResponse remove_lock_res;
+    remove_lock_req.set_cloud_unique_id("test_cloud_unique_id");
+    remove_lock_req.set_table_id(112);
+    remove_lock_req.set_lock_id(888);
+    remove_lock_req.set_initiator(-1);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_lock_req,
+            &remove_lock_res, nullptr);
+    ASSERT_EQ(remove_lock_res.status().code(), MetaServiceCode::OK);
+
+    for (int i = 0; i < 2; ++i) {
+        auto lock_id =
+                i == 0 ? COMPACTION_DELETE_BITMAP_LOCK_ID : SCHEMA_CHANGE_DELETE_BITMAP_LOCK_ID;
+        // case: compaction or schema_change update delete bitmap
+        get_lock_req.set_lock_id(lock_id);
+        get_lock_req.set_initiator(800);
+        meta_service->get_delete_bitmap_update_lock(
+                reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &get_lock_req,
+                &get_lock_res, nullptr);
+        ASSERT_EQ(get_lock_res.status().code(), MetaServiceCode::OK);
+        // update delete bitmap
+        UpdateDeleteBitmapRequest update_delete_bitmap_req;
+        UpdateDeleteBitmapResponse update_delete_bitmap_res;
+        update_delete_bitmap_req.set_cloud_unique_id("test_cloud_unique_id");
+        update_delete_bitmap_req.set_table_id(112);
+        update_delete_bitmap_req.set_partition_id(123);
+        update_delete_bitmap_req.set_lock_id(lock_id);
+        update_delete_bitmap_req.set_initiator(800);
+        update_delete_bitmap_req.set_tablet_id(333);
+        update_delete_bitmap_req.add_rowset_ids("123");
+        update_delete_bitmap_req.add_segment_ids(0);
+        update_delete_bitmap_req.add_versions(2);
+        update_delete_bitmap_req.add_segment_delete_bitmaps("compaction0");
+        meta_service->update_delete_bitmap(
+                reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                &update_delete_bitmap_req, &update_delete_bitmap_res, nullptr);
+        ASSERT_EQ(update_delete_bitmap_res.status().code(), MetaServiceCode::OK);
+        // remove lock
+        remove_lock_req.set_lock_id(lock_id);
+        remove_lock_req.set_initiator(800);
+        meta_service->remove_delete_bitmap_update_lock(
+                reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_lock_req,
+                &remove_lock_res, nullptr);
+        ASSERT_EQ(remove_lock_res.status().code(), MetaServiceCode::OK);
+
+        // case: compaction or schema_change update delete bitmap with lock expired
+        get_lock_req.set_lock_id(lock_id);
+        get_lock_req.set_initiator(800);
+        get_lock_req.set_expiration(1);
+        meta_service->get_delete_bitmap_update_lock(
+                reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &get_lock_req,
+                &get_lock_res, nullptr);
+        ASSERT_EQ(get_lock_res.status().code(), MetaServiceCode::OK);
+        // load get lock
+        sleep(2);
+        get_lock_req.set_lock_id(100);
+        get_lock_req.set_initiator(-1);
+        get_lock_req.set_expiration(1);
+        meta_service->get_delete_bitmap_update_lock(
+                reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &get_lock_req,
+                &get_lock_res, nullptr);
+        ASSERT_EQ(get_lock_res.status().code(), MetaServiceCode::OK);
+        // compaction update delete bitmap
+        meta_service->update_delete_bitmap(
+                reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                &update_delete_bitmap_req, &update_delete_bitmap_res, nullptr);
+        ASSERT_EQ(update_delete_bitmap_res.status().code(), MetaServiceCode::LOCK_EXPIRED);
+
+        // case: compaction2 or schema_change2 get lock
+        sleep(2);
+        get_lock_req.set_lock_id(lock_id);
+        get_lock_req.set_initiator(810);
+        get_lock_req.set_expiration(1);
+        meta_service->get_delete_bitmap_update_lock(
+                reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &get_lock_req,
+                &get_lock_res, nullptr);
+        ASSERT_EQ(get_lock_res.status().code(), MetaServiceCode::OK);
+        // compaction1 update delete bitmap
+        meta_service->update_delete_bitmap(
+                reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                &update_delete_bitmap_req, &update_delete_bitmap_res, nullptr);
+        ASSERT_EQ(update_delete_bitmap_res.status().code(), MetaServiceCode::LOCK_EXPIRED);
+        // remove compaction2 or or schema_change2 lock
+        remove_lock_req.set_lock_id(lock_id);
+        remove_lock_req.set_initiator(810);
+        meta_service->remove_delete_bitmap_update_lock(
+                reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_lock_req,
+                &remove_lock_res, nullptr);
+        ASSERT_EQ(remove_lock_res.status().code(), MetaServiceCode::OK);
+    }
+
     {
         //compaction update delete bitmap without lock
         UpdateDeleteBitmapRequest update_delete_bitmap_req;
@@ -5769,7 +6181,7 @@ TEST(MetaServiceTest, UpdateDeleteBitmap) {
         update_delete_bitmap_req.set_cloud_unique_id("test_cloud_unique_id");
         update_delete_bitmap_req.set_table_id(112);
         update_delete_bitmap_req.set_partition_id(123);
-        update_delete_bitmap_req.set_unlock(true);
+        update_delete_bitmap_req.set_without_lock(true);
         update_delete_bitmap_req.set_lock_id(-3);
         update_delete_bitmap_req.set_initiator(-1);
         update_delete_bitmap_req.set_tablet_id(333);
@@ -5805,6 +6217,13 @@ TEST(MetaServiceTest, UpdateDeleteBitmap) {
         ASSERT_EQ(get_delete_bitmap_res.versions(0), 2);
         ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps(0), large_value);
     }
+
+    remove_delete_bitmap_lock(meta_service.get(), 112);
+}
+
+TEST(MetaServiceTest, UpdateDeleteBitmap) {
+    testUpdateDeleteBitmap(2);
+    testUpdateDeleteBitmap(1);
 }
 
 TEST(MetaServiceTest, UpdateDeleteBitmapWithException) {
@@ -5887,6 +6306,229 @@ TEST(MetaServiceTest, UpdateDeleteBitmapWithException) {
                 &update_delete_bitmap_req, &update_delete_bitmap_res, nullptr);
         ASSERT_EQ(update_delete_bitmap_res.status().code(), MetaServiceCode::LOCK_EXPIRED);
     }
+}
+
+void update_delete_bitmap_with_remove_pre(MetaServiceProxy* meta_service, int64_t table_id,
+                                          int64_t tablet_id, bool inject = false,
+                                          bool rowset_non_exist = false) {
+    // create rowset, if `rowset_non_exist` enabled, only r4 exists
+    {
+        std::unique_ptr<Transaction> txn;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        if (rowset_non_exist) {
+            std::string rs_key, rs_val;
+            doris::RowsetMetaCloudPB rs;
+            rs.set_rowset_id(0);
+
+            rs_key = meta_rowset_key({"test_instance", tablet_id, 3});
+            rs.set_rowset_id_v2("r2-3");
+            ASSERT_TRUE(rs.SerializeToString(&rs_val));
+            txn->put(rs_key, rs_val);
+
+            rs_key = meta_rowset_key({"test_instance", tablet_id, 4});
+            rs.set_rowset_id_v2("r4");
+            ASSERT_TRUE(rs.SerializeToString(&rs_val));
+            txn->put(rs_key, rs_val);
+        } else {
+            for (int i = 2; i <= 4; i++) {
+                std::string rs_key, rs_val;
+                MetaRowsetKeyInfo rs_key_info {"test_instance", tablet_id, i};
+                meta_rowset_key(rs_key_info, &rs_key);
+                doris::RowsetMetaCloudPB rs;
+                rs.set_rowset_id(0);
+                rs.set_rowset_id_v2("r" + std::to_string(i));
+                ASSERT_TRUE(rs.SerializeToString(&rs_val));
+                txn->put(rs_key, rs_val);
+            }
+        }
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+    }
+    brpc::Controller cntl;
+    // compaction update delete bitmap with remove pre rowset delete bitmaps
+    // get update lock
+    GetDeleteBitmapUpdateLockRequest get_lock_req;
+    GetDeleteBitmapUpdateLockResponse get_lock_res;
+    get_lock_req.set_cloud_unique_id("test_cloud_unique_id");
+    get_lock_req.set_table_id(table_id);
+    get_lock_req.set_lock_id(-1);
+    get_lock_req.set_initiator(203);
+    get_lock_req.set_expiration(10);
+    meta_service->get_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &get_lock_req,
+            &get_lock_res, nullptr);
+    ASSERT_EQ(get_lock_res.status().code(), MetaServiceCode::OK);
+    // write delete bitmap
+    UpdateDeleteBitmapRequest update_delete_bitmap_req;
+    UpdateDeleteBitmapResponse update_delete_bitmap_res;
+    update_delete_bitmap_req.set_cloud_unique_id("test_cloud_unique_id");
+    update_delete_bitmap_req.set_table_id(table_id);
+    update_delete_bitmap_req.set_partition_id(201);
+    update_delete_bitmap_req.set_tablet_id(tablet_id);
+    update_delete_bitmap_req.set_lock_id(-1);
+    update_delete_bitmap_req.set_initiator(203);
+    std::string large_value = generate_random_string(300 * 1000);
+    std::vector<std::tuple<std::string, int64_t, int64_t>> rowset_segment_version_vector = {
+            /* r2-0 */ {"r2", 0, 3}, {"r2", 0, 4}, {"r2", 0, 5}, {"r2", 0, 6},
+            /* r3-0 */ {"r3", 0, 4}, {"r3", 0, 5}, {"r3", 0, 6},
+            /* r3-1 */ {"r3", 1, 4}, {"r3", 1, 5},
+            /* r3-2 */ {"r3", 2, 4}, {"r3", 2, 6},
+            /* r4-0 */ {"r4", 0, 5}, {"r4", 0, 6}};
+    for (const auto& [rowset, segment, version] : rowset_segment_version_vector) {
+        update_delete_bitmap_req.add_rowset_ids(rowset);
+        update_delete_bitmap_req.add_segment_ids(segment);
+        update_delete_bitmap_req.add_versions(version);
+        update_delete_bitmap_req.add_segment_delete_bitmaps(large_value);
+    }
+    meta_service->update_delete_bitmap(reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                                       &update_delete_bitmap_req, &update_delete_bitmap_res,
+                                       nullptr);
+    ASSERT_EQ(update_delete_bitmap_res.status().code(), MetaServiceCode::OK);
+    // remove delete bitmap lock
+    RemoveDeleteBitmapUpdateLockRequest remove_lock_req;
+    RemoveDeleteBitmapUpdateLockResponse remove_lock_res;
+    remove_lock_req.set_cloud_unique_id("test_cloud_unique_id");
+    remove_lock_req.set_table_id(table_id);
+    remove_lock_req.set_lock_id(-1);
+    remove_lock_req.set_initiator(203);
+    meta_service->remove_delete_bitmap_update_lock(
+            reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &remove_lock_req,
+            &remove_lock_res, nullptr);
+    ASSERT_EQ(remove_lock_res.status().code(), MetaServiceCode::OK);
+    // get delete bitmap
+    GetDeleteBitmapRequest get_delete_bitmap_req;
+    GetDeleteBitmapResponse get_delete_bitmap_res;
+    get_delete_bitmap_req.set_cloud_unique_id("test_cloud_unique_id");
+    get_delete_bitmap_req.set_tablet_id(tablet_id);
+    std::vector<std::string> rowset_vector = {"r2", "r3", "r4"};
+    for (const auto& rowset : rowset_vector) {
+        get_delete_bitmap_req.add_rowset_ids(rowset);
+        get_delete_bitmap_req.add_begin_versions(0);
+        get_delete_bitmap_req.add_end_versions(6);
+    }
+    meta_service->get_delete_bitmap(reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                                    &get_delete_bitmap_req, &get_delete_bitmap_res, nullptr);
+    ASSERT_EQ(get_delete_bitmap_res.status().code(), MetaServiceCode::OK);
+    auto size = rowset_segment_version_vector.size();
+    ASSERT_EQ(get_delete_bitmap_res.rowset_ids_size(), size);
+    ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps_size(), size);
+    ASSERT_EQ(get_delete_bitmap_res.versions_size(), size);
+    ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps_size(), size);
+    // update pre rowset delete bitmap
+    update_delete_bitmap_req.clear_rowset_ids();
+    update_delete_bitmap_req.clear_segment_ids();
+    update_delete_bitmap_req.clear_versions();
+    update_delete_bitmap_req.clear_segment_delete_bitmaps();
+    update_delete_bitmap_req.set_lock_id(-3);
+    update_delete_bitmap_req.set_without_lock(true);
+    update_delete_bitmap_req.set_initiator(tablet_id);
+    update_delete_bitmap_req.set_pre_rowset_agg_start_version(4);
+    update_delete_bitmap_req.set_pre_rowset_agg_end_version(6);
+    std::vector<std::tuple<std::string, int64_t, int64_t, int64_t>>
+            new_rowset_segment_version_vector = {/* r2-0 */ {"r2", 0, 6, 2},
+                                                 /* r3-0 */ {"r3", 0, 6, 3},
+                                                 /* r3-1 */ {"r3", 1, 6, 3},
+                                                 /* r3-2 */ {"r3", 2, 6, 3},
+                                                 /* r4-0 */ {"r4", 0, 6, 4}};
+    std::string new_large_value = generate_random_string(300 * 1000);
+    for (const auto& [rowset, segment, version, rowset_version] :
+         new_rowset_segment_version_vector) {
+        update_delete_bitmap_req.add_rowset_ids(rowset);
+        update_delete_bitmap_req.add_segment_ids(segment);
+        update_delete_bitmap_req.add_versions(version);
+        update_delete_bitmap_req.add_segment_delete_bitmaps(new_large_value);
+        update_delete_bitmap_req.add_pre_rowset_versions(rowset_version);
+    }
+    meta_service->update_delete_bitmap(reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                                       &update_delete_bitmap_req, &update_delete_bitmap_res,
+                                       nullptr);
+    ASSERT_EQ(update_delete_bitmap_res.status().code(),
+              inject ? MetaServiceCode::KV_TXN_CONFLICT : MetaServiceCode::OK);
+    // get delete bitmap again
+    meta_service->get_delete_bitmap(reinterpret_cast<google::protobuf::RpcController*>(&cntl),
+                                    &get_delete_bitmap_req, &get_delete_bitmap_res, nullptr);
+    ASSERT_EQ(get_delete_bitmap_res.status().code(), MetaServiceCode::OK);
+    size = 6;
+    if (inject) {
+        size = 13;
+    } else if (rowset_non_exist) {
+        size = 12;
+    }
+    ASSERT_EQ(get_delete_bitmap_res.rowset_ids_size(), size);
+    ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps_size(), size);
+    ASSERT_EQ(get_delete_bitmap_res.versions_size(), size);
+    ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps_size(), size);
+    std::vector<std::tuple<std::string, int64_t, int64_t, std::string>> expected_dm;
+    if (inject) {
+        expected_dm = {/* r2-0 */ {"r2", 0, 3, large_value},
+                       {"r2", 0, 4, large_value},
+                       {"r2", 0, 5, large_value},
+                       {"r2", 0, 6, new_large_value},
+                       /* r3-0 is agg */ {"r3", 0, 4, large_value},
+                       {"r3", 1, 4, large_value},
+                       {"r3", 2, 4, large_value},
+                       {"r3", 0, 5, large_value},
+                       {"r3", 1, 5, large_value},
+                       {"r3", 0, 6, new_large_value},
+                       {"r3", 2, 6, large_value},
+                       /* r4-0 */ {"r4", 0, 5, large_value},
+                       {"r4", 0, 6, large_value}};
+    } else if (rowset_non_exist) {
+        expected_dm = {/* r2-0 */ {"r2", 0, 3, large_value},
+                       {"r2", 0, 4, large_value},
+                       {"r2", 0, 5, large_value},
+                       {"r2", 0, 6, large_value},
+                       /* r3-0 */ {"r3", 0, 4, large_value},
+                       {"r3", 1, 4, large_value},
+                       {"r3", 2, 4, large_value},
+                       {"r3", 0, 5, large_value},
+                       {"r3", 1, 5, large_value},
+                       {"r3", 0, 6, large_value},
+                       {"r3", 2, 6, large_value},
+                       /* r4-0 */ {"r4", 0, 6, new_large_value}};
+    } else {
+        expected_dm = {/* r2-0 */ {"r2", 0, 3, large_value},
+                       {"r2", 0, 6, new_large_value},
+                       /* r3-0 */ {"r3", 0, 6, new_large_value},
+                       /* r3-1 */ {"r3", 1, 6, new_large_value},
+                       /* r3-2 */ {"r3", 2, 6, new_large_value},
+                       /* r4-0 */ {"r4", 0, 6, new_large_value}};
+    }
+    for (size_t i = 0; i < get_delete_bitmap_res.rowset_ids_size(); i++) {
+        ASSERT_EQ(get_delete_bitmap_res.rowset_ids(i), std::get<0>(expected_dm[i]));
+        ASSERT_EQ(get_delete_bitmap_res.segment_ids(i), std::get<1>(expected_dm[i]));
+        ASSERT_EQ(get_delete_bitmap_res.versions(i), std::get<2>(expected_dm[i]));
+        ASSERT_EQ(get_delete_bitmap_res.segment_delete_bitmaps(i), std::get<3>(expected_dm[i]));
+    }
+}
+
+TEST(MetaServiceTest, UpdateDeleteBitmapWithRemovePreDeleteBitmap) {
+    auto meta_service = get_meta_service();
+    [[maybe_unused]] auto sp = SyncPoint::get_instance();
+    DORIS_CLOUD_DEFER {
+        SyncPoint::get_instance()->clear_all_call_backs();
+    };
+
+    update_delete_bitmap_with_remove_pre(meta_service.get(), 200, 202);
+
+    int64_t max_txn_commit_byte = config::max_txn_commit_byte;
+    config::max_txn_commit_byte = 1000;
+    update_delete_bitmap_with_remove_pre(meta_service.get(), 300, 302);
+
+    sp->set_call_back("update_delete_bitmap:commit:err", [&](auto&& args) {
+        auto initiator = try_any_cast<int64_t>(args[0]);
+        auto i = try_any_cast<size_t>(args[1]);
+        if (initiator == 402 && i == 2) {
+            *try_any_cast<TxnErrorCode*>(args[2]) = TxnErrorCode::TXN_CONFLICT;
+        }
+    });
+    sp->enable_processing();
+    update_delete_bitmap_with_remove_pre(meta_service.get(), 400, 402, true);
+    sp->clear_all_call_backs();
+    sp->clear_trace();
+    sp->disable_processing();
+    config::max_txn_commit_byte = max_txn_commit_byte;
+
+    update_delete_bitmap_with_remove_pre(meta_service.get(), 500, 502, false, true);
 }
 
 TEST(MetaServiceTest, GetDeleteBitmapWithIdx) {
@@ -9771,5 +10413,653 @@ TEST(MetaServiceTest, AlterS3StorageVaultWithRoleArnTest) {
 
     SyncPoint::get_instance()->disable_processing();
     SyncPoint::get_instance()->clear_all_call_backs();
+}
+
+void scan_restore_job_rowset(
+        Transaction* txn, const std::string& instance_id, int64_t tablet_id, MetaServiceCode& code,
+        std::string& msg,
+        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>* restore_job_rs_metas);
+
+TEST(MetaServiceTest, RestoreJobTest) {
+    auto meta_service = get_meta_service();
+    ASSERT_NE(meta_service, nullptr);
+
+    std::string instance_id = "test_prepare_restore_job_instance_id";
+    auto sp = SyncPoint::get_instance();
+    std::unique_ptr<int, std::function<void(int*)>> defer(
+            (int*)0x01, [](int*) { SyncPoint::get_instance()->clear_all_call_backs(); });
+    sp->set_call_back("get_instance_id", [&](auto&& args) {
+        auto* ret = try_any_cast_ret<std::string>(args);
+        ret->first = instance_id;
+        ret->second = true;
+    });
+    sp->enable_processing();
+
+    auto reset_meta_service = [&meta_service] { meta_service = get_meta_service(); };
+    constexpr int64_t table_id = 10001;
+    constexpr int64_t index_id = 10002;
+    constexpr int64_t partition_id = 10003;
+    constexpr int64_t tablet_id = 10004;
+    constexpr int64_t version = 1;
+    constexpr int64_t txn_id = 0;
+
+    TabletIndexPB tablet_idx;
+    tablet_idx.set_table_id(table_id);
+    tablet_idx.set_index_id(index_id);
+    tablet_idx.set_partition_id(partition_id);
+    tablet_idx.set_tablet_id(tablet_id);
+    std::string tablet_idx_val;
+    tablet_idx.SerializeToString(&tablet_idx_val);
+
+    std::unique_ptr<Transaction> txn;
+    brpc::Controller cntl;
+    RestoreJobRequest req;
+    RestoreJobResponse res;
+
+    // ------------Test prepare restore job------------
+    // invalid args prepare restore job
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+        // empty action
+        meta_service->prepare_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_TRUE(res.status().msg().find("invalid action") != std::string::npos);
+        req.set_action(RestoreJobRequest::PREPARE);
+
+        // empty tablet id
+        meta_service->prepare_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_EQ(res.status().msg(), "empty tablet_id");
+
+        // restore with empty tablet meta
+        req.set_tablet_id(tablet_id);
+        res.Clear();
+        meta_service->prepare_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_EQ(res.status().msg(), "no tablet meta");
+
+        // check key existence
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_KEY_NOT_FOUND);
+
+        req.Clear();
+        res.Clear();
+    }
+    // normal prepare restore job
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+        req.set_tablet_id(tablet_id);
+        req.set_expiration(time(nullptr) + 3600);
+        req.set_action(RestoreJobRequest::PREPARE);
+
+        // set tablet meta
+        auto* tablet_meta = req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+        auto* rs_meta = tablet_meta->add_rs_metas();
+        *rs_meta = create_rowset(txn_id, tablet_id, partition_id, version);
+
+        meta_service->prepare_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+
+        RestoreJobCloudPB restore_job_pb;
+        ASSERT_TRUE(restore_job_pb.ParseFromString(val));
+        ASSERT_EQ(restore_job_pb.tablet_id(), tablet_id);
+        ASSERT_EQ(restore_job_pb.state(), RestoreJobCloudPB::PREPARED);
+        ASSERT_EQ(restore_job_pb.tablet_meta().schema_version(), 1);
+
+        std::string restore_job_rs_key = job_restore_rowset_key({instance_id, tablet_id, version});
+        ASSERT_EQ(txn->get(restore_job_rs_key, &val), TxnErrorCode::TXN_OK);
+        RowsetMetaCloudPB rs_meta_pb;
+        ASSERT_TRUE(rs_meta_pb.ParseFromString(val));
+        ASSERT_EQ(rs_meta_pb.tablet_id(), tablet_id);
+        ASSERT_EQ(rs_meta_pb.rowset_id_v2(), rs_meta->rowset_id_v2());
+        req.Clear();
+        res.Clear();
+    }
+    // duplicate prepare restore job
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::PREPARE);
+
+        // set tablet meta
+        auto* tablet_meta = req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+        auto* rs_meta = tablet_meta->add_rs_metas();
+        *rs_meta = create_rowset(txn_id, tablet_id, partition_id, version);
+
+        // first request
+        meta_service->prepare_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+
+        RestoreJobCloudPB restore_job_pb;
+        ASSERT_TRUE(restore_job_pb.ParseFromString(val));
+        ASSERT_EQ(restore_job_pb.tablet_id(), tablet_id);
+        ASSERT_EQ(restore_job_pb.state(), RestoreJobCloudPB::PREPARED);
+        ASSERT_EQ(restore_job_pb.version(), 0);
+
+        // second request
+        meta_service->prepare_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+
+        restore_job_pb.Clear();
+        ASSERT_TRUE(restore_job_pb.ParseFromString(val));
+        ASSERT_EQ(restore_job_pb.tablet_id(), tablet_id);
+        ASSERT_EQ(restore_job_pb.state(), RestoreJobCloudPB::PREPARED);
+        ASSERT_EQ(restore_job_pb.version(), 1);
+        req.Clear();
+        res.Clear();
+    }
+    // ------------Test commit restore job------------
+    // invalid args commit restore job
+    {
+        reset_meta_service();
+        // empty action
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_TRUE(res.status().msg().find("invalid action") != std::string::npos);
+        req.set_action(RestoreJobRequest::COMMIT);
+
+        // empty tablet_id
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_EQ(res.status().msg(), "empty tablet_id");
+
+        // check key existence
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_KEY_NOT_FOUND);
+
+        req.Clear();
+        res.Clear();
+    }
+    // commit restore job not exits
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMMIT);
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_EQ(res.status().msg(), "restore job not exists or has been recycled");
+        req.Clear();
+        res.Clear();
+    }
+    // normal commit restore job
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        // prepare restore job
+        RestoreJobRequest make_req;
+        RestoreJobResponse make_res;
+        make_req.set_tablet_id(tablet_id);
+        make_req.set_expiration(time(nullptr) + 3600);
+        make_req.set_action(RestoreJobRequest::PREPARE);
+        auto* tablet_meta = make_req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+        auto* rs_meta = tablet_meta->add_rs_metas();
+        *rs_meta = create_rowset(txn_id, tablet_id, partition_id, version);
+        auto* delete_bitmap = tablet_meta->mutable_delete_bitmap();
+        delete_bitmap->add_rowset_ids(rs_meta->rowset_id_v2());
+        delete_bitmap->add_versions(1);
+        delete_bitmap->add_segment_ids(1);
+        delete_bitmap->add_segment_delete_bitmaps("test_bitmap");
+
+        meta_service->prepare_restore_job(&cntl, &make_req, &make_res, nullptr);
+        ASSERT_EQ(make_res.status().code(), MetaServiceCode::OK);
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        std::string restore_job_rs_key = job_restore_rowset_key({instance_id, tablet_id, version});
+        ASSERT_EQ(txn->get(restore_job_rs_key, &val), TxnErrorCode::TXN_OK);
+
+        // commit_restore_job
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMMIT);
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+        std::string tablet_key =
+                meta_tablet_key({instance_id, table_id, index_id, partition_id, tablet_id});
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(tablet_key, &val), TxnErrorCode::TXN_OK);
+        TabletMetaCloudPB saved_tablet_meta;
+        ASSERT_TRUE(saved_tablet_meta.ParseFromString(val));
+        ASSERT_EQ(saved_tablet_meta.tablet_id(), tablet_id);
+        ASSERT_EQ(saved_tablet_meta.schema_version(), 1);
+        std::string rs_key = meta_rowset_key({instance_id, tablet_id, version});
+        ASSERT_EQ(txn->get(rs_key, &val), TxnErrorCode::TXN_OK);
+        RowsetMetaCloudPB saved_rs_meta;
+        ASSERT_TRUE(saved_rs_meta.ParseFromString(val));
+        ASSERT_EQ(saved_rs_meta.tablet_id(), tablet_id);
+        ASSERT_EQ(saved_rs_meta.rowset_id_v2(), rs_meta->rowset_id_v2());
+        std::string bitmap_key =
+                meta_delete_bitmap_key({instance_id, tablet_id, rs_meta->rowset_id_v2(), 1, 1});
+        ASSERT_EQ(txn->get(bitmap_key, &val), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(val, "test_bitmap");
+
+        // ths restore job key should not be removed, restore job rowset key should be found
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>> restore_job_rs_metas;
+        MetaServiceCode code;
+        std::string msg;
+        scan_restore_job_rowset(txn.get(), instance_id, tablet_id, code, msg,
+                                &restore_job_rs_metas);
+        ASSERT_EQ(code, MetaServiceCode::OK) << msg;
+        ASSERT_EQ(restore_job_rs_metas.size(), 1);
+        req.Clear();
+        res.Clear();
+    }
+    // large commit restore job request with 10000 rowset meta
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        // prepare restore job
+        RestoreJobRequest make_req;
+        RestoreJobResponse make_res;
+        make_req.set_tablet_id(tablet_id);
+        make_req.set_expiration(time(nullptr) + 3600);
+        make_req.set_action(RestoreJobRequest::PREPARE);
+
+        auto* tablet_meta = make_req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+
+        // add 10000 rowset meta
+        constexpr int LARGE_ROWSET_COUNT = 10000;
+        for (int64_t ver = 1; ver <= LARGE_ROWSET_COUNT; ver++) {
+            auto* rs_meta = tablet_meta->add_rs_metas();
+            *rs_meta = create_rowset(txn_id, tablet_id, partition_id, ver);
+        }
+
+        meta_service->prepare_restore_job(&cntl, &make_req, &make_res, nullptr);
+        ASSERT_EQ(make_res.status().code(), MetaServiceCode::OK) << make_res.status().msg();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        for (int64_t ver = 1; ver <= LARGE_ROWSET_COUNT; ver++) {
+            std::string restore_job_rs_key = job_restore_rowset_key({instance_id, tablet_id, ver});
+            std::string val;
+            ASSERT_EQ(txn->get(restore_job_rs_key, &val), TxnErrorCode::TXN_OK);
+            RowsetMetaCloudPB rs_meta_pb;
+            ASSERT_TRUE(rs_meta_pb.ParseFromString(val));
+            ASSERT_EQ(rs_meta_pb.tablet_id(), tablet_id);
+            ASSERT_EQ(rs_meta_pb.start_version(), ver);
+            ASSERT_EQ(rs_meta_pb.end_version(), ver);
+        }
+
+        // commit_restore_job
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMMIT);
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        for (int64_t ver = 1; ver <= LARGE_ROWSET_COUNT; ver++) {
+            std::string rs_key = meta_rowset_key({instance_id, tablet_id, ver});
+            std::string val;
+            ASSERT_EQ(txn->get(rs_key, &val), TxnErrorCode::TXN_OK);
+            RowsetMetaCloudPB saved_rs_meta;
+            ASSERT_TRUE(saved_rs_meta.ParseFromString(val));
+            ASSERT_EQ(saved_rs_meta.tablet_id(), tablet_id);
+            ASSERT_EQ(saved_rs_meta.start_version(), ver);
+            ASSERT_EQ(saved_rs_meta.end_version(), ver);
+        }
+
+        // ths restore job key should not be removed, restore job rowset key should be found
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>> restore_job_rs_metas;
+        MetaServiceCode code;
+        std::string msg;
+        scan_restore_job_rowset(txn.get(), instance_id, tablet_id, code, msg,
+                                &restore_job_rs_metas);
+        ASSERT_EQ(code, MetaServiceCode::OK) << msg;
+        ASSERT_EQ(restore_job_rs_metas.size(), 10000);
+        req.Clear();
+        res.Clear();
+    }
+    // ------------Test finish restore job------------
+    // invalid args finish restore job
+    {
+        reset_meta_service();
+        // empty action
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_TRUE(res.status().msg().find("invalid action") != std::string::npos);
+        req.set_action(RestoreJobRequest::COMPLETE);
+
+        // empty tablet_id
+        meta_service->finish_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_EQ(res.status().msg(), "empty tablet_id");
+
+        // check key existence
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_KEY_NOT_FOUND);
+
+        req.Clear();
+        res.Clear();
+    }
+    // finish restore job not exists
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMPLETE);
+        meta_service->finish_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_EQ(res.status().msg(), "restore job not exists or has been recycled");
+        req.Clear();
+        res.Clear();
+    }
+    // finish restore job COMMITTED -> COMPLETED
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        // prepare restore job
+        RestoreJobRequest make_req;
+        RestoreJobResponse make_res;
+        make_req.set_tablet_id(tablet_id);
+        make_req.set_expiration(time(nullptr) + 3600);
+        make_req.set_action(RestoreJobRequest::PREPARE);
+
+        auto* tablet_meta = make_req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+        auto* rs_meta = tablet_meta->add_rs_metas();
+        *rs_meta = create_rowset(txn_id, tablet_id, partition_id, version);
+        auto* delete_bitmap = tablet_meta->mutable_delete_bitmap();
+        delete_bitmap->add_rowset_ids(rs_meta->rowset_id_v2());
+        delete_bitmap->add_versions(1);
+        delete_bitmap->add_segment_ids(1);
+        delete_bitmap->add_segment_delete_bitmaps("test_bitmap");
+
+        meta_service->prepare_restore_job(&cntl, &make_req, &make_res, nullptr);
+        ASSERT_EQ(make_res.status().code(), MetaServiceCode::OK);
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        std::string restore_job_rs_key = job_restore_rowset_key({instance_id, tablet_id, version});
+        ASSERT_EQ(txn->get(restore_job_rs_key, &val), TxnErrorCode::TXN_OK);
+
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMMIT);
+        meta_service->commit_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_rs_key, &val), TxnErrorCode::TXN_OK);
+
+        // finish_restore_job to COMPLETED
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMPLETE);
+        meta_service->finish_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+
+        // this restore job key should be in COMPLETED state
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        RestoreJobCloudPB restore_job_pb;
+        ASSERT_TRUE(restore_job_pb.ParseFromString(val));
+        ASSERT_EQ(restore_job_pb.state(), RestoreJobCloudPB::COMPLETED);
+        ASSERT_EQ(restore_job_pb.need_recycle_data(), false);
+        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>> restore_job_rs_metas;
+        MetaServiceCode code;
+        std::string msg;
+        scan_restore_job_rowset(txn.get(), instance_id, tablet_id, code, msg,
+                                &restore_job_rs_metas);
+        ASSERT_EQ(code, MetaServiceCode::OK) << msg;
+        ASSERT_EQ(restore_job_rs_metas.size(), 1);
+        req.Clear();
+        res.Clear();
+    }
+    // finish restore job state PREPARED -> DROPPED
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        // prepare restore job
+        RestoreJobRequest make_req;
+        RestoreJobResponse make_res;
+        make_req.set_tablet_id(tablet_id);
+        make_req.set_expiration(time(nullptr) + 3600);
+        make_req.set_action(RestoreJobRequest::PREPARE);
+
+        auto* tablet_meta = make_req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+        auto* rs_meta = tablet_meta->add_rs_metas();
+        *rs_meta = create_rowset(txn_id, tablet_id, partition_id, version);
+
+        meta_service->prepare_restore_job(&cntl, &make_req, &make_res, nullptr);
+        ASSERT_EQ(make_res.status().code(), MetaServiceCode::OK);
+        std::string restore_job_key = job_restore_tablet_key({instance_id, tablet_id});
+        std::string val;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        std::string restore_job_rs_key = job_restore_rowset_key({instance_id, tablet_id, version});
+        ASSERT_EQ(txn->get(restore_job_rs_key, &val), TxnErrorCode::TXN_OK);
+
+        // finish_restore_job to DROPPED
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::ABORT);
+        meta_service->finish_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK) << res.status().msg();
+
+        // this restore job key should be in DROPPED state
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(restore_job_key, &val), TxnErrorCode::TXN_OK);
+        RestoreJobCloudPB restore_job_pb;
+        ASSERT_TRUE(restore_job_pb.ParseFromString(val));
+        ASSERT_EQ(restore_job_pb.state(), RestoreJobCloudPB::DROPPED);
+        ASSERT_EQ(restore_job_pb.need_recycle_data(), true);
+        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>> restore_job_rs_metas;
+        MetaServiceCode code;
+        std::string msg;
+        scan_restore_job_rowset(txn.get(), instance_id, tablet_id, code, msg,
+                                &restore_job_rs_metas);
+        ASSERT_EQ(code, MetaServiceCode::OK) << msg;
+        ASSERT_EQ(restore_job_rs_metas.size(), 1);
+        req.Clear();
+        res.Clear();
+    }
+    // finish restore job invalid state PREPARED -> COMPLETED
+    {
+        reset_meta_service();
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(meta_tablet_idx_key({instance_id, tablet_id}), tablet_idx_val);
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+
+        // prepare restore job
+        RestoreJobRequest make_req;
+        RestoreJobResponse make_res;
+        make_req.set_tablet_id(tablet_id);
+        make_req.set_expiration(time(nullptr) + 3600);
+        make_req.set_action(RestoreJobRequest::PREPARE);
+
+        // set tablet meta
+        auto* tablet_meta = make_req.mutable_tablet_meta();
+        tablet_meta->set_table_id(table_id);
+        tablet_meta->set_index_id(index_id);
+        tablet_meta->set_partition_id(partition_id);
+        tablet_meta->set_tablet_id(tablet_id);
+        tablet_meta->set_schema_version(1);
+        auto* rs_meta = tablet_meta->add_rs_metas();
+        *rs_meta = create_rowset(txn_id, tablet_id, partition_id, version);
+
+        meta_service->prepare_restore_job(&cntl, &make_req, &make_res, nullptr);
+        ASSERT_EQ(make_res.status().code(), MetaServiceCode::OK);
+
+        // finish_restore_job to COMPLETED
+        req.set_tablet_id(tablet_id);
+        req.set_action(RestoreJobRequest::COMPLETE);
+        meta_service->finish_restore_job(&cntl, &req, &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::INVALID_ARGUMENT);
+        ASSERT_TRUE(res.status().msg().find("invalid state to complete") != std::string::npos);
+    }
+}
+
+TEST(MetaServiceTest, CreateTabletIdempotentAndHandlingError) {
+    DORIS_CLOUD_DEFER {
+        SyncPoint::get_instance()->clear_all_call_backs();
+        SyncPoint::get_instance()->disable_processing();
+    };
+
+    size_t case_num = 0;
+    auto* sp = SyncPoint::get_instance();
+    sp->set_call_back("meta_service_test:get_meta_tablet_key_error", [&case_num](auto&& args) {
+        if (++case_num == 3) {
+            auto* code = try_any_cast<TxnErrorCode*>(args[0]);
+            *code = TxnErrorCode::TXN_UNIDENTIFIED_ERROR;
+        }
+    });
+    sp->enable_processing();
+
+    auto meta_service = get_meta_service();
+    brpc::Controller cntl;
+    CreateTabletsRequest req;
+    CreateTabletsResponse res;
+    int64_t table_id = 100;
+    int64_t index_id = 200;
+    int64_t partition_id = 300;
+    int64_t tablet_id = 400;
+    req.set_db_id(1); // default db_id
+    add_tablet(req, table_id, index_id, partition_id, tablet_id);
+    // normal create
+    meta_service->create_tablets(&cntl, &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    // idempotent
+    meta_service->create_tablets(&cntl, &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+
+    // error handling
+    meta_service->create_tablets(&cntl, &req, &res, nullptr);
+    ASSERT_EQ(res.status().code(), MetaServiceCode::KV_TXN_GET_ERR);
+}
+
+TEST(MetaServiceTest, RowsetVisibleTimeTest) {
+    auto meta_service = get_meta_service();
+    using namespace std::chrono;
+    int64_t txn_id = -1;
+    // begin txn
+    {
+        brpc::Controller cntl;
+        BeginTxnRequest req;
+        req.set_cloud_unique_id("test_cloud_unique_id");
+        TxnInfoPB txn_info_pb;
+        txn_info_pb.set_db_id(666);
+        txn_info_pb.set_label("test_label");
+        txn_info_pb.add_table_ids(1234);
+        txn_info_pb.set_timeout_ms(36000);
+        req.mutable_txn_info()->CopyFrom(txn_info_pb);
+        BeginTxnResponse res;
+        meta_service->begin_txn(reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req,
+                                &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+        txn_id = res.txn_id();
+    }
+
+    // mock rowset and tablet
+    int64_t tablet_id_base = 1103;
+    for (int i = 0; i < 5; ++i) {
+        create_tablet(meta_service.get(), 1234, 1235, 1236, tablet_id_base + i);
+        auto tmp_rowset = create_rowset(txn_id, tablet_id_base + i);
+        CreateRowsetResponse res;
+        commit_rowset(meta_service.get(), tmp_rowset, res);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+    }
+    {
+        brpc::Controller cntl;
+        CommitTxnRequest req;
+        req.set_cloud_unique_id("test_cloud_unique_id");
+        req.set_db_id(666);
+        req.set_txn_id(txn_id);
+        CommitTxnResponse res;
+        meta_service->commit_txn(reinterpret_cast<::google::protobuf::RpcController*>(&cntl), &req,
+                                 &res, nullptr);
+        ASSERT_EQ(res.status().code(), MetaServiceCode::OK);
+    }
+
+    for (int i = 0; i < 5; ++i) {
+        int64_t tablet_id = tablet_id_base + i;
+        int64_t ver = 2;
+        std::string rowset_key = meta_rowset_key({mock_instance, tablet_id, ver});
+        std::string val;
+        std::unique_ptr<Transaction> txn;
+        ASSERT_EQ(meta_service->txn_kv()->create_txn(&txn), TxnErrorCode::TXN_OK);
+        ASSERT_EQ(txn->get(rowset_key, &val), TxnErrorCode::TXN_OK);
+        RowsetMetaCloudPB rowset_pb;
+        ASSERT_TRUE(rowset_pb.ParseFromString(val));
+        ASSERT_TRUE(rowset_pb.has_visible_ts_ms());
+        std::cout << rowset_pb.visible_ts_ms() << "\n";
+        ASSERT_GT(rowset_pb.visible_ts_ms(), 0);
+        auto visible_tp = time_point<system_clock>(milliseconds(rowset_pb.visible_ts_ms()));
+        std::time_t visible_time = system_clock::to_time_t(visible_tp);
+        std::cout << "visible time: "
+                  << std::put_time(std::localtime(&visible_time), "%Y%m%d %H:%M:%S") << "\n";
+    }
 }
 } // namespace doris::cloud

@@ -43,6 +43,8 @@ DEFINE_COUNTER_METRIC_PROTOTYPE_3ARG(fragment_requests_total, MetricUnit::REQUES
                                      "Total fragment requests received.");
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(fragment_request_duration_us, MetricUnit::MICROSECONDS);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(query_scan_bytes, MetricUnit::BYTES);
+DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(query_scan_bytes_from_local, MetricUnit::BYTES);
+DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(query_scan_bytes_from_remote, MetricUnit::BYTES);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(query_scan_rows, MetricUnit::ROWS);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(query_scan_count, MetricUnit::NOUNIT);
 DEFINE_COUNTER_METRIC_PROTOTYPE_5ARG(push_requests_success_total, MetricUnit::REQUESTS, "",
@@ -222,6 +224,7 @@ DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(s3_file_open_writing, MetricUnit::FILESYSTEM)
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(num_io_bytes_read_total, MetricUnit::OPERATIONS);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(num_io_bytes_read_from_cache, MetricUnit::OPERATIONS);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(num_io_bytes_read_from_remote, MetricUnit::OPERATIONS);
+DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(num_io_bytes_read_from_peer, MetricUnit::OPERATIONS);
 
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(query_ctx_cnt, MetricUnit::NOUNIT);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(scanner_ctx_cnt, MetricUnit::NOUNIT);
@@ -238,6 +241,8 @@ DorisMetrics::DorisMetrics() : _metric_registry(_s_registry_name) {
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, fragment_requests_total);
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, fragment_request_duration_us);
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, query_scan_bytes);
+    INT_COUNTER_METRIC_REGISTER(_server_metric_entity, query_scan_bytes_from_local);
+    INT_COUNTER_METRIC_REGISTER(_server_metric_entity, query_scan_bytes_from_remote);
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, query_scan_rows);
 
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, push_requests_success_total);
@@ -369,6 +374,7 @@ DorisMetrics::DorisMetrics() : _metric_registry(_s_registry_name) {
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, num_io_bytes_read_total);
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, num_io_bytes_read_from_cache);
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, num_io_bytes_read_from_remote);
+    INT_COUNTER_METRIC_REGISTER(_server_metric_entity, num_io_bytes_read_from_peer);
 
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, query_ctx_cnt);
     INT_COUNTER_METRIC_REGISTER(_server_metric_entity, scanner_ctx_cnt);

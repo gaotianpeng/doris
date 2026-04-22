@@ -31,7 +31,6 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.FunctionName;
 import org.apache.doris.analysis.FunctionParams;
-import org.apache.doris.analysis.IndexDef;
 import org.apache.doris.analysis.IsNullPredicate;
 import org.apache.doris.analysis.LambdaFunctionCallExpr;
 import org.apache.doris.analysis.LambdaFunctionExpr;
@@ -104,7 +103,9 @@ import org.apache.doris.thrift.TFunctionBinaryType;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -189,7 +190,7 @@ public class ExpressionTranslator extends DefaultExpressionVisitor<Expr, PlanTra
     }
 
     private OlapTable getOlapTableDirectly(SlotReference slot) {
-        return slot.getTable()
+        return slot.getOriginalTable()
                .filter(OlapTable.class::isInstance)
                .map(OlapTable.class::cast)
                .orElse(null);
@@ -202,7 +203,6 @@ public class ExpressionTranslator extends DefaultExpressionVisitor<Expr, PlanTra
 
     @Override
     public Expr visitMatch(Match match, PlanTranslatorContext context) {
-        Index invertedIndex = null;
         // Get the first slot from match's left expr
         SlotReference slot = match.getInputSlots().stream()
                         .findFirst()
@@ -211,7 +211,7 @@ public class ExpressionTranslator extends DefaultExpressionVisitor<Expr, PlanTra
                         .orElseThrow(() -> new AnalysisException(
                                     "No SlotReference found in Match, SQL is " + match.toSql()));
 
-        Column column = slot.getColumn()
+        Column column = slot.getOriginalColumn()
                         .orElseThrow(() -> new AnalysisException(
                                     "SlotReference in Match failed to get Column, SQL is " + match.toSql()));
 
@@ -220,20 +220,10 @@ public class ExpressionTranslator extends DefaultExpressionVisitor<Expr, PlanTra
             throw new AnalysisException("SlotReference in Match failed to get OlapTable, SQL is " + match.toSql());
         }
 
-        List<Index> indexes = olapTbl.getIndexes();
-        if (indexes != null) {
-            for (Index index : indexes) {
-                if (index.getIndexType() == IndexDef.IndexType.INVERTED) {
-                    List<String> columns = index.getColumns();
-                    if (columns != null && !columns.isEmpty() && column.getName().equals(columns.get(0))) {
-                        invertedIndex = index;
-                        break;
-                    }
-                }
-            }
-        }
+        Index invertedIndex = olapTbl.getInvertedIndex(column, slot.getSubPath());
 
         MatchPredicate.Operator op = match.op();
+
         MatchPredicate matchPredicate = new MatchPredicate(op, match.left().accept(this, context),
                 match.right().accept(this, context), match.getDataType().toCatalogDataType(),
                 NullableMode.DEPEND_ON_ARGUMENT, invertedIndex);
@@ -322,22 +312,96 @@ public class ExpressionTranslator extends DefaultExpressionVisitor<Expr, PlanTra
         return nullLit;
     }
 
+    private static class Frame {
+        int low;
+        int high;
+        CompoundPredicate.Operator op;
+        boolean processed;
+
+        Frame(int low, int high, CompoundPredicate.Operator op) {
+            this.low = low;
+            this.high = high;
+            this.op = op;
+            this.processed = false;
+        }
+    }
+
+    private boolean computeCompoundPredicateNullable(CompoundPredicate cp) {
+        Expr left = cp.getChild(0);
+        Expr right = cp.getChild(1);
+        return left.getNullableFromNereids().isPresent() && left.getNullableFromNereids().get()
+            || !left.getNullableFromNereids().isPresent() && left.isNullable()
+            || right.getNullableFromNereids().isPresent() && right.getNullableFromNereids().get()
+            || !right.getNullableFromNereids().isPresent() && right.isNullable();
+    }
+
+    private Expr toBalancedTree(int low, int high, List<Expr> children,
+            CompoundPredicate.Operator op) {
+        Deque<Frame> stack = new ArrayDeque<>();
+        Deque<Expr> results = new ArrayDeque<>();
+
+        stack.push(new Frame(low, high, op));
+
+        while (!stack.isEmpty()) {
+            Frame currentFrame = stack.peek();
+
+            if (!currentFrame.processed) {
+                int l = currentFrame.low;
+                int h = currentFrame.high;
+                int diff = h - l;
+
+                if (diff == 0) {
+                    results.push(children.get(l));
+                    stack.pop();
+                } else if (diff == 1) {
+                    Expr left = children.get(l);
+                    Expr right = children.get(h);
+                    CompoundPredicate cp = new CompoundPredicate(op, left, right);
+                    cp.setNullableFromNereids(computeCompoundPredicateNullable(cp));
+                    results.push(cp);
+                    stack.pop();
+                } else {
+                    int mid = l + (h - l) / 2;
+
+                    currentFrame.processed = true;
+
+                    stack.push(new Frame(mid + 1, h, op));
+                    stack.push(new Frame(l, mid, op));
+                }
+            } else {
+                stack.pop();
+                if (results.size() >= 2) {
+                    Expr right = results.pop();
+                    Expr left = results.pop();
+                    CompoundPredicate cp = new CompoundPredicate(currentFrame.op, left, right);
+                    cp.setNullableFromNereids(computeCompoundPredicateNullable(cp));
+                    results.push(cp);
+                }
+            }
+        }
+        return results.pop();
+    }
+
     @Override
     public Expr visitAnd(And and, PlanTranslatorContext context) {
-        org.apache.doris.analysis.CompoundPredicate cp = new org.apache.doris.analysis.CompoundPredicate(
-                org.apache.doris.analysis.CompoundPredicate.Operator.AND,
-                and.child(0).accept(this, context),
-                and.child(1).accept(this, context));
+        List<Expr> children = and.children().stream().map(
+                e -> e.accept(this, context)
+        ).collect(Collectors.toList());
+        CompoundPredicate cp = (CompoundPredicate) toBalancedTree(0, children.size() - 1,
+                children, CompoundPredicate.Operator.AND);
+
         cp.setNullableFromNereids(and.nullable());
         return cp;
     }
 
     @Override
     public Expr visitOr(Or or, PlanTranslatorContext context) {
-        org.apache.doris.analysis.CompoundPredicate cp = new org.apache.doris.analysis.CompoundPredicate(
-                org.apache.doris.analysis.CompoundPredicate.Operator.OR,
-                or.child(0).accept(this, context),
-                or.child(1).accept(this, context));
+        List<Expr> children = or.children().stream().map(
+                e -> e.accept(this, context)
+        ).collect(Collectors.toList());
+        CompoundPredicate cp = (CompoundPredicate) toBalancedTree(0, children.size() - 1,
+                children, CompoundPredicate.Operator.OR);
+
         cp.setNullableFromNereids(or.nullable());
         return cp;
     }

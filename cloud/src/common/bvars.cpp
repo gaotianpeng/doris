@@ -17,13 +17,17 @@
 
 #include "common/bvars.h"
 
+#include <bvar/latency_recorder.h>
 #include <bvar/multi_dimension.h>
+#include <bvar/passive_status.h>
 #include <bvar/reducer.h>
 #include <bvar/status.h>
 #include <bvar/window.h>
 
 #include <cstdint>
 #include <stdexcept>
+
+#include "meta-store/txn_kv.h"
 
 // clang-format off
 
@@ -44,7 +48,6 @@ BvarLatencyRecorderWithTag g_bvar_ms_get_version("ms", "get_version");
 BvarLatencyRecorderWithTag g_bvar_ms_batch_get_version("ms", "batch_get_version");
 BvarLatencyRecorderWithTag g_bvar_ms_create_tablets("ms", "create_tablets");
 BvarLatencyRecorderWithTag g_bvar_ms_update_tablet("ms", "update_tablet");
-BvarLatencyRecorderWithTag g_bvar_ms_update_tablet_schema("ms", "update_tablet_schema");
 BvarLatencyRecorderWithTag g_bvar_ms_get_tablet("ms", "get_tablet");
 BvarLatencyRecorderWithTag g_bvar_ms_prepare_rowset("ms", "prepare_rowset");
 BvarLatencyRecorderWithTag g_bvar_ms_commit_rowset("ms", "commit_rowset");
@@ -56,6 +59,9 @@ BvarLatencyRecorderWithTag g_bvar_ms_commit_index("ms", "commit_index");
 BvarLatencyRecorderWithTag g_bvar_ms_prepare_partition("ms", "prepare_partition");
 BvarLatencyRecorderWithTag g_bvar_ms_commit_partition("ms", "commit_partition");
 BvarLatencyRecorderWithTag g_bvar_ms_drop_partition("ms", "drop_partition");
+BvarLatencyRecorderWithTag g_bvar_ms_prepare_restore_job("ms", "prepare_restore_job");
+BvarLatencyRecorderWithTag g_bvar_ms_commit_restore_job("ms", "commit_restore_job");
+BvarLatencyRecorderWithTag g_bvar_ms_finish_restore_job("ms", "finish_restore_job");
 BvarLatencyRecorderWithTag g_bvar_ms_get_tablet_stats("ms", "get_tablet_stats");
 BvarLatencyRecorderWithTag g_bvar_ms_get_obj_store_info("ms", "get_obj_store_info");
 BvarLatencyRecorderWithTag g_bvar_ms_alter_obj_store_info("ms", "alter_obj_store_info");
@@ -95,6 +101,12 @@ bvar::Adder<int64_t> g_bvar_update_delete_bitmap_fail_counter;
 bvar::Window<bvar::Adder<int64_t> > g_bvar_update_delete_bitmap_fail_counter_minute("ms", "update_delete_bitmap_fail", &g_bvar_update_delete_bitmap_fail_counter, 60);
 bvar::Adder<int64_t> g_bvar_get_delete_bitmap_fail_counter;
 bvar::Window<bvar::Adder<int64_t> > g_bvar_get_delete_bitmap_fail_counter_minute("ms", "get_delete_bitmap_fail", &g_bvar_get_delete_bitmap_fail_counter, 60);
+BvarLatencyRecorderWithStatus<60> g_bvar_ms_txn_commit_with_partition_count("ms", "txn_commit_with_partition_count");
+BvarLatencyRecorderWithStatus<60> g_bvar_ms_txn_commit_with_tablet_count("ms", "txn_commit_with_tablet_count");
+
+MBvarLatencyRecorderWithStatus<60> g_bvar_instance_txn_commit_with_partition_count("instance", "txn_commit_with_partition_count", {"instance_id"});
+MBvarLatencyRecorderWithStatus<60> g_bvar_instance_txn_commit_with_tablet_count("instance", "txn_commit_with_tablet_count", {"instance_id"});
+
 
 // recycler's bvars
 // TODO: use mbvar for per instance, https://github.com/apache/brpc/blob/master/docs/cn/mbvar_c++.md
@@ -103,12 +115,11 @@ BvarStatusWithTag<int64_t> g_bvar_recycler_recycle_partition_earlest_ts("recycle
 BvarStatusWithTag<int64_t> g_bvar_recycler_recycle_rowset_earlest_ts("recycler", "recycle_rowset_earlest_ts");
 BvarStatusWithTag<int64_t> g_bvar_recycler_recycle_tmp_rowset_earlest_ts("recycler", "recycle_tmp_rowset_earlest_ts");
 BvarStatusWithTag<int64_t> g_bvar_recycler_recycle_expired_txn_label_earlest_ts("recycler", "recycle_expired_txn_label_earlest_ts");
+BvarStatusWithTag<int64_t> g_bvar_recycler_recycle_restore_job_earlest_ts("recycler", "recycle_restore_job_earlest_ts");
 bvar::Status<int64_t> g_bvar_recycler_task_max_concurrency("recycler_task_max_concurrency_num",0);
-// current concurrency of recycle task
-bvar::Adder<int64_t> g_bvar_recycler_instance_recycle_task_concurrency;
-
+// current status of recycle task (submitted, completed, error)
+mBvarIntAdder g_bvar_recycler_instance_recycle_task_status("recycler_instance_recycle_task_status", { "status"});
 // recycler's mbvars
-bvar::Adder<int64_t> g_bvar_recycler_instance_running_counter("recycler_instance_running_counter");
 // cost time of the last whole recycle process
 mBvarStatus<int64_t> g_bvar_recycler_instance_last_round_recycle_duration("recycler_instance_last_round_recycle_duration",{"instance_id"});
 mBvarStatus<int64_t> g_bvar_recycler_instance_next_ts("recycler_instance_next_ts",{"instance_id"});
@@ -119,20 +130,18 @@ mBvarStatus<int64_t> g_bvar_recycler_instance_recycle_last_success_ts("recycler_
 
 // recycler's mbvars
 // instance_id: unique identifier for the instance
-// resource_type: type of resource need to be recycled (index, partition, rowset, segment, tablet, etc.)
 // resource_id: unique identifier for the repository
-// status: status of the recycle task (normal, abnormal, etc.)
-mBvarIntAdder g_bvar_recycler_vault_recycle_status("recycler_vault_recycle_status", {"instance_id", "resource_id", "status"});
+// status: status of the recycle task (submitted, completed, error)
+mBvarIntAdder g_bvar_recycler_vault_recycle_task_status("recycler_vault_recycle_task_status", {"instance_id", "resource_id", "status"});
 // current concurrency of vault delete task
-mBvarIntAdder g_bvar_recycler_vault_recycle_task_concurrency("recycler_vault_recycle_task_concurrency", {"instance_id", "resource_type", "resource_id"});
 mBvarStatus<int64_t> g_bvar_recycler_instance_last_round_recycled_num("recycler_instance_last_round_recycled_num", {"instance_id", "resource_type"});
 mBvarStatus<int64_t> g_bvar_recycler_instance_last_round_to_recycle_num("recycler_instance_last_round_to_recycle_num", {"instance_id", "resource_type"});
 mBvarStatus<int64_t> g_bvar_recycler_instance_last_round_recycled_bytes("recycler_instance_last_round_recycled_bytes", {"instance_id", "resource_type"});
 mBvarStatus<int64_t> g_bvar_recycler_instance_last_round_to_recycle_bytes("recycler_instance_last_round_to_recycle_bytes", {"instance_id", "resource_type"});
 mBvarStatus<double> g_bvar_recycler_instance_last_round_recycle_elpased_ts("recycler_instance_last_round_recycle_elpased_ts", {"instance_id", "resource_type"});
 // total recycled num and bytes of resources since recycler started
-mBvarIntAdder g_bvar_recycler_instance_recycle_total_num_since_started("recycler_instance_recycle_total_num_since_started", {"instance_id", "resource_type"});
-mBvarIntAdder g_bvar_recycler_instance_recycle_total_bytes_since_started("recycler_instance_recycle_total_bytes_since_started", {"instance_id", "resource_type"});
+mBvarInt64Adder g_bvar_recycler_instance_recycle_total_num_since_started("recycler_instance_recycle_total_num_since_started", {"instance_id", "resource_type"});
+mBvarInt64Adder g_bvar_recycler_instance_recycle_total_bytes_since_started("recycler_instance_recycle_total_bytes_since_started", {"instance_id", "resource_type"});
 mBvarIntAdder g_bvar_recycler_instance_recycle_round("recycler_instance_recycle_round", {"instance_id", "resource_type"});
 // represents the ms required per resource to be recycled
 // value of -1 means no resource recycled
@@ -158,6 +167,18 @@ bvar::Adder<int64_t> g_bvar_txn_kv_commit_error_counter;
 bvar::Window<bvar::Adder<int64_t> > g_bvar_txn_kv_commit_error_counter_minute("txn_kv", "commit_error", &g_bvar_txn_kv_commit_error_counter, 60);
 bvar::Adder<int64_t> g_bvar_txn_kv_commit_conflict_counter;
 bvar::Window<bvar::Adder<int64_t> > g_bvar_txn_kv_commit_conflict_counter_minute("txn_kv", "commit_conflict", &g_bvar_txn_kv_commit_conflict_counter, 60);
+bvar::Adder<int64_t> g_bvar_delete_bitmap_lock_txn_put_conflict_counter;
+bvar::Window<bvar::Adder<int64_t> > g_bvar_delete_bitmap_lock_txn_put_conflict_counter_minute("delete_bitmap_lock", "txn_put_conflict", &g_bvar_delete_bitmap_lock_txn_put_conflict_counter, 60);
+bvar::Adder<int64_t> g_bvar_delete_bitmap_lock_txn_remove_conflict_by_fail_counter;
+bvar::Window<bvar::Adder<int64_t> > g_bvar_delete_bitmap_lock_txn_remove_conflict_by_fail_counter_minute("delete_bitmap_lock", "txn_remove_conflict_by_fail", &g_bvar_delete_bitmap_lock_txn_remove_conflict_by_fail_counter, 60);
+bvar::Adder<int64_t> g_bvar_delete_bitmap_lock_txn_remove_conflict_by_load_counter;
+bvar::Window<bvar::Adder<int64_t> > g_bvar_delete_bitmap_lock_txn_remove_conflict_by_load_counter_minute("delete_bitmap_lock", "txn_remove_conflict_by_load", &g_bvar_delete_bitmap_lock_txn_remove_conflict_by_load_counter, 60);
+bvar::Adder<int64_t> g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_commit_counter;
+bvar::Window<bvar::Adder<int64_t> > g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_commit_counter_minute("delete_bitmap_lock", "txn_remove_conflict_by_compaction_commit", &g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_commit_counter, 60);
+bvar::Adder<int64_t> g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_lease_counter;
+bvar::Window<bvar::Adder<int64_t> > g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_lease_counter_minute("delete_bitmap_lock", "txn_remove_conflict_by_compaction_lease", &g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_lease_counter, 60);
+bvar::Adder<int64_t> g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_abort_counter;
+bvar::Window<bvar::Adder<int64_t> > g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_abort_counter_minute("delete_bitmap_lock", "txn_remove_conflict_by_compaction_abort", &g_bvar_delete_bitmap_lock_txn_remove_conflict_by_compaction_abort_counter, 60);
 
 // fdb's bvars
 const int64_t BVAR_FDB_INVALID_VALUE = -99999999L;
@@ -215,6 +236,13 @@ BvarStatusWithTag<int64_t> g_bvar_inverted_checker_num_check_failed("checker", "
 BvarStatusWithTag<int64_t> g_bvar_inverted_checker_leaked_delete_bitmaps("checker", "leaked_delete_bitmaps");
 BvarStatusWithTag<int64_t> g_bvar_inverted_checker_abnormal_delete_bitmaps("checker", "abnormal_delete_bitmaps");
 BvarStatusWithTag<int64_t> g_bvar_inverted_checker_delete_bitmaps_scanned("checker", "delete_bitmap_keys_scanned");
+BvarStatusWithTag<int64_t> g_bvar_max_rowsets_with_useless_delete_bitmap_version("checker", "max_rowsets_with_useless_delete_bitmap_version");
+BvarStatusWithTag<int64_t> g_bvar_checker_restore_job_prepared_state("checker", "restore_job_prepared_state");
+BvarStatusWithTag<int64_t> g_bvar_checker_restore_job_committed_state("checker", "restore_job_committed_state");
+BvarStatusWithTag<int64_t> g_bvar_checker_restore_job_dropped_state("checker", "restore_job_dropped_state");
+BvarStatusWithTag<int64_t> g_bvar_checker_restore_job_completed_state("checker", "restore_job_completed_state");
+BvarStatusWithTag<int64_t> g_bvar_checker_restore_job_recycling_state("checker", "restore_job_recycling_state");
+BvarStatusWithTag<int64_t> g_bvar_checker_restore_job_cost_many_time("checker", "restore_job_cost_many_time");
 
 // rpc kv rw count
 // get_rowset
@@ -229,9 +257,6 @@ mBvarInt64Adder g_bvar_rpc_kv_create_tablets_put_counter("rpc_kv_create_tablets_
 // update_tablet
 mBvarInt64Adder g_bvar_rpc_kv_update_tablet_get_counter("rpc_kv_update_tablet_get_counter",{"instance_id"});
 mBvarInt64Adder g_bvar_rpc_kv_update_tablet_put_counter("rpc_kv_update_tablet_put_counter",{"instance_id"});
-// update_tablet_schema
-mBvarInt64Adder g_bvar_rpc_kv_update_tablet_schema_get_counter("rpc_kv_update_tablet_schema_get_counter",{"instance_id"});
-mBvarInt64Adder g_bvar_rpc_kv_update_tablet_schema_put_counter("rpc_kv_update_tablet_schema_put_counter",{"instance_id"});
 // get_tablet
 mBvarInt64Adder g_bvar_rpc_kv_get_tablet_get_counter("rpc_kv_get_tablet_get_counter",{"instance_id"});
 // prepare_rowset
@@ -395,9 +420,6 @@ mBvarInt64Adder g_bvar_rpc_kv_create_tablets_put_bytes("rpc_kv_create_tablets_pu
 // update_tablet
 mBvarInt64Adder g_bvar_rpc_kv_update_tablet_get_bytes("rpc_kv_update_tablet_get_bytes",{"instance_id"});
 mBvarInt64Adder g_bvar_rpc_kv_update_tablet_put_bytes("rpc_kv_update_tablet_put_bytes",{"instance_id"});
-// update_tablet_schema
-mBvarInt64Adder g_bvar_rpc_kv_update_tablet_schema_get_bytes("rpc_kv_update_tablet_schema_get_bytes",{"instance_id"});
-mBvarInt64Adder g_bvar_rpc_kv_update_tablet_schema_put_bytes("rpc_kv_update_tablet_schema_put_bytes",{"instance_id"});
 // get_tablet
 mBvarInt64Adder g_bvar_rpc_kv_get_tablet_get_bytes("rpc_kv_get_tablet_get_bytes",{"instance_id"});
 // prepare_rowset

@@ -75,7 +75,9 @@ import org.apache.doris.nereids.types.coercion.CharacterType;
 import org.apache.doris.nereids.util.ExpressionUtils;
 import org.apache.doris.nereids.util.RelationUtil;
 import org.apache.doris.nereids.util.TypeCoercionUtils;
+import org.apache.doris.nereids.util.Utils;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -92,6 +94,15 @@ import java.util.stream.Collectors;
  * bind an unbound logicalTableSink represent the target table of an insert command
  */
 public class BindSink implements AnalysisRuleFactory {
+    public boolean needTruncateStringWhenInsert;
+
+    public BindSink() {
+        this(true);
+    }
+
+    public BindSink(boolean needTruncateStringWhenInsert) {
+        this.needTruncateStringWhenInsert = needTruncateStringWhenInsert;
+    }
 
     @Override
     public List<Rule> buildRules() {
@@ -125,6 +136,7 @@ public class BindSink implements AnalysisRuleFactory {
         Database database = pair.first;
         OlapTable table = pair.second;
         boolean isPartialUpdate = sink.isPartialUpdate() && table.getKeysType() == KeysType.UNIQUE_KEYS;
+        TPartialUpdateNewRowPolicy partialUpdateNewKeyPolicy = sink.getPartialUpdateNewRowPolicy();
 
         LogicalPlan child = ((LogicalPlan) sink.child());
         boolean childHasSeqCol = child.getOutput().stream()
@@ -147,6 +159,7 @@ public class BindSink implements AnalysisRuleFactory {
                         .map(NamedExpression.class::cast)
                         .collect(ImmutableList.toImmutableList()),
                 isPartialUpdate,
+                partialUpdateNewKeyPolicy,
                 sink.getDMLCommandType(),
                 child);
 
@@ -207,8 +220,7 @@ public class BindSink implements AnalysisRuleFactory {
                         boundSink.getDmlCommandType() != DMLCommandType.INSERT
                                 || ConnectContext.get().getSessionVariable().isRequireSequenceInInsert())) {
                     if (!seqColInTable.isPresent() || seqColInTable.get().getDefaultValue() == null
-                            || !seqColInTable.get().getDefaultValue()
-                            .equalsIgnoreCase(DefaultValue.CURRENT_TIMESTAMP)) {
+                            || !DefaultValue.isCurrentTimeStampDefaultValue(seqColInTable.get().getDefaultValue())) {
                         throw new org.apache.doris.common.AnalysisException("Table " + table.getName()
                                 + " has sequence column, need to specify the sequence column");
                     }
@@ -227,7 +239,7 @@ public class BindSink implements AnalysisRuleFactory {
 
     private LogicalProject<?> getOutputProjectByCoercion(List<Column> tableSchema, LogicalPlan child,
                                                          Map<String, NamedExpression> columnToOutput) {
-        List<NamedExpression> fullOutputExprs = ImmutableList.copyOf(columnToOutput.values());
+        List<NamedExpression> fullOutputExprs = Utils.fastToImmutableList(columnToOutput.values());
         if (child instanceof LogicalOneRowRelation) {
             // remove default value slot in one row relation
             child = ((LogicalOneRowRelation) child).withProjects(((LogicalOneRowRelation) child)
@@ -239,6 +251,9 @@ public class BindSink implements AnalysisRuleFactory {
 
         // add cast project
         List<NamedExpression> castExprs = Lists.newArrayList();
+        ConnectContext connCtx = ConnectContext.get();
+        final boolean truncateString = needTruncateStringWhenInsert
+                && (connCtx == null || connCtx.getSessionVariable().enableInsertValueAutoCast);
         for (int i = 0; i < tableSchema.size(); ++i) {
             Column col = tableSchema.get(i);
             NamedExpression expr = columnToOutput.get(col.getName());
@@ -258,7 +273,7 @@ public class BindSink implements AnalysisRuleFactory {
                 int targetLength = ((CharacterType) targetType).getLen();
                 if (sourceLength == targetLength) {
                     castExpr = TypeCoercionUtils.castIfNotSameType(castExpr, targetType);
-                } else if (sourceLength > targetLength && targetLength >= 0) {
+                } else if (truncateString && sourceLength > targetLength && targetLength >= 0) {
                     castExpr = new Substring(castExpr, Literal.of(1), Literal.of(targetLength));
                 } else if (targetType.isStringType()) {
                     castExpr = new Cast(castExpr, StringType.INSTANCE);

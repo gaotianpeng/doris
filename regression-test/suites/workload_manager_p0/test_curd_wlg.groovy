@@ -226,6 +226,7 @@ suite("test_crud_wlg") {
         exception "The allowed cpu_share value is -1 or a positive integer"
     }
 
+
     // failed for mem_overcommit
     test {
         sql "create workload group if not exists test_group2 " +

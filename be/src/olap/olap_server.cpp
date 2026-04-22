@@ -1549,7 +1549,7 @@ void StorageEngine::_cold_data_compaction_producer_callback() {
         for (auto& t : tablets) {
             if (t->replica_id() == t->cooldown_conf_unlocked().cooldown_replica_id) {
                 auto score = t->calc_cold_data_compaction_score();
-                if (score < 4) {
+                if (score < config::cold_data_compaction_score_threshold) {
                     continue;
                 }
                 tablet_to_compact.emplace_back(t, score);
@@ -1774,9 +1774,8 @@ void StorageEngine::_check_tablet_delete_bitmap_score_callback() {
         }
         uint64_t max_delete_bitmap_score = 0;
         uint64_t max_base_rowset_delete_bitmap_score = 0;
-        std::vector<CloudTabletSPtr> tablets;
-        _tablet_manager.get()->get_topn_tablet_delete_bitmap_score(
-                &max_delete_bitmap_score, &max_base_rowset_delete_bitmap_score);
+        _tablet_manager->get_topn_tablet_delete_bitmap_score(&max_delete_bitmap_score,
+                                                             &max_base_rowset_delete_bitmap_score);
         if (max_delete_bitmap_score > 0) {
             _tablet_max_delete_bitmap_score_metrics->set_value(max_delete_bitmap_score);
         }

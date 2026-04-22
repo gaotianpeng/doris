@@ -23,6 +23,7 @@ include "Types.thrift"
 include "Opcodes.thrift"
 include "Partitions.thrift"
 include "Descriptors.thrift"
+include "ExternalTableSchema.thrift"
 
 enum TPlanNodeType {
   OLAP_SCAN_NODE,
@@ -120,7 +121,8 @@ enum TFileFormatType {
     FORMAT_CSV_LZ4BLOCK,
     FORMAT_CSV_SNAPPYBLOCK,
     FORMAT_WAL,
-    FORMAT_ARROW
+    FORMAT_ARROW,
+    FORMAT_TEXT
 }
 
 // In previous versions, the data compression format and file format were stored together, as TFileFormatType,
@@ -314,6 +316,7 @@ struct TIcebergFileDesc {
     // Deprecated
     5: optional Exprs.TExpr file_select_conjunct;
     6: optional string original_file_path;
+    // Deprecated
     7: optional i64 row_count;
 }
 
@@ -338,6 +341,8 @@ struct TPaimonFileDesc {
     12: optional TPaimonDeletionFileDesc deletion_file;
     13: optional map<string, string> hadoop_conf // deprecated
     14: optional string paimon_table  // deprecated
+    15: optional i64 row_count // deprecated
+    16: optional i64 schema_id; // for schema change.
 }
 
 struct TTrinoConnectorFileDesc {
@@ -375,7 +380,8 @@ struct THudiFileDesc {
     8: optional list<string> column_names;
     9: optional list<string> column_types;
     10: optional list<string> nested_fields;
-    11: optional string hudi_jni_scanner;
+    11: optional string hudi_jni_scanner; // deprecated
+    12: optional i64 schema_id; // for schema change. (native reader)
 }
 
 struct TLakeSoulFileDesc {
@@ -405,8 +411,10 @@ struct TTableFormatFileDesc {
     6: optional TMaxComputeFileDesc max_compute_params
     7: optional TTrinoConnectorFileDesc trino_connector_params
     8: optional TLakeSoulFileDesc lakesoul_params
+    9: optional i64 table_level_row_count = -1
 }
 
+// Deprecated, hive text talbe is a special format, not a serde type
 enum TTextSerdeType {
     JSON_TEXT_SERDE = 0,
     HIVE_TEXT_SERDE = 1,
@@ -455,6 +463,7 @@ struct TFileScanRangeParams {
     19: optional map<string, i32> slot_name_to_schema_pos
     20: optional list<Exprs.TExpr> pre_filter_exprs_list
     21: optional Types.TUniqueId load_id
+    // Deprecated, hive text talbe is a special format, not a serde type
     22: optional TTextSerdeType  text_serde_type 
     // used by flexible partial update
     23: optional string sequence_map_col
@@ -463,6 +472,16 @@ struct TFileScanRangeParams {
     //    1. Reduce the access to HMS and HDFS on the JNI side.
     //    2. There will be no inconsistency between the fe and be tables.
     24: optional string serialized_table
+
+    // Every time a iceberg/hudi/paimon table makes a schema change, a new schema id is generated.
+    // This is used to represent the latest id.
+    25: optional i64 current_schema_id;
+    // All schema information used in the current query process
+    26: optional list<ExternalTableSchema.TSchema> history_schema_info
+
+    // Paimon predicate from FE, used for jni scanner
+    // Set at ScanNode level to avoid redundant serialization in each split
+    27: optional string paimon_predicate
 }
 
 struct TFileRangeDesc {
@@ -491,6 +510,9 @@ struct TFileRangeDesc {
     // so fs_name should be with TFileRangeDesc
     12: optional string fs_name
     13: optional TFileFormatType format_type;
+    14: optional i64 self_split_weight
+    // whether the value of columns_from_path is null
+    15: optional list<bool> columns_from_path_is_null;
 }
 
 struct TSplitSource {
@@ -533,8 +555,29 @@ struct TDataGenScanRange {
 }
 
 
+// deprecated
 struct TIcebergMetadataParams {
   1: optional Types.TIcebergQueryType iceberg_query_type
+  2: optional string catalog
+  3: optional string database
+  4: optional string table
+}
+
+// deprecated
+struct TPaimonMetadataParams {
+  1: optional string db_name
+  2: optional string tbl_name
+  3: optional string query_type
+  4: optional i64 ctl_id
+  5: optional i64 db_id
+  6: optional i64 tbl_id
+  7: optional string serialized_split
+  8: optional map<string, string> hadoop_props
+  9: optional map<string, string> paimon_props
+}
+
+struct THudiMetadataParams {
+  1: optional Types.THudiQueryType hudi_query_type
   2: optional string catalog
   3: optional string database
   4: optional string table
@@ -590,7 +633,7 @@ struct TMetaCacheStatsParams {
 
 struct TMetaScanRange {
   1: optional Types.TMetadataType metadata_type
-  2: optional TIcebergMetadataParams iceberg_params
+  2: optional TIcebergMetadataParams iceberg_params // deprecated
   3: optional TBackendsMetadataParams backends_params
   4: optional TFrontendsMetadataParams frontends_params
   5: optional TQueriesMetadataParams queries_params
@@ -600,6 +643,13 @@ struct TMetaScanRange {
   9: optional TPartitionsMetadataParams partitions_params
   10: optional TMetaCacheStatsParams meta_cache_stats_params
   11: optional TPartitionValuesMetadataParams partition_values_params
+  12: optional THudiMetadataParams hudi_params
+  13: optional TPaimonMetadataParams paimon_params // deprecated
+
+  // for quering sys tables for Paimon/Iceberg
+  14: optional map<string, string> hadoop_props
+  15: optional string serialized_table;
+  16: optional list<string> serialized_splits;
 }
 
 // Specification of an individual data range which is held in its entirety

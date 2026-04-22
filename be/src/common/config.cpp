@@ -52,7 +52,10 @@ namespace doris::config {
 DEFINE_String(custom_config_dir, "${DORIS_HOME}/conf");
 
 // Dir of jdbc drivers
-DEFINE_String(jdbc_drivers_dir, "${DORIS_HOME}/jdbc_drivers");
+DEFINE_String(jdbc_drivers_dir, "${DORIS_HOME}/plugins/jdbc_drivers");
+
+// Dir of java udf
+DEFINE_String(java_udf_dir, "${DORIS_HOME}/plugins/java_udf");
 
 // cluster id
 DEFINE_Int32(cluster_id, "-1");
@@ -260,6 +263,8 @@ DEFINE_mBool(enable_batch_download, "false");
 DEFINE_mBool(enable_download_md5sum_check, "false");
 // download binlog meta timeout, default 30s
 DEFINE_mInt32(download_binlog_meta_timeout_ms, "30000");
+// the interval time(seconds) for agent report index policy to FE
+DEFINE_mInt32(report_index_policy_interval_seconds, "10");
 
 DEFINE_String(sys_log_dir, "");
 DEFINE_String(user_function_dir, "${DORIS_HOME}/lib/udf");
@@ -298,15 +303,9 @@ DEFINE_mInt64(doris_blocking_priority_queue_wait_timeout_ms, "500");
 // number of scanner thread pool size for olap table
 // and the min thread num of remote scanner thread pool
 DEFINE_Int32(doris_scanner_thread_pool_thread_num, "-1");
-DEFINE_Validator(doris_scanner_thread_pool_thread_num, [](const int config) -> bool {
-    if (config == -1) {
-        CpuInfo::init();
-        doris_scanner_thread_pool_thread_num = std::max(48, CpuInfo::num_cores() * 2);
-    }
-    return true;
-});
+
 DEFINE_Int32(doris_scanner_min_thread_pool_thread_num, "8");
-DEFINE_Int32(remote_split_source_batch_size, "10240");
+DEFINE_Int32(remote_split_source_batch_size, "1000");
 DEFINE_Int32(doris_max_remote_scanner_thread_pool_thread_num, "-1");
 // number of olap scanner thread pool queue size
 DEFINE_Int32(doris_scanner_thread_pool_queue_size, "102400");
@@ -406,7 +405,7 @@ DEFINE_mInt32(data_page_cache_stale_sweep_time_sec, "300");
 DEFINE_mInt32(index_page_cache_stale_sweep_time_sec, "600");
 DEFINE_mInt32(pk_index_page_cache_stale_sweep_time_sec, "600");
 
-DEFINE_Bool(enable_low_cardinality_optimize, "true");
+DEFINE_mBool(enable_low_cardinality_optimize, "true");
 DEFINE_Bool(enable_low_cardinality_cache_code, "true");
 
 // be policy
@@ -623,7 +622,7 @@ DEFINE_mDouble(olap_table_sink_send_interval_auto_partition_factor, "0.001");
 
 // Fragment thread pool
 DEFINE_Int32(fragment_mgr_asynic_work_pool_thread_num_min, "16");
-DEFINE_Int32(fragment_mgr_asynic_work_pool_thread_num_max, "512");
+DEFINE_Int32(fragment_mgr_asynic_work_pool_thread_num_max, "4096");
 DEFINE_Int32(fragment_mgr_asynic_work_pool_queue_size, "4096");
 
 // Control the number of disks on the machine.  If 0, this comes from the system settings.
@@ -665,6 +664,11 @@ DEFINE_mInt32(memory_maintenance_sleep_time_ms, "20");
 // After full gc, no longer full gc and minor gc during sleep.
 // After minor gc, no minor gc during sleep, but full gc is possible.
 DEFINE_mInt32(memory_gc_sleep_time_ms, "500");
+
+// Small memory task threshold in bytes for memory tracker limiter
+// Tasks with memory consumption below this threshold will not be cancelled during memory pressure
+// Default is 32MB (33554432 bytes)
+DEFINE_mInt64(mem_tracker_limit_small_memory_task_bytes, "33554432");
 
 // max write buffer size before flush, default 200MB
 DEFINE_mInt64(write_buffer_size, "209715200");
@@ -784,6 +788,8 @@ DEFINE_String(default_rowset_type, "BETA");
 // Maximum size of a single message body in all protocols
 DEFINE_Int64(brpc_max_body_size, "3147483648");
 DEFINE_Int64(brpc_socket_max_unwritten_bytes, "-1");
+DEFINE_mBool(brpc_usercode_in_pthread, "false");
+
 // TODO(zxy): expect to be true in v1.3
 // Whether to embed the ProtoBuf Request serialized string together with Tuple/Block data into
 // Controller Attachment and send it through http brpc when the length of the Tuple/Block data
@@ -807,7 +813,7 @@ DEFINE_Int32(txn_map_shard_size, "1024");
 DEFINE_Int32(txn_shard_size, "1024");
 
 // Whether to continue to start be when load tablet from header failed.
-DEFINE_Bool(ignore_load_tablet_failure, "false");
+DEFINE_Bool(ignore_load_tablet_failure, "true");
 
 // Whether to continue to start be when load tablet from header failed.
 DEFINE_mBool(ignore_rowset_stale_unconsistent_delete, "false");
@@ -1005,6 +1011,7 @@ DEFINE_mInt32(remove_unused_remote_files_interval_sec, "21600"); // 6h
 DEFINE_mInt32(confirm_unused_remote_files_interval_sec, "60");
 DEFINE_Int32(cold_data_compaction_thread_num, "2");
 DEFINE_mInt32(cold_data_compaction_interval_sec, "1800");
+DEFINE_mInt32(cold_data_compaction_score_threshold, "100");
 
 DEFINE_String(tmp_file_dir, "tmp");
 
@@ -1065,11 +1072,10 @@ DEFINE_mInt32(segcompaction_num_threads, "5");
 // enable java udf and jdbc scannode
 DEFINE_Bool(enable_java_support, "true");
 
-// enable prefetch tablets before opening
-DEFINE_mBool(enable_prefetch_tablet, "true");
-
 // Set config randomly to check more issues in github workflow
 DEFINE_Bool(enable_fuzzy_mode, "false");
+
+DEFINE_Bool(enable_graceful_exit_check, "false");
 
 DEFINE_Bool(enable_debug_points, "false");
 
@@ -1128,23 +1134,35 @@ DEFINE_mInt64(cache_lock_held_long_tail_threshold_us, "30000000");
 // will write to file cache; satisfying any of the two conditions will write to file cache.
 DEFINE_mBool(enable_file_cache_keep_base_compaction_output, "false");
 DEFINE_mBool(enable_file_cache_adaptive_write, "true");
+DEFINE_mDouble(file_cache_keep_base_compaction_output_min_hit_ratio, "0.7");
+
+// if difference below this threshold, we consider cache's progressive upgrading (2.0->3.0) successful
+DEFINE_mDouble(file_cache_meta_store_vs_file_system_diff_num_threshold, "0.3");
+DEFINE_mDouble(file_cache_keep_schema_change_output_min_hit_ratio, "0.7");
 
 DEFINE_mInt64(file_cache_remove_block_qps_limit, "1000");
 DEFINE_mInt64(file_cache_background_gc_interval_ms, "100");
+DEFINE_mInt64(file_cache_background_block_lru_update_interval_ms, "5000");
+DEFINE_mInt64(file_cache_background_block_lru_update_qps_limit, "1000");
 DEFINE_mBool(enable_reader_dryrun_when_download_file_cache, "true");
 DEFINE_mInt64(file_cache_background_monitor_interval_ms, "5000");
 DEFINE_mInt64(file_cache_background_ttl_gc_interval_ms, "3000");
 DEFINE_mInt64(file_cache_background_ttl_gc_batch, "1000");
+DEFINE_mInt64(file_cache_background_lru_dump_interval_ms, "60000");
+// dump queue only if the queue update specific times through several dump intervals
+DEFINE_mInt64(file_cache_background_lru_dump_update_cnt_threshold, "1000");
+DEFINE_mInt64(file_cache_background_lru_dump_tail_record_num, "5000000");
+DEFINE_mInt64(file_cache_background_lru_log_replay_interval_ms, "1000");
+DEFINE_mBool(enable_evaluate_shadow_queue_diff, "false");
 
 DEFINE_Int32(file_cache_downloader_thread_num_min, "32");
 DEFINE_Int32(file_cache_downloader_thread_num_max, "32");
 
 DEFINE_mInt32(index_cache_entry_stay_time_after_lookup_s, "1800");
 DEFINE_mInt32(inverted_index_cache_stale_sweep_time_sec, "600");
+DEFINE_mBool(enable_write_index_searcher_cache, "false");
 // inverted index searcher cache size
 DEFINE_String(inverted_index_searcher_cache_limit, "10%");
-// set `true` to enable insert searcher into cache when write inverted index data
-DEFINE_Bool(enable_write_index_searcher_cache, "true");
 DEFINE_Bool(enable_inverted_index_cache_check_timestamp, "true");
 DEFINE_mBool(enable_inverted_index_correct_term_write, "true");
 DEFINE_Int32(inverted_index_fd_number_limit_percent, "20"); // 20%
@@ -1169,6 +1187,8 @@ DEFINE_mBool(inverted_index_compaction_enable, "false");
 DEFINE_mBool(debug_inverted_index_compaction, "false");
 // index by RAM directory
 DEFINE_mBool(inverted_index_ram_dir_enable, "true");
+// wheather index by RAM directory when base compaction
+DEFINE_mBool(inverted_index_ram_dir_enable_when_base_compaction, "true");
 // use num_broadcast_buffer blocks as buffer to do broadcast
 DEFINE_Int32(num_broadcast_buffer, "32");
 
@@ -1207,8 +1227,8 @@ DEFINE_Bool(enable_feature_binlog, "false");
 // enable set in BitmapValue
 DEFINE_Bool(enable_set_in_bitmap_value, "true");
 
-DEFINE_Int64(max_hdfs_file_handle_cache_num, "1000");
-DEFINE_Int32(max_hdfs_file_handle_cache_time_sec, "3600");
+DEFINE_Int64(max_hdfs_file_handle_cache_num, "20000");
+DEFINE_Int32(max_hdfs_file_handle_cache_time_sec, "28800");
 DEFINE_Int64(max_external_file_meta_cache_num, "1000");
 DEFINE_mInt32(common_obj_lru_cache_stale_sweep_time_sec, "900");
 // Apply delete pred in cumu compaction
@@ -1219,8 +1239,13 @@ DEFINE_Int32(rocksdb_max_write_buffer_number, "5");
 
 DEFINE_mBool(allow_zero_date, "false");
 DEFINE_Bool(allow_invalid_decimalv2_literal, "false");
-DEFINE_mString(kerberos_ccache_path, "");
+DEFINE_mString(kerberos_ccache_path, "/tmp/");
 DEFINE_mString(kerberos_krb5_conf_path, "/etc/krb5.conf");
+// Deprecated
+DEFINE_mInt32(kerberos_refresh_interval_second, "43200");
+
+// JDK-8153057: avoid StackOverflowError thrown from the UncaughtExceptionHandler in thread "process reaper"
+DEFINE_mBool(jdk_process_reaper_use_default_stack_size, "true");
 
 DEFINE_mString(get_stack_trace_tool, "libunwind");
 DEFINE_mString(dwarf_location_info_mode, "FAST");
@@ -1259,13 +1284,16 @@ DEFINE_mInt32(publish_version_gap_logging_threshold, "200");
 DEFINE_mBool(enable_mow_get_agg_by_cache, "true");
 // get agg correctness check for mow table
 DEFINE_mBool(enable_mow_get_agg_correctness_check_core, "false");
+DEFINE_mBool(enable_agg_and_remove_pre_rowsets_delete_bitmap, "true");
+DEFINE_mBool(enable_check_agg_and_remove_pre_rowsets_delete_bitmap, "false");
 
 // The secure path with user files, used in the `local` table function.
-DEFINE_mString(user_files_secure_path, "${DORIS_HOME}");
+DEFINE_String(user_files_secure_path, "${DORIS_HOME}");
 
 DEFINE_Int32(fe_expire_duration_seconds, "60");
 
 DEFINE_Int32(grace_shutdown_wait_seconds, "120");
+DEFINE_Int32(grace_shutdown_post_delay_seconds, "30");
 
 DEFINE_Int16(bitmap_serialize_version, "1");
 
@@ -1347,14 +1375,7 @@ DEFINE_String(spill_storage_root_path, "");
 DEFINE_String(spill_storage_limit, "20%");    // 20%
 DEFINE_mInt32(spill_gc_interval_ms, "2000");  // 2s
 DEFINE_mInt32(spill_gc_work_time_ms, "2000"); // 2s
-DEFINE_Int32(spill_io_thread_pool_thread_num, "-1");
-DEFINE_Validator(spill_io_thread_pool_thread_num, [](const int config) -> bool {
-    if (config == -1) {
-        CpuInfo::init();
-        spill_io_thread_pool_thread_num = std::max(48, CpuInfo::num_cores() * 2);
-    }
-    return true;
-});
+DEFINE_Int32(spill_io_thread_pool_thread_num, "32");
 DEFINE_Int32(spill_io_thread_pool_queue_size, "102400");
 
 DEFINE_mBool(check_segment_when_build_rowset_meta, "false");
@@ -1383,7 +1404,7 @@ DEFINE_Validator(s3_put_token_per_second, [](int64_t config) -> bool { return co
 
 DEFINE_mInt64(s3_put_token_limit, "0");
 
-DEFINE_String(trino_connector_plugin_dir, "${DORIS_HOME}/connectors");
+DEFINE_String(trino_connector_plugin_dir, "${DORIS_HOME}/plugins/connectors");
 
 // ca_cert_file is in this path by default, Normally no modification is required
 // ca cert default path is different from different OS
@@ -1461,6 +1482,9 @@ DEFINE_mBool(skip_loading_stale_rowset_meta, "false");
 
 DEFINE_Bool(enable_file_logger, "true");
 
+// Enable partition column fallback when partition columns are missing from file
+DEFINE_Bool(enable_iceberg_partition_column_fallback, "true");
+
 // The minimum row group size when exporting Parquet files. default 128MB
 DEFINE_Int64(min_row_group_size, "134217728");
 
@@ -1494,8 +1518,6 @@ DEFINE_mBool(enable_pipeline_task_leakage_detect, "false");
 
 DEFINE_Int32(query_cache_size, "512");
 
-DEFINE_mBool(enable_delete_bitmap_merge_on_compaction, "false");
-
 // Enable validation to check the correctness of table size.
 DEFINE_Bool(enable_table_size_correctness_check, "false");
 DEFINE_Bool(force_regenerate_rowsetid_on_start_error, "false");
@@ -1526,6 +1548,11 @@ DEFINE_mInt32(load_trigger_compaction_version_percent, "66");
 DEFINE_mInt64(base_compaction_interval_seconds_since_last_operation, "86400");
 DEFINE_mBool(enable_compaction_pause_on_high_memory, "true");
 
+DEFINE_mBool(enable_quorum_success_write, "true");
+DEFINE_mDouble(quorum_success_max_wait_multiplier, "0.2");
+DEFINE_mInt64(quorum_success_min_wait_seconds, "60");
+DEFINE_mInt32(quorum_success_remaining_timeout_seconds, "30");
+
 DEFINE_mBool(enable_calc_delete_bitmap_between_segments_concurrently, "false");
 
 DEFINE_mBool(enable_fetch_rowsets_from_peer_replicas, "false");
@@ -1538,6 +1565,23 @@ DEFINE_mBool(random_segments_key_bounds_truncation, "false");
 DEFINE_mBool(enable_auto_clone_on_compaction_missing_version, "false");
 
 DEFINE_mBool(enable_auto_clone_on_mow_publish_missing_version, "false");
+
+// The capacity of segment partial column cache, used to cache column readers for each segment.
+DEFINE_mInt32(max_segment_partial_column_cache_size, "500");
+
+DEFINE_mBool(enable_wal_tde, "false");
+
+DEFINE_mBool(enable_prefill_output_dbm_agg_cache_after_compaction, "true");
+DEFINE_mBool(enable_prefill_all_dbm_agg_cache_after_compaction, "true");
+
+DEFINE_mBool(print_stack_when_cache_miss, "false");
+
+DEFINE_mBool(read_cluster_cache_opt_verbose_log, "false");
+
+DEFINE_String(aws_credentials_provider_version, "v2");
+DEFINE_Validator(aws_credentials_provider_version, [](const std::string& config) -> bool {
+    return config == "v1" || config == "v2";
+});
 
 // clang-format off
 #ifdef BE_TEST
@@ -1988,6 +2032,10 @@ Status set_fuzzy_configs() {
             ((distribution(*generator) % 2) == 0) ? "true" : "false";
     fuzzy_field_and_value["string_overflow_size"] =
             ((distribution(*generator) % 2) == 0) ? "10" : "4294967295";
+    fuzzy_field_and_value["max_segment_partial_column_cache_size"] =
+            ((distribution(*generator) % 2) == 0) ? "5" : "10";
+    fuzzy_field_and_value["skip_writing_empty_rowset_metadata"] =
+            ((distribution(*generator) % 2) == 0) ? "true" : "false";
 
     std::uniform_int_distribution<int64_t> distribution2(-2, 10);
     fuzzy_field_and_value["segments_key_bounds_truncation_threshold"] =

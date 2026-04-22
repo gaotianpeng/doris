@@ -23,6 +23,8 @@
 #     --clean            clean and build ut
 #     --run              build and run all ut
 #     --run --filter=xx  build and run specified ut
+#     --gdb              debug with gdb, does not take effect if --run is not specified
+#     --coverage         generate coverage report, does not take effect if --gdb is specified
 #     -j                 build parallel
 #     -h                 print this help message
 #
@@ -37,6 +39,7 @@ set +o posix
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
+export ROOT
 export DORIS_HOME="${ROOT}"
 
 . "${DORIS_HOME}/env.sh"
@@ -50,7 +53,9 @@ Usage: $0 <options>
      --clean            clean and build ut
      --run              build and run all ut
      --run --filter=xx  build and run specified ut
-     --coverage         coverage after run ut
+     --run --gen_out    generate expected check data for test
+     --gdb              debug with gdb, DOES NOT take effect if --run is not specified
+     --coverage         generage coverage after run ut, DOES NOT take effect if --gdb is specified
      -j                 build parallel
      -h                 print this help message
 
@@ -65,12 +70,13 @@ Usage: $0 <options>
     $0 --run --filter=FooTest.*:BarTest.*-FooTest.Bar:BarTest.Foo   runs everything in test suite FooTest except FooTest.Bar and everything in test suite BarTest except BarTest.Foo
     $0 --clean                                                      clean and build tests
     $0 --clean --run                                                clean, build and run all tests
-    $0 --clean --run --coverage                                     clean, build, run all tests and coverage
+    $0 --clean --run --coverage                                     clean, build, run all tests and generate coverage report
+    $0 --clean --run --gdb --filter=FooTest.*-FooTest.Bar           clean, build, run all tests and debug FooTest with gdb
   "
     exit 1
 }
 
-if ! OPTS="$(getopt -n "$0" -o vhj:f: -l coverage,benchmark,run,clean,filter: -- "$@")"; then
+if ! OPTS="$(getopt -n "$0" -o vhj:f: -l gen_out,coverage,benchmark,run,gdb,clean,filter: -- "$@")"; then
     usage
 fi
 
@@ -79,9 +85,11 @@ eval set -- "${OPTS}"
 CLEAN=0
 RUN=0
 BUILD_BENCHMARK_TOOL='OFF'
+GDB=0
 DENABLE_CLANG_COVERAGE='OFF'
 BUILD_AZURE='ON'
 FILTER=""
+GEN_OUT=""
 if [[ "$#" != 1 ]]; then
     while true; do
         case "$1" in
@@ -92,15 +100,27 @@ if [[ "$#" != 1 ]]; then
         --run)
             RUN=1
             shift
+
+            if [[ -z "${ARM_MARCH}" ]]; then
+                ARM_MARCH='armv8-a+crc'
+            fi
             ;;
         --benchmark)
             BUILD_BENCHMARK_TOOL='ON'
+            shift
+            ;;
+        --gdb)
+            GDB=1
             shift
             ;;
         --coverage)
             DENABLE_CLANG_COVERAGE='ON'
             shift
             ;;
+        --gen_out)
+            GEN_OUT='--gen_out'
+            shift
+            ;;	    
         -f | --filter)
             FILTER="--gtest_filter=$2"
             shift 2
@@ -131,6 +151,7 @@ echo "Get params:
     PARALLEL            -- ${PARALLEL}
     CLEAN               -- ${CLEAN}
     ENABLE_PCH          -- ${ENABLE_PCH}
+    WITH_TDE_DIR        -- ${WITH_TDE_DIR}
 "
 echo "Build Backend UT"
 
@@ -138,6 +159,12 @@ update_submodule() {
     local submodule_path=$1
     local submodule_name=$2
     local archive_url=$3
+    local submodule_commit
+
+    submodule_commit=$(git ls-files -s -- "${submodule_path}" | awk '$3 == 0 {print $2; exit}')
+    if [[ -z "${submodule_commit}" ]]; then
+        submodule_commit=$(git ls-tree HEAD -- "${submodule_path}" | awk 'NR == 1 {print $3}')
+    fi
 
     set +e
     cd "${DORIS_HOME}"
@@ -146,9 +173,6 @@ update_submodule() {
     exit_code=$?
     set -e
     if [[ "${exit_code}" -ne 0 ]]; then
-        # try to get submodule's current commit
-        submodule_commit=$(git ls-tree HEAD "${submodule_path}" | awk '{print $3}')
-
         commit_specific_url=$(echo "${archive_url}" | sed "s/refs\/heads/${submodule_commit}/")
         echo "Update ${submodule_name} submodule failed, start to download and extract ${commit_specific_url}"
 
@@ -164,7 +188,7 @@ if [[ "_${DENABLE_CLANG_COVERAGE}" == "_ON" ]]; then
     echo "export DORIS_TOOLCHAIN=clang" >>custom_env.sh
 fi
 
-if [[ -n "${DISABLE_BUILD_AZURE}" ]]; then
+if [[ "$(echo "${DISABLE_BUILD_AZURE}" | tr '[:lower:]' '[:upper:]')" == "ON" ]]; then
     BUILD_AZURE='OFF'
 fi
 
@@ -220,6 +244,10 @@ if [[ -z "${USE_UNWIND}" ]]; then
     fi
 fi
 
+if [[ -z "${ENABLE_INJECTION_POINT}" ]]; then
+    ENABLE_INJECTION_POINT='ON'
+fi
+
 MAKE_PROGRAM="$(command -v "${BUILD_SYSTEM}")"
 echo "-- Make program: ${MAKE_PROGRAM}"
 echo "-- Use ccache: ${CMAKE_USE_CCACHE}"
@@ -246,12 +274,15 @@ cd "${CMAKE_BUILD_DIR}"
     -DUSE_UNWIND="${USE_UNWIND}" \
     -DUSE_MEM_TRACKER="${USE_MEM_TRACKER}" \
     -DUSE_JEMALLOC=OFF \
+    -DARM_MARCH="${ARM_MARCH}" \
     -DEXTRA_CXX_FLAGS="${EXTRA_CXX_FLAGS}" \
     -DENABLE_CLANG_COVERAGE="${DENABLE_CLANG_COVERAGE}" \
+    -DENABLE_INJECTION_POINT="${ENABLE_INJECTION_POINT}" \
     ${CMAKE_USE_CCACHE:+${CMAKE_USE_CCACHE}} \
     -DENABLE_PCH="${ENABLE_PCH}" \
     -DDORIS_JAVA_HOME="${JAVA_HOME}" \
     -DBUILD_AZURE="${BUILD_AZURE}" \
+    -DWITH_TDE_DIR="${WITH_TDE_DIR}" \
     "${DORIS_HOME}/be"
 "${BUILD_SYSTEM}" -j "${PARALLEL}"
 
@@ -462,10 +493,16 @@ test="${DORIS_TEST_BINARY_DIR}/doris_be_test"
 profraw=${DORIS_TEST_BINARY_DIR}/doris_be_test.profraw
 profdata=${DORIS_TEST_BINARY_DIR}/doris_be_test.profdata
 
+
+if [[ ${GDB} -ge 1 ]]; then
+    gdb --args "${test}" "${FILTER}"
+    exit
+fi
+
 file_name="${test##*/}"
 if [[ -f "${test}" ]]; then
     if [[ "_${DENABLE_CLANG_COVERAGE}" == "_ON" ]]; then
-        LLVM_PROFILE_FILE="${profraw}" "${test}" --gtest_output="xml:${GTEST_OUTPUT_DIR}/${file_name}.xml" --gtest_print_time=true "${FILTER}"
+        LLVM_PROFILE_FILE="${profraw}" "${test}" --gtest_output="xml:${GTEST_OUTPUT_DIR}/${file_name}.xml" --gtest_print_time=true "${FILTER}" "${GEN_OUT}"
         if [[ -d "${DORIS_TEST_BINARY_DIR}"/report ]]; then
             rm -rf "${DORIS_TEST_BINARY_DIR}"/report
         fi
@@ -473,13 +510,13 @@ if [[ -f "${test}" ]]; then
         echo "${cmd1}"
         eval "${cmd1}"
         cmd2="${LLVM_COV} show -output-dir=${DORIS_TEST_BINARY_DIR}/report -format=html \
-            -ignore-filename-regex='(.*gensrc/.*)|(.*_test\.cpp$)|(.*be/test.*)|(.*apache-orc/.*)|(.*clucene/.*)' \
+            -show-branches=count -show-expansions -ignore-filename-regex='(.*gensrc/.*)|(.*be/src/common/status\.h$)|(.*be/src/common/logging.h)|(.*_test\.cpp$)|(.*be/test.*)|(.*apache-orc/.*)|(.*clucene/.*)' \
             -instr-profile=${profdata} \
             -object=${test}"
         echo "${cmd2}"
         eval "${cmd2}"
     else
-        "${test}" --gtest_output="xml:${GTEST_OUTPUT_DIR}/${file_name}.xml" --gtest_print_time=true "${FILTER}"
+        "${test}" --gtest_output="xml:${GTEST_OUTPUT_DIR}/${file_name}.xml" --gtest_print_time=true "${FILTER}" "${GEN_OUT}"
     fi
     echo "=== Finished. Gtest output: ${GTEST_OUTPUT_DIR}"
 else

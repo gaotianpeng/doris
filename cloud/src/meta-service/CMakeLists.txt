@@ -22,4 +22,5 @@ add_library(MetaService
     doris_txn.cpp
     http_encode_key.cpp
     txn_lazy_committer.cpp
+    delete_bitmap_lock_white_list.cpp
 )

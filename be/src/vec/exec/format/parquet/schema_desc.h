@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "common/status.h"
+#include "gen_cpp/Planner_types.h"
 #include "runtime/types.h"
 #include "util/slice.h"
 
@@ -58,7 +59,7 @@ struct FieldSchema {
     FieldSchema(const FieldSchema& fieldSchema) = default;
     std::string debug_string() const;
 
-    int32_t field_id;
+    int32_t field_id = -1;
 };
 
 class FieldDescriptor {
@@ -71,8 +72,8 @@ private:
     std::unordered_map<std::string, const FieldSchema*> _name_to_field;
     // Used in from_thrift, marking the next schema position that should be parsed
     size_t _next_schema_pos;
-    std::map<int, std::string> _field_id_name_mapping;
 
+private:
     void parse_physical_field(const tparquet::SchemaElement& physical_schema, bool is_nullable,
                               FieldSchema* physical_field);
 
@@ -98,10 +99,6 @@ private:
 
 public:
     std::pair<TypeDescriptor, bool> get_doris_type(const tparquet::SchemaElement& physical_schema);
-
-    // org.apache.iceberg.avro.AvroSchemaUtil#sanitize will encode special characters,
-    // we have to decode these characters
-    void iceberg_sanitize(const std::vector<std::string>& read_columns);
 
     FieldDescriptor() = default;
     ~FieldDescriptor() = default;
@@ -133,11 +130,7 @@ public:
 
     int32_t size() const { return _fields.size(); }
 
-    bool has_parquet_field_id() const { return _field_id_name_mapping.size() > 0; }
-
-    std::map<int32, std::string> get_field_id_name_map() { return _field_id_name_mapping; }
-
-    const doris::Slice get_column_name_from_field_id(int32_t id) const;
+    const std::vector<FieldSchema>& get_fields_schema() const { return _fields; }
 };
 
 } // namespace doris::vectorized

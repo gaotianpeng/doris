@@ -26,7 +26,9 @@ import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.persist.OperationType;
 import org.apache.doris.persist.gson.GsonPostProcessable;
 import org.apache.doris.persist.gson.GsonUtils;
+import org.apache.doris.proto.OlapFile.EncryptionAlgorithmPB;
 import org.apache.doris.thrift.TCompressionType;
+import org.apache.doris.thrift.TEncryptionAlgorithm;
 import org.apache.doris.thrift.TInvertedIndexFileStorageFormat;
 import org.apache.doris.thrift.TStorageFormat;
 import org.apache.doris.thrift.TStorageMedium;
@@ -109,6 +111,8 @@ public class TableProperty implements Writable, GsonPostProcessable {
 
     private long storagePageSize = PropertyAnalyzer.STORAGE_PAGE_SIZE_DEFAULT_VALUE;
 
+    private long storageDictPageSize = PropertyAnalyzer.STORAGE_DICT_PAGE_SIZE_DEFAULT_VALUE;
+
     private String compactionPolicy = PropertyAnalyzer.SIZE_BASED_COMPACTION_POLICY;
 
     private long timeSeriesCompactionGoalSizeMbytes
@@ -128,6 +132,7 @@ public class TableProperty implements Writable, GsonPostProcessable {
 
     private String autoAnalyzePolicy = PropertyAnalyzer.ENABLE_AUTO_ANALYZE_POLICY;
 
+    private TEncryptionAlgorithm encryptionAlgorithm = TEncryptionAlgorithm.PLAINTEXT;
 
     private DataSortInfo dataSortInfo = new DataSortInfo();
 
@@ -193,6 +198,8 @@ public class TableProperty implements Writable, GsonPostProcessable {
         if (!reserveReplica) {
             setReplicaAlloc(replicaAlloc);
         }
+        // reset storage vault
+        clearStorageVault();
         return this;
     }
 
@@ -241,6 +248,12 @@ public class TableProperty implements Writable, GsonPostProcessable {
         return this;
     }
 
+    public TableProperty clearStorageVault() {
+        properties.put(PropertyAnalyzer.PROPERTIES_STORAGE_VAULT_ID, "");
+        properties.put(PropertyAnalyzer.PROPERTIES_STORAGE_VAULT_NAME, "");
+        return this;
+    }
+
     public TableProperty buildTTLSeconds() {
         ttlSeconds = Long.parseLong(properties.getOrDefault(PropertyAnalyzer.PROPERTIES_FILE_CACHE_TTL_SECONDS, "0"));
         return this;
@@ -268,10 +281,30 @@ public class TableProperty implements Writable, GsonPostProcessable {
         return this;
     }
 
+    public void buildTDEAlgorithm() {
+        String tdeAlgorithmName = properties.getOrDefault(PropertyAnalyzer.PROPERTIES_TDE_ALGORITHM,
+                TEncryptionAlgorithm.PLAINTEXT.name());
+        encryptionAlgorithm = TEncryptionAlgorithm.valueOf(tdeAlgorithmName);
+    }
+
+    public TEncryptionAlgorithm getTDEAlgorithm() {
+        return encryptionAlgorithm;
+    }
+
+    public EncryptionAlgorithmPB getTDEAlgorithmPB() {
+        switch (encryptionAlgorithm) {
+            case AES256:
+                return EncryptionAlgorithmPB.AES_256_CTR;
+            case SM4:
+                return EncryptionAlgorithmPB.SM4_128_CTR;
+            default:
+                return EncryptionAlgorithmPB.PLAINTEXT;
+        }
+    }
+
     public boolean disableAutoCompaction() {
         return disableAutoCompaction;
     }
-
 
     public TableProperty buildVariantEnableFlattenNested() {
         variantEnableFlattenNested = Boolean.parseBoolean(
@@ -281,6 +314,16 @@ public class TableProperty implements Writable, GsonPostProcessable {
 
     public boolean variantEnableFlattenNested() {
         return variantEnableFlattenNested;
+    }
+
+    public void setVariantMaxSubcolumnsCount(int maxSubcoumnsCount) {
+        properties.put(PropertyAnalyzer.PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT, Integer.toString(maxSubcoumnsCount));
+    }
+
+    public int getVariantMaxSubcolumnsCount() {
+        return Integer.parseInt(properties.getOrDefault(
+                PropertyAnalyzer.PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT,
+                Integer.toString(PropertyAnalyzer.VARIANT_MAX_SUBCOLUMNS_COUNT_DEFAULT_VALUE)));
     }
 
     public TableProperty buildEnableSingleReplicaCompaction() {
@@ -335,6 +378,17 @@ public class TableProperty implements Writable, GsonPostProcessable {
 
     public long storagePageSize() {
         return storagePageSize;
+    }
+
+    public TableProperty buildStorageDictPageSize() {
+        storageDictPageSize = Long.parseLong(
+            properties.getOrDefault(PropertyAnalyzer.PROPERTIES_STORAGE_DICT_PAGE_SIZE,
+                Long.toString(PropertyAnalyzer.STORAGE_DICT_PAGE_SIZE_DEFAULT_VALUE)));
+        return this;
+    }
+
+    public long storageDictPageSize() {
+        return storageDictPageSize;
     }
 
     public TableProperty buildSkipWriteIndexOnLoad() {
@@ -532,8 +586,12 @@ public class TableProperty implements Writable, GsonPostProcessable {
     }
 
     public TableProperty buildCompressionType() {
-        compressionType = TCompressionType.valueOf(properties.getOrDefault(PropertyAnalyzer.PROPERTIES_COMPRESSION,
-                TCompressionType.LZ4F.name()));
+        try {
+            compressionType = PropertyAnalyzer.getCompressionTypeFromProperties(properties);
+        } catch (AnalysisException e) {
+            LOG.error("failed to analyze compression type", e);
+            compressionType = TCompressionType.ZSTD;
+        }
         return this;
     }
 
@@ -631,6 +689,15 @@ public class TableProperty implements Writable, GsonPostProcessable {
 
     public void setEnableUniqueKeyMergeOnWrite(boolean enable) {
         properties.put(PropertyAnalyzer.ENABLE_UNIQUE_KEY_MERGE_ON_WRITE, Boolean.toString(enable));
+    }
+
+    public void setEnableUniqueKeySkipBitmap(boolean enable) {
+        properties.put(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN, Boolean.toString(enable));
+    }
+
+    public boolean getEnableUniqueKeySkipBitmap() {
+        return Boolean.parseBoolean(properties.getOrDefault(
+            PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN, "false"));
     }
 
     // In order to ensure that unique tables without the `enable_unique_key_merge_on_write` property specified
@@ -735,6 +802,7 @@ public class TableProperty implements Writable, GsonPostProcessable {
         buildRowStoreColumns();
         buildRowStorePageSize();
         buildStoragePageSize();
+        buildStorageDictPageSize();
         buildSkipWriteIndexOnLoad();
         buildCompactionPolicy();
         buildTimeSeriesCompactionGoalSizeMbytes();
@@ -762,6 +830,7 @@ public class TableProperty implements Writable, GsonPostProcessable {
         }
         removeDuplicateReplicaNumProperty();
         buildReplicaAllocation();
+        buildTDEAlgorithm();
     }
 
     // For some historical reason,

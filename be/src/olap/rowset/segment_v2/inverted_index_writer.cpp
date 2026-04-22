@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "common/exception.h"
 #include "io/fs/local_file_system.h"
 
 #ifdef __clang__
@@ -51,12 +52,12 @@
 #include "olap/rowset/segment_v2/common.h"
 #include "olap/rowset/segment_v2/inverted_index/analyzer/analyzer.h"
 #include "olap/rowset/segment_v2/inverted_index/char_filter/char_filter_factory.h"
+#include "olap/rowset/segment_v2/inverted_index/util/reader.h"
 #include "olap/rowset/segment_v2/inverted_index_common.h"
 #include "olap/rowset/segment_v2/inverted_index_desc.h"
 #include "olap/rowset/segment_v2/inverted_index_file_writer.h"
 #include "olap/rowset/segment_v2/inverted_index_fs_directory.h"
 #include "olap/tablet_schema.h"
-#include "olap/types.h"
 #include "runtime/collection_value.h"
 #include "runtime/exec_env.h"
 #include "util/debug_points.h"
@@ -65,6 +66,9 @@
 #include "util/string_util.h"
 
 namespace doris::segment_v2 {
+
+using namespace doris::segment_v2::inverted_index;
+
 const int32_t MAX_FIELD_LEN = 0x7FFFFFFFL;
 const int32_t MERGE_FACTOR = 100000000;
 const int32_t MAX_LEAF_COUNT = 1024;
@@ -73,12 +77,8 @@ const int DIMS = 1;
 
 bool InvertedIndexColumnWriter::check_support_inverted_index(const TabletColumn& column) {
     // bellow types are not supported in inverted index for extracted columns
-    static std::set<FieldType> invalid_types = {
-            FieldType::OLAP_FIELD_TYPE_DOUBLE,
-            FieldType::OLAP_FIELD_TYPE_JSONB,
-            FieldType::OLAP_FIELD_TYPE_FLOAT,
-    };
-    if (invalid_types.contains(column.type())) {
+    static std::set<FieldType> invalid_types = {FieldType::OLAP_FIELD_TYPE_JSONB};
+    if (invalid_types.count(column.type())) {
         return false;
     }
     if (column.is_variant_type()) {
@@ -104,8 +104,8 @@ public:
             : _single_field(single_field),
               _index_meta(index_meta),
               _index_file_writer(index_file_writer) {
-        _parser_type = get_inverted_index_parser_type_from_string(
-                get_parser_string_from_properties(_index_meta->properties()));
+        _should_analyzer =
+                inverted_index::InvertedIndexAnalyzer::should_analyzer(_index_meta->properties());
         _value_key_coder = get_key_coder(field_type);
         _field_name = StringUtil::string_to_wstring(field_name);
     }
@@ -169,8 +169,7 @@ public:
         return open_index_directory();
     }
 
-    Result<std::unique_ptr<lucene::util::Reader>> create_char_string_reader(
-            CharFilterMap& char_filter_map) {
+    Result<ReaderPtr> create_char_string_reader(CharFilterMap& char_filter_map) {
         try {
             return inverted_index::InvertedIndexAnalyzer::create_reader(char_filter_map);
         } catch (CLuceneError& e) {
@@ -212,21 +211,45 @@ public:
     Status create_field(lucene::document::Field** field) {
         int field_config = int(lucene::document::Field::STORE_NO) |
                            int(lucene::document::Field::INDEX_NONORMS);
-        field_config |= (_parser_type == InvertedIndexParserType::PARSER_NONE)
-                                ? int(lucene::document::Field::INDEX_UNTOKENIZED)
-                                : int(lucene::document::Field::INDEX_TOKENIZED);
+        field_config |= _should_analyzer ? int32_t(lucene::document::Field::INDEX_TOKENIZED)
+                                         : int32_t(lucene::document::Field::INDEX_UNTOKENIZED);
         *field = new lucene::document::Field(_field_name.c_str(), field_config);
         (*field)->setOmitTermFreqAndPositions(
                 !(get_parser_phrase_support_string_from_properties(_index_meta->properties()) ==
                   INVERTED_INDEX_PARSER_PHRASE_SUPPORT_YES));
+        DBUG_EXECUTE_IF("InvertedIndexColumnWriterImpl::create_field_v3", {
+            if (_index_file_writer->get_storage_format() != InvertedIndexStorageFormatPB::V3) {
+                return Status::Error<doris::ErrorCode::INVERTED_INDEX_CLUCENE_ERROR>(
+                        "debug point: InvertedIndexColumnWriterImpl::create_field_v3 error");
+            }
+        })
+        if (_index_file_writer->get_storage_format() >= InvertedIndexStorageFormatPB::V3) {
+            (*field)->setIndexVersion(IndexVersion::kV3);
+            // Only effective in v3
+            std::string dict_compression =
+                    get_parser_dict_compression_from_properties(_index_meta->properties());
+            DBUG_EXECUTE_IF("InvertedIndexColumnWriterImpl::create_field_dic_compression", {
+                if (dict_compression != INVERTED_INDEX_PARSER_TRUE) {
+                    return Status::Error<doris::ErrorCode::INVERTED_INDEX_CLUCENE_ERROR>(
+                            "debug point: "
+                            "InvertedIndexColumnWriterImpl::create_field_dic_compression error");
+                }
+            })
+            if (dict_compression == INVERTED_INDEX_PARSER_TRUE) {
+                (*field)->updateFlag(FlagBits::DICT_COMPRESS);
+            }
+        }
         return Status::OK();
     }
 
-    Result<std::unique_ptr<lucene::analysis::Analyzer>> create_analyzer(
+    Result<std::shared_ptr<lucene::analysis::Analyzer>> create_analyzer(
             std::shared_ptr<InvertedIndexCtx>& inverted_index_ctx) {
         try {
             return inverted_index::InvertedIndexAnalyzer::create_analyzer(inverted_index_ctx.get());
         } catch (CLuceneError& e) {
+            return ResultError(Status::Error<doris::ErrorCode::INVERTED_INDEX_ANALYZER_ERROR>(
+                    "inverted index create analyzer failed: {}", e.what()));
+        } catch (Exception& e) {
             return ResultError(Status::Error<doris::ErrorCode::INVERTED_INDEX_ANALYZER_ERROR>(
                     "inverted index create analyzer failed: {}", e.what()));
         }
@@ -234,17 +257,18 @@ public:
 
     Status init_fulltext_index() {
         _inverted_index_ctx = std::make_shared<InvertedIndexCtx>(
+                get_custom_analyzer_string_from_properties(_index_meta->properties()),
                 get_inverted_index_parser_type_from_string(
                         get_parser_string_from_properties(_index_meta->properties())),
                 get_parser_mode_string_from_properties(_index_meta->properties()),
+                get_parser_phrase_support_string_from_properties(_index_meta->properties()),
                 get_parser_char_filter_map_from_properties(_index_meta->properties()),
                 get_parser_lowercase_from_properties<true>(_index_meta->properties()),
                 get_parser_stopwords_from_properties(_index_meta->properties()));
         RETURN_IF_ERROR(open_index_directory());
         _char_string_reader =
                 DORIS_TRY(create_char_string_reader(_inverted_index_ctx->char_filter_map));
-        if (_parser_type != InvertedIndexParserType::PARSER_UNKNOWN &&
-            _parser_type != InvertedIndexParserType::PARSER_NONE) {
+        if (_should_analyzer) {
             _analyzer = DORIS_TRY(create_analyzer(_inverted_index_ctx));
         }
         _index_writer = create_index_writer();
@@ -336,8 +360,7 @@ public:
 
     Status new_inverted_index_field(const char* field_value_data, size_t field_value_size) {
         try {
-            if (_parser_type != InvertedIndexParserType::PARSER_UNKNOWN &&
-                _parser_type != InvertedIndexParserType::PARSER_NONE) {
+            if (_should_analyzer) {
                 new_char_token_stream(field_value_data, field_value_size, _field);
             } else {
                 new_field_char_value(field_value_data, field_value_size, _field);
@@ -358,7 +381,7 @@ public:
                     _CLTHROWA(CL_ERR_UnsupportedOperation,
                               "UnsupportedOperationException: CLStream::init");
                 })
-        auto* stream = _analyzer->reusableTokenStream(field->name(), _char_string_reader.get());
+        auto* stream = _analyzer->reusableTokenStream(field->name(), _char_string_reader);
         field->setValue(stream);
     }
 
@@ -387,9 +410,8 @@ public:
             auto* v = (Slice*)values;
             for (int i = 0; i < count; ++i) {
                 // only ignore_above UNTOKENIZED strings and empty strings not tokenized
-                if ((_parser_type == InvertedIndexParserType::PARSER_NONE &&
-                     v->get_size() > _ignore_above) ||
-                    (_parser_type != InvertedIndexParserType::PARSER_NONE && v->empty())) {
+                if ((!_should_analyzer && v->get_size() > _ignore_above) ||
+                    (_should_analyzer && v->empty())) {
                     RETURN_IF_ERROR(add_null_document());
                 } else {
                     RETURN_IF_ERROR(new_inverted_index_field(v->get_data(), v->get_size()));
@@ -421,6 +443,7 @@ public:
                 return Status::InternalError("index writer is null in inverted index writer");
             }
             size_t start_off = 0;
+            std::vector<ReaderPtr> keep_readers;
             for (int i = 0; i < count; ++i) {
                 // nullmap & value ptr-array may not from offsets[i] because olap_convertor make offsets accumulate from _base_offset which may not is 0, but nullmap & value in this segment is from 0, we only need
                 // every single array row element size to go through the nullmap & value ptr-array, and also can go through the every row in array to keep with _rid++
@@ -433,9 +456,8 @@ public:
                         continue;
                     }
                     auto* v = (Slice*)((const uint8_t*)value_ptr + j * field_size);
-                    if ((_parser_type == InvertedIndexParserType::PARSER_NONE &&
-                         v->get_size() > _ignore_above) ||
-                        (_parser_type != InvertedIndexParserType::PARSER_NONE && v->empty())) {
+                    if ((!_should_analyzer && v->get_size() > _ignore_above) ||
+                        (_should_analyzer && v->empty())) {
                         // is here a null value?
                         // TODO. Maybe here has performance problem for large size string.
                         continue;
@@ -457,20 +479,16 @@ public:
                                        << " error:" << st;
                             return st;
                         }
-                        if (_parser_type != InvertedIndexParserType::PARSER_UNKNOWN &&
-                            _parser_type != InvertedIndexParserType::PARSER_NONE) {
+                        if (_should_analyzer) {
                             // in this case stream need to delete after add_document, because the
                             // stream can not reuse for different field
                             bool own_token_stream = true;
-                            bool own_reader = true;
-                            std::unique_ptr<lucene::util::Reader> char_string_reader =
-                                    DORIS_TRY(create_char_string_reader(
-                                            _inverted_index_ctx->char_filter_map));
+                            ReaderPtr char_string_reader = DORIS_TRY(create_char_string_reader(
+                                    _inverted_index_ctx->char_filter_map));
                             char_string_reader->init(v->get_data(), v->get_size(), false);
-                            _analyzer->set_ownReader(own_reader);
-                            ts = _analyzer->tokenStream(new_field->name(),
-                                                        char_string_reader.release());
+                            ts = _analyzer->tokenStream(new_field->name(), char_string_reader);
                             new_field->setValue(ts, own_token_stream);
+                            keep_readers.emplace_back(std::move(char_string_reader));
                         } else {
                             new_field_char_value(v->get_data(), v->get_size(), new_field.get());
                         }
@@ -523,6 +541,7 @@ public:
                     _doc->clear();
                 }
                 _rid++;
+                keep_readers.clear();
             }
         } else if constexpr (field_is_numeric_type(field_type)) {
             size_t start_off = 0;
@@ -732,16 +751,16 @@ private:
     // _dir must destruct after _index_writer, so _dir must be defined before _index_writer.
     std::shared_ptr<DorisFSDirectory> _dir = nullptr;
     std::unique_ptr<lucene::index::IndexWriter> _index_writer = nullptr;
-    std::unique_ptr<lucene::analysis::Analyzer> _analyzer = nullptr;
-    std::unique_ptr<lucene::util::Reader> _char_string_reader = nullptr;
+    std::shared_ptr<lucene::analysis::Analyzer> _analyzer = nullptr;
+    ReaderPtr _char_string_reader = nullptr;
     std::shared_ptr<lucene::util::bkd::bkd_writer> _bkd_writer = nullptr;
     InvertedIndexCtxSPtr _inverted_index_ctx = nullptr;
     const KeyCoder* _value_key_coder;
     const TabletIndex* _index_meta;
-    InvertedIndexParserType _parser_type;
     std::wstring _field_name;
     InvertedIndexFileWriter* _index_file_writer;
     uint32_t _ignore_above;
+    bool _should_analyzer = false;
 };
 
 Status InvertedIndexColumnWriter::create(const Field* field,
@@ -807,6 +826,8 @@ Status InvertedIndexColumnWriter::create(const Field* field,
         M(FieldType::OLAP_FIELD_TYPE_BOOL)
         M(FieldType::OLAP_FIELD_TYPE_IPV4)
         M(FieldType::OLAP_FIELD_TYPE_IPV6)
+        M(FieldType::OLAP_FIELD_TYPE_FLOAT)
+        M(FieldType::OLAP_FIELD_TYPE_DOUBLE)
 #undef M
     default:
         return Status::NotSupported("unsupported type for inverted index: " +

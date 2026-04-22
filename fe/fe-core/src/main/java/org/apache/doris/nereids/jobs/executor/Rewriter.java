@@ -22,7 +22,6 @@ import org.apache.doris.nereids.jobs.rewrite.CostBasedRewriteJob;
 import org.apache.doris.nereids.jobs.rewrite.RewriteJob;
 import org.apache.doris.nereids.rules.RuleSet;
 import org.apache.doris.nereids.rules.RuleType;
-import org.apache.doris.nereids.rules.analysis.AdjustAggregateNullableForEmptySet;
 import org.apache.doris.nereids.rules.analysis.AvgDistinctToSumDivCount;
 import org.apache.doris.nereids.rules.analysis.CheckAfterRewrite;
 import org.apache.doris.nereids.rules.analysis.LogicalSubQueryAliasToLogicalProject;
@@ -36,7 +35,6 @@ import org.apache.doris.nereids.rules.rewrite.AddDefaultLimit;
 import org.apache.doris.nereids.rules.rewrite.AddProjectForJoin;
 import org.apache.doris.nereids.rules.rewrite.AdjustConjunctsReturnType;
 import org.apache.doris.nereids.rules.rewrite.AdjustNullable;
-import org.apache.doris.nereids.rules.rewrite.AdjustPreAggStatus;
 import org.apache.doris.nereids.rules.rewrite.AggScalarSubQueryToWindowFunction;
 import org.apache.doris.nereids.rules.rewrite.BuildAggForUnion;
 import org.apache.doris.nereids.rules.rewrite.CTEInline;
@@ -72,6 +70,7 @@ import org.apache.doris.nereids.rules.rewrite.EliminateLimit;
 import org.apache.doris.nereids.rules.rewrite.EliminateNotNull;
 import org.apache.doris.nereids.rules.rewrite.EliminateNullAwareLeftAntiJoin;
 import org.apache.doris.nereids.rules.rewrite.EliminateOrderByConstant;
+import org.apache.doris.nereids.rules.rewrite.EliminateOrderByKey;
 import org.apache.doris.nereids.rules.rewrite.EliminateSemiJoin;
 import org.apache.doris.nereids.rules.rewrite.EliminateSort;
 import org.apache.doris.nereids.rules.rewrite.EliminateSortUnderSubqueryOrView;
@@ -82,6 +81,7 @@ import org.apache.doris.nereids.rules.rewrite.ExtractSingleTableExpressionFromDi
 import org.apache.doris.nereids.rules.rewrite.FindHashConditionForJoin;
 import org.apache.doris.nereids.rules.rewrite.InferAggNotNull;
 import org.apache.doris.nereids.rules.rewrite.InferFilterNotNull;
+import org.apache.doris.nereids.rules.rewrite.InferInPredicateFromOr;
 import org.apache.doris.nereids.rules.rewrite.InferJoinNotNull;
 import org.apache.doris.nereids.rules.rewrite.InferPredicates;
 import org.apache.doris.nereids.rules.rewrite.InferSetOperatorDistinct;
@@ -133,8 +133,10 @@ import org.apache.doris.nereids.rules.rewrite.PushProjectThroughUnion;
 import org.apache.doris.nereids.rules.rewrite.ReduceAggregateChildOutputRows;
 import org.apache.doris.nereids.rules.rewrite.ReorderJoin;
 import org.apache.doris.nereids.rules.rewrite.RewriteCteChildren;
+import org.apache.doris.nereids.rules.rewrite.SetPreAggStatus;
 import org.apache.doris.nereids.rules.rewrite.SimplifyWindowExpression;
 import org.apache.doris.nereids.rules.rewrite.SplitLimit;
+import org.apache.doris.nereids.rules.rewrite.SplitMultiDistinct;
 import org.apache.doris.nereids.rules.rewrite.SumLiteralRewrite;
 import org.apache.doris.nereids.rules.rewrite.TransposeSemiJoinAgg;
 import org.apache.doris.nereids.rules.rewrite.TransposeSemiJoinAggProject;
@@ -164,6 +166,10 @@ public class Rewriter extends AbstractBatchJobExecutor {
             ImmutableSet.of(LogicalCTEAnchor.class),
             () -> jobs(
                 topic("Plan Normalization",
+                        // move MergeProjects rule from analyze phase
+                        // because SubqueryToApply and BindSink rule may create extra project node
+                        // we need merge them at the beginning of rewrite phase to let later rules happy
+                        topDown(new MergeProjects()),
                         topDown(
                                 new EliminateOrderByConstant(),
                                 new EliminateSortUnderSubqueryOrView(),
@@ -241,8 +247,6 @@ public class Rewriter extends AbstractBatchJobExecutor {
                                 new EliminateSemiJoin()
                         )
                 ),
-                // please note: this rule must run before NormalizeAggregate
-                topDown(new AdjustAggregateNullableForEmptySet()),
                 // The rule modification needs to be done after the subquery is unnested,
                 // because for scalarSubQuery, the connection condition is stored in apply in the analyzer phase,
                 // but when normalizeAggregate/normalizeSort is performed, the members in apply cannot be obtained,
@@ -311,6 +315,9 @@ public class Rewriter extends AbstractBatchJobExecutor {
                         // after EliminateEmptyRelation, project can be pushed into union
                         topDown(new PushProjectIntoUnion())
                 ),
+                topic("infer In-predicate from Or-predicate",
+                        topDown(new InferInPredicateFromOr())
+                ),
                 // putting the "Column pruning and infer predicate" topic behind the "Set operation optimization"
                 // is because that pulling up predicates from union needs EliminateEmptyRelation in union child
                 topic("Column pruning and infer predicate",
@@ -335,12 +342,11 @@ public class Rewriter extends AbstractBatchJobExecutor {
                 ),
                 // this rule should invoke after ColumnPruning
                 custom(RuleType.ELIMINATE_UNNECESSARY_PROJECT, EliminateUnnecessaryProject::new),
-
+                topic("Eliminate Order By Key",
+                        topDown(new EliminateOrderByKey())),
                 topic("Eliminate GroupBy",
                         topDown(new EliminateGroupBy(),
-                                new MergeAggregate(),
-                                // need to adjust min/max/sum nullable attribute after merge aggregate
-                                new AdjustAggregateNullableForEmptySet())
+                                new MergeAggregate())
                 ),
 
                 topic("Eager aggregation",
@@ -406,18 +412,14 @@ public class Rewriter extends AbstractBatchJobExecutor {
                                 new EliminateFilter(),
                                 new PushDownFilterThroughProject(),
                                 new MergeProjects(),
-                                new PruneOlapScanTablet(),
-                                // SelectMaterializedIndexWithAggregate may change the nullability of agg functions
-                                // need rerun AdjustAggregateNullableForEmptySet to make the nullability correct
-                                // TODO: remove AdjustAggregateNullableForEmptySet when remove rbo mv selection rules
-                                new AdjustAggregateNullableForEmptySet()
+                                new PruneOlapScanTablet()
                         ),
                         custom(RuleType.COLUMN_PRUNING, ColumnPruning::new),
                         bottomUp(RuleSet.PUSH_DOWN_FILTERS),
                         custom(RuleType.ELIMINATE_UNNECESSARY_PROJECT, EliminateUnnecessaryProject::new)
                 ),
                 topic("adjust preagg status",
-                        topDown(new AdjustPreAggStatus())
+                        custom(RuleType.SET_PREAGG_STATUS, SetPreAggStatus::new)
                 ),
                 topic("Point query short circuit",
                         topDown(new LogicalResultSinkToShortCircuitPointQuery())),
@@ -555,6 +557,9 @@ public class Rewriter extends AbstractBatchJobExecutor {
                     rewriteJobs.addAll(jobs(topic("or expansion",
                             custom(RuleType.OR_EXPANSION, () -> OrExpansion.INSTANCE))));
                 }
+                rewriteJobs.addAll(jobs(topic("split multi distinct",
+                        custom(RuleType.SPLIT_MULTI_DISTINCT, () -> SplitMultiDistinct.INSTANCE))));
+
                 if (needSubPathPushDown) {
                     rewriteJobs.addAll(jobs(
                             topic("variant element_at push down",
@@ -568,7 +573,7 @@ public class Rewriter extends AbstractBatchJobExecutor {
                                 custom(RuleType.REWRITE_CTE_CHILDREN, () -> new RewriteCteChildren(afterPushDownJobs))
                         ),
                         topic("whole plan check",
-                                custom(RuleType.ADJUST_NULLABLE, AdjustNullable::new)
+                                custom(RuleType.ADJUST_NULLABLE, () -> new AdjustNullable(false))
                         ),
                         // NullableDependentExpressionRewrite need to be done after nullable fixed
                         topic("condition function", bottomUp(ImmutableList.of(

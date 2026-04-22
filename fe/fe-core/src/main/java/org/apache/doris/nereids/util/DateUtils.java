@@ -20,6 +20,8 @@ package org.apache.doris.nereids.util;
 import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.qe.ConnectContext;
 
+import com.google.common.collect.ImmutableSet;
+
 import java.time.DayOfWeek;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -33,11 +35,15 @@ import java.time.temporal.IsoFields;
 import java.time.temporal.TemporalAccessor;
 import java.time.temporal.WeekFields;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * date util tools.
  */
 public class DateUtils {
+    public static final Set<String> monoFormat = ImmutableSet.of("yyyyMMdd", "yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss",
+            "%Y", "%Y-%m", "%Y-%m-%d", "%Y-%m-%d %H", "%Y-%m-%d %H:%i", "%Y-%m-%d %H:%i:%s", "%Y-%m-%d %H:%i:%S",
+            "%Y-%m-%d %T", "%Y%m%d", "%Y%m");
     private static final WeekFields weekFields = WeekFields.of(DayOfWeek.SUNDAY, 7);
 
     /**
@@ -133,9 +139,11 @@ public class DateUtils {
                     case 'y': // %y Year, numeric (two digits)
                         builder.appendValueReduced(ChronoField.YEAR, 2, 2, 1970);
                         break;
+                    case 'f':
+                        builder.appendValue(ChronoField.MICRO_OF_SECOND, 6);
+                        break;
                     // TODO(Gabriel): support microseconds in date literal
                     case 'D': // %D Day of the month with English suffix (0th, 1st, 2nd, 3rd, …)
-                    case 'f': // %f Microseconds (000000..999999)
                     case 'U': // %U Week (00..53), where Sunday is the first day of the week
                     case 'u': // %u Week (00..53), where Monday is the first day of the week
                     case 'w': // %w Day of the week (0=Sunday..6=Saturday)

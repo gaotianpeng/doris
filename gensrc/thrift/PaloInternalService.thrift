@@ -359,9 +359,16 @@ struct TQueryOptions {
 
   146: optional bool fuzzy_disable_runtime_filter_in_be = false;
 
+  150: optional bool enable_runtime_filter_partition_prune = true;
+
   163: optional bool inverted_index_compatible_read = false
+  164: optional bool check_orc_init_sargs_success = false
   // upgrade options. keep them same in every branch.
   200: optional bool new_is_ip_address_in_range = false;
+
+  172: optional bool enable_prefer_cached_rowset
+  173: optional i64 query_freshness_tolerance_ms
+  174: optional i64 merge_read_slice_size = 8388608;
 
   // For cloud, to control if the content would be written into file cache
   // In write path, to control if the content would be written into file cache.

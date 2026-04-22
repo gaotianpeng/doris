@@ -18,14 +18,17 @@
 #pragma once
 
 #include <common/multi_version.h>
+#include <gen_cpp/olap_file.pb.h>
 
 #include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "common/config.h"
 #include "common/status.h"
 #include "io/cache/fs_file_cache_storage.h"
 #include "olap/memtable_memory_limiter.h"
@@ -59,12 +62,22 @@ class WorkloadGroupMgr;
 struct WriteCooldownMetaExecutors;
 namespace io {
 class FileCacheFactory;
+class HdfsMgr;
 } // namespace io
 namespace segment_v2 {
 class InvertedIndexSearcherCache;
 class InvertedIndexQueryCache;
 class TmpFileDirs;
+
+namespace inverted_index {
+class AnalysisFactoryMgr;
+}
+
 } // namespace segment_v2
+
+namespace kerberos {
+class KerberosTicketMgr;
+}
 
 class QueryCache;
 class WorkloadSchedPolicyMgr;
@@ -114,10 +127,14 @@ class ProcessProfile;
 class HeapProfiler;
 class WalManager;
 class DNSCache;
+class IndexPolicyMgr;
 struct SyncRowsetStats;
 class DeleteBitmapAggCache;
 
+// set to true when BE is shutting down
 inline bool k_doris_exit = false;
+// set to true after BE start ready
+inline bool k_is_server_ready = false;
 
 // Execution environment for queries/plan fragments.
 // Contains all required global structures, and handles to
@@ -150,10 +167,12 @@ public:
     // Requires ExenEnv ready
     static Result<BaseTabletSPtr> get_tablet(int64_t tablet_id,
                                              SyncRowsetStats* sync_stats = nullptr,
-                                             bool force_use_cache = false);
+                                             bool force_use_only_cached = false);
 
     static bool ready() { return _s_ready.load(std::memory_order_acquire); }
     static bool tracking_memory() { return _s_tracking_memory.load(std::memory_order_acquire); }
+    static bool get_is_upgrading() { return _s_upgrading.load(std::memory_order_acquire); }
+    static void set_is_upgrading() { _s_upgrading = true; }
     const std::string& token() const;
     ExternalScanContextMgr* external_scan_context_mgr() { return _external_scan_context_mgr; }
     vectorized::VDataStreamMgr* vstream_mgr() { return _vstream_mgr; }
@@ -268,6 +287,10 @@ public:
         return _write_cooldown_meta_executors.get();
     }
 
+    kerberos::KerberosTicketMgr* kerberos_ticket_mgr() { return _kerberos_ticket_mgr; }
+    io::HdfsMgr* hdfs_mgr() { return _hdfs_mgr; }
+    IndexPolicyMgr* index_policy_mgr() { return _index_policy_mgr; }
+
 #ifdef BE_TEST
     void set_tmp_file_dir(std::unique_ptr<segment_v2::TmpFileDirs> tmp_file_dirs) {
         this->_tmp_file_dirs = std::move(tmp_file_dirs);
@@ -309,6 +332,7 @@ public:
     static void set_tracking_memory(bool tracking_memory) {
         _s_tracking_memory.store(tracking_memory, std::memory_order_release);
     }
+    void set_orc_memory_pool(orc::MemoryPool* pool) { _orc_memory_pool = pool; }
     void set_non_block_close_thread_pool(std::unique_ptr<ThreadPool>&& pool) {
         _non_block_close_thread_pool = std::move(pool);
     }
@@ -378,6 +402,7 @@ private:
     inline static std::atomic_bool _s_tracking_memory {false};
     std::vector<StorePath> _store_paths;
     std::vector<StorePath> _spill_store_paths;
+    inline static std::atomic_bool _s_upgrading {false};
 
     io::FileCacheFactory* _file_cache_factory = nullptr;
     UserFunctionCache* _user_function_cache = nullptr;
@@ -494,6 +519,7 @@ private:
     pipeline::RuntimeFilterTimerQueue* _runtime_filter_timer_queue = nullptr;
 
     WorkloadSchedPolicyMgr* _workload_sched_mgr = nullptr;
+    IndexPolicyMgr* _index_policy_mgr = nullptr;
 
     RuntimeQueryStatisticsMgr* _runtime_query_statistics_mgr = nullptr;
 
@@ -503,6 +529,9 @@ private:
 
     orc::MemoryPool* _orc_memory_pool = nullptr;
     arrow::MemoryPool* _arrow_memory_pool = nullptr;
+
+    kerberos::KerberosTicketMgr* _kerberos_ticket_mgr = nullptr;
+    io::HdfsMgr* _hdfs_mgr = nullptr;
 };
 
 template <>

@@ -1675,6 +1675,7 @@ visible_functions = {
 
         [['overlay'], 'VARCHAR', ['VARCHAR', 'INT', 'INT', 'VARCHAR'], ''],
 
+        [['count_substrings'], 'INT', ['STRING', 'STRING'], 'DEPEND_ON_ARGUMENT'],
         [['substr', 'substring'], 'STRING', ['STRING', 'INT'], 'DEPEND_ON_ARGUMENT'],
         [['substr', 'substring'], 'STRING', ['STRING', 'INT', 'INT'], 'DEPEND_ON_ARGUMENT'],
         [['strleft', 'left'], 'STRING', ['STRING', 'INT'], 'DEPEND_ON_ARGUMENT'],
@@ -2092,7 +2093,7 @@ visible_functions = {
     ],
     # tokenizer functions
     "Tokenize": [
-        [['tokenize'],'ARRAY_VARCHAR',['STRING','STRING'], ''],
+        [['tokenize'],'STRING',['STRING','STRING'], ''],
     ],
 
     "UUID": [

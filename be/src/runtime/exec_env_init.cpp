@@ -39,6 +39,7 @@
 #include "cloud/cloud_warm_up_manager.h"
 #include "cloud/config.h"
 #include "common/config.h"
+#include "common/kerberos/kerberos_ticket_mgr.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "io/cache/block_file_cache.h"
@@ -72,6 +73,7 @@
 #include "runtime/fragment_mgr.h"
 #include "runtime/group_commit_mgr.h"
 #include "runtime/heartbeat_flags.h"
+#include "runtime/index_policy/index_policy_mgr.h"
 #include "runtime/load_channel_mgr.h"
 #include "runtime/load_path_mgr.h"
 #include "runtime/load_stream_mgr.h"
@@ -116,6 +118,15 @@
 #include "vec/sink/delta_writer_v2_pool.h"
 #include "vec/sink/load_stream_map_pool.h"
 #include "vec/spill/spill_stream_manager.h"
+// clang-format off
+// this must after util/brpc_client_cache.h
+// /doris/thirdparty/installed/include/brpc/errno.pb.h:69:3: error: expected identifier
+//  EINTERNAL = 2001,
+//   ^
+//  /doris/thirdparty/installed/include/hadoop_hdfs/hdfs.h:61:19: note: expanded from macro 'EINTERNAL'
+//  #define EINTERNAL 255
+#include "io/fs/hdfs/hdfs_mgr.h"
+// clang-format on
 
 #if !defined(__SANITIZE_ADDRESS__) && !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && \
         !defined(THREAD_SANITIZER) && !defined(USE_JEMALLOC)
@@ -318,6 +329,8 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths,
     _dns_cache = new DNSCache();
     _write_cooldown_meta_executors = std::make_unique<WriteCooldownMetaExecutors>();
     _spill_stream_mgr = new vectorized::SpillStreamManager(std::move(spill_store_map));
+    _kerberos_ticket_mgr = new kerberos::KerberosTicketMgr(config::kerberos_ccache_path);
+    _hdfs_mgr = new io::HdfsMgr();
     _backend_client_cache->init_metrics("backend");
     _frontend_client_cache->init_metrics("frontend");
     _broker_client_cache->init_metrics("broker");
@@ -374,6 +387,8 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths,
 
     _workload_sched_mgr = new WorkloadSchedPolicyMgr();
     _workload_sched_mgr->start(this);
+
+    _index_policy_mgr = new IndexPolicyMgr();
 
     RETURN_IF_ERROR(_spill_stream_mgr->init());
     _runtime_query_statistics_mgr->start_report_thread();
@@ -532,12 +547,21 @@ Status ExecEnv::_init_mem_env() {
     } else {
         fd_number = static_cast<uint64_t>(l.rlim_cur);
     }
-    // SegmentLoader caches segments in rowset granularity. So the size of
-    // opened files will greater than segment_cache_capacity.
-    int64_t segment_cache_capacity = config::segment_cache_capacity;
-    int64_t segment_cache_fd_limit = fd_number / 100 * config::segment_cache_fd_percentage;
-    if (segment_cache_capacity < 0 || segment_cache_capacity > segment_cache_fd_limit) {
-        segment_cache_capacity = segment_cache_fd_limit;
+
+    int64_t segment_cache_capacity = 0;
+    if (config::is_cloud_mode()) {
+        // when in cloud mode, segment cache hold no system FD
+        // thus the FD num limit makes no sense
+        // cloud mode use FDCache to control FD
+        segment_cache_capacity = UINT32_MAX;
+    } else {
+        // SegmentLoader caches segments in rowset granularity. So the size of
+        // opened files will greater than segment_cache_capacity.
+        segment_cache_capacity = config::segment_cache_capacity;
+        int64_t segment_cache_fd_limit = fd_number / 100 * config::segment_cache_fd_percentage;
+        if (segment_cache_capacity < 0 || segment_cache_capacity > segment_cache_fd_limit) {
+            segment_cache_capacity = segment_cache_fd_limit;
+        }
     }
 
     int64_t segment_cache_mem_limit =
@@ -838,9 +862,13 @@ void ExecEnv::destroy() {
 
     // dns cache is a global instance and need to be released at last
     SAFE_DELETE(_dns_cache);
+    SAFE_DELETE(_kerberos_ticket_mgr);
+    SAFE_DELETE(_hdfs_mgr);
 
     SAFE_DELETE(_process_profile);
     SAFE_DELETE(_heap_profiler);
+
+    SAFE_DELETE(_index_policy_mgr);
 
     _s_tracking_memory = false;
 

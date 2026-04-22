@@ -98,6 +98,8 @@ suite("test_delete_publish_skip_read", "nonConcurrent") {
         t1.join()
         t2.join()
 
+        sleep(2000)
+        sql "sync;"
         order_qt_sql "select * from ${table1};"
 
         sql "set skip_delete_sign=true;"
@@ -106,7 +108,7 @@ suite("test_delete_publish_skip_read", "nonConcurrent") {
         sql "set show_hidden_columns=true;"
         sql "sync;"
 
-        order_qt_sql "select * from ${table1};"
+        order_qt_sql "select k1,c1,c2,c3,c4,__DORIS_DELETE_SIGN__,__DORIS_VERSION_COL__ from ${table1};"
 
 
         

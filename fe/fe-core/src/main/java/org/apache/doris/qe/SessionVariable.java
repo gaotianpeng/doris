@@ -38,6 +38,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
 import org.apache.doris.planner.GroupCommitBlockSink;
 import org.apache.doris.qe.VariableMgr.VarAttr;
 import org.apache.doris.thrift.TGroupCommitMode;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 import org.apache.doris.thrift.TQueryOptions;
 import org.apache.doris.thrift.TResourceLimit;
 import org.apache.doris.thrift.TRuntimeFilterType;
@@ -139,6 +140,7 @@ public class SessionVariable implements Serializable, Writable {
     public static final String MAX_INSTANCE_NUM = "max_instance_num";
     public static final String DML_PLAN_RETRY_TIMES = "DML_PLAN_RETRY_TIMES";
     public static final String ENABLE_INSERT_STRICT = "enable_insert_strict";
+    public static final String ENABLE_INSERT_VALUE_AUTO_CAST = "enable_insert_value_auto_cast";
     public static final String INSERT_MAX_FILTER_RATIO = "insert_max_filter_ratio";
 
     public static final String ENABLE_SERVER_SIDE_PREPARED_STATEMENT = "enable_server_side_prepared_statement";
@@ -151,6 +153,7 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String ENABLE_REWRITE_ELEMENT_AT_TO_SLOT = "enable_rewrite_element_at_to_slot";
     public static final String ENABLE_ODBC_TRANSCATION = "enable_odbc_transcation";
+    public static final String ENABLE_BINARY_SEARCH_FILTERING_PARTITIONS = "enable_binary_search_filtering_partitions";
     public static final String ENABLE_SQL_CACHE = "enable_sql_cache";
     public static final String ENABLE_QUERY_CACHE = "enable_query_cache";
     public static final String QUERY_CACHE_FORCE_REFRESH = "query_cache_force_refresh";
@@ -355,11 +358,16 @@ public class SessionVariable implements Serializable, Writable {
     public static final String ENABLE_RUNTIME_FILTER_PRUNE =
             "enable_runtime_filter_prune";
 
+    public static final String ENABLE_RUNTIME_FILTER_PARTITION_PRUNE =
+            "enable_runtime_filter_partition_prune";
+
     static final String SESSION_CONTEXT = "session_context";
 
     public static final String DEFAULT_ORDER_BY_LIMIT = "default_order_by_limit";
 
     public static final String ENABLE_SINGLE_REPLICA_INSERT = "enable_single_replica_insert";
+
+    public static final String ENABLE_FAST_ANALYZE_INSERT_INTO_VALUES = "enable_fast_analyze_into_values";
 
     public static final String ENABLE_FUNCTION_PUSHDOWN = "enable_function_pushdown";
 
@@ -461,6 +469,8 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String NUM_PARTITIONS_IN_BATCH_MODE = "num_partitions_in_batch_mode";
 
+    public static final String NUM_FILES_IN_BATCH_MODE = "num_files_in_batch_mode";
+
     public static final String FETCH_SPLITS_MAX_WAIT_TIME = "fetch_splits_max_wait_time_ms";
 
     /**
@@ -483,6 +493,8 @@ public class SessionVariable implements Serializable, Writable {
     public static final String ENABLE_PARQUET_FILTER_BY_MIN_MAX = "enable_parquet_filter_by_min_max";
 
     public static final String ENABLE_ORC_FILTER_BY_MIN_MAX = "enable_orc_filter_by_min_max";
+
+    public static final String CHECK_ORC_INIT_SARGS_SUCCESS = "check_orc_init_sargs_success";
 
     public static final String INLINE_CTE_REFERENCED_THRESHOLD = "inline_cte_referenced_threshold";
 
@@ -526,6 +538,8 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String ENABLE_UNIQUE_KEY_PARTIAL_UPDATE = "enable_unique_key_partial_update";
 
+    public static final String PARTIAL_UPDATE_NEW_KEY_BEHAVIOR = "partial_update_new_key_behavior";
+
     public static final String INVERTED_INDEX_CONJUNCTION_OPT_THRESHOLD = "inverted_index_conjunction_opt_threshold";
     public static final String INVERTED_INDEX_MAX_EXPANSIONS = "inverted_index_max_expansions";
 
@@ -541,11 +555,11 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String SQL_DIALECT = "sql_dialect";
 
+    public static final String RETRY_ORIGIN_SQL_ON_CONVERT_FAIL = "retry_origin_sql_on_convert_fail";
+
     public static final String SERDE_DIALECT = "serde_dialect";
 
     public static final String EXPAND_RUNTIME_FILTER_BY_INNER_JION = "expand_runtime_filter_by_inner_join";
-
-    public static final String TEST_QUERY_CACHE_HIT = "test_query_cache_hit";
 
     public static final String ENABLE_AUTO_ANALYZE = "enable_auto_analyze";
 
@@ -565,6 +579,7 @@ public class SessionVariable implements Serializable, Writable {
     public static final String HUGE_TABLE_LOWER_BOUND_SIZE_IN_BYTES = "huge_table_lower_bound_size_in_bytes";
     public static final String PARTITION_SAMPLE_COUNT = "partition_sample_count";
     public static final String PARTITION_SAMPLE_ROW_COUNT = "partition_sample_row_count";
+    public static final String FETCH_HIVE_ROW_COUNT_SYNC = "fetch_hive_row_count_sync";
 
     // for spill to disk
     public static final String EXTERNAL_SORT_BYTES_THRESHOLD = "external_sort_bytes_threshold";
@@ -647,8 +662,6 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String FORCE_JNI_SCANNER = "force_jni_scanner";
 
-    public static final String HUDI_JNI_SCANNER = "hudi_jni_scanner";
-
     public static final String ENABLE_COUNT_PUSH_DOWN_FOR_EXTERNAL_TABLE = "enable_count_push_down_for_external_table";
 
     public static final String SHOW_ALL_FE_CONNECTION = "show_all_fe_connection";
@@ -682,7 +695,7 @@ public class SessionVariable implements Serializable, Writable {
     public static final String DISABLE_INVERTED_INDEX_V1_FOR_VARIANT = "disable_inverted_index_v1_for_variant";
 
     // enable variant flatten nested as session variable, default is false,
-    // which means disable variant flatten nested when create table
+    // which means do not flatten nested when create table
     public static final String ENABLE_VARIANT_FLATTEN_NESTED = "enable_variant_flatten_nested";
 
     // CLOUD_VARIABLES_BEGIN
@@ -717,6 +730,11 @@ public class SessionVariable implements Serializable, Writable {
     public static final String ADAPTIVE_PIPELINE_TASK_SERIAL_READ_ON_LIMIT =
                                     "adaptive_pipeline_task_serial_read_on_limit";
 
+    public static final String DEFAULT_VARIANT_MAX_SUBCOLUMNS_COUNT = "default_variant_max_subcolumns_count";
+
+    public static final String DEFAULT_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE =
+                                                            "default_variant_enable_typed_paths_to_sparse";
+
     public static final String ENABLE_TEXT_VALIDATE_UTF8 = "enable_text_validate_utf8";
 
     public static final String ENABLE_SQL_CONVERTOR_FEATURES = "enable_sql_convertor_features";
@@ -729,6 +747,14 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String PREFER_UDF_OVER_BUILTIN = "prefer_udf_over_builtin";
     public static final String ENABLE_ADD_INDEX_FOR_NEW_DATA = "enable_add_index_for_new_data";
+
+    public static final String DEFAULT_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE =
+                                                            "default_variant_max_sparse_column_statistics_size";
+
+    public static final String MERGE_IO_READ_SLICE_SIZE_BYTES = "merge_io_read_slice_size_bytes";
+
+    public static final String ENABLE_PREFER_CACHED_ROWSET = "enable_prefer_cached_rowset";
+    public static final String QUERY_FRESHNESS_TOLERANCE_MS = "query_freshness_tolerance_ms";
 
     /**
      * If set false, user couldn't submit analyze SQL and FE won't allocate any related resources.
@@ -780,7 +806,7 @@ public class SessionVariable implements Serializable, Writable {
     public long maxScanQueueMemByte = 2147483648L / 20;
 
     @VariableMgr.VarAttr(name = NUM_SCANNER_THREADS, needForward = true, description = {
-            "ScanNode扫描数据的最大并发，默认为0，采用BE的doris_scanner_thread_pool_thread_num",
+            "ScanNode 扫描数据的最大并发，默认为 0，采用 BE 的 doris_scanner_thread_pool_thread_num",
             "The max threads to read data of ScanNode, "
                     + "default 0, use doris_scanner_thread_pool_thread_num in be.conf"
     })
@@ -790,7 +816,7 @@ public class SessionVariable implements Serializable, Writable {
     public int localExchangeFreeBlocksLimit = 4;
 
     @VariableMgr.VarAttr(name = SCANNER_SCALE_UP_RATIO, needForward = true, description = {
-            "ScanNode自适应的增加扫描并发，最大允许增长的并发倍率，默认为0，关闭该功能",
+            "ScanNode 自适应的增加扫描并发，最大允许增长的并发倍率，默认为 0，关闭该功能",
             "The max multiple of increasing the concurrency of scanners adaptively, "
                     + "default 0, turn off scaling up"
     })
@@ -848,13 +874,13 @@ public class SessionVariable implements Serializable, Writable {
 
     // Set sqlMode to empty string
     @VariableMgr.VarAttr(name = SQL_MODE, needForward = true)
-    public long sqlMode = SqlModeHelper.MODE_DEFAULT;
+    public long sqlMode = SqlModeHelper.MODE_ONLY_FULL_GROUP_BY;
 
     @VariableMgr.VarAttr(name = WORKLOAD_VARIABLE, needForward = true)
     public String workloadGroup = "";
 
     @VariableMgr.VarAttr(name = BYPASS_WORKLOAD_GROUP, needForward = true, description = {
-            "查询是否绕开WorkloadGroup的限制，目前仅支持绕开查询排队的逻辑",
+            "查询是否绕开 WorkloadGroup 的限制，目前仅支持绕开查询排队的逻辑",
             "whether bypass workload group's limitation, currently only support bypass query queue"})
     public boolean bypassWorkloadGroup = false;
 
@@ -1018,12 +1044,12 @@ public class SessionVariable implements Serializable, Writable {
     @VariableMgr.VarAttr(name = IGNORE_SPLIT_TYPE,
             checker = "checkIgnoreSplitType",
             options = {"NONE", "IGNORE_JNI", "IGNORE_NATIVE"},
-            description = {"忽略指定类型的split", "Ignore splits of the specified type"})
+            description = {"忽略指定类型的 split", "Ignore splits of the specified type"})
     public String ignoreSplitType = IgnoreSplitType.NONE.toString();
 
     public static final String USE_CONSISTENT_HASHING_FOR_EXTERNAL_SCAN = "use_consistent_hash_for_external_scan";
     @VariableMgr.VarAttr(name = USE_CONSISTENT_HASHING_FOR_EXTERNAL_SCAN,
-            description = {"对外表采用一致性hash的方式做split的分发",
+            description = {"对外表采用一致性 hash 的方式做 split 的分发",
                     "Use consistent hashing to split the appearance for external scan"})
     public boolean useConsistentHashForExternalScan = false;
 
@@ -1047,11 +1073,28 @@ public class SessionVariable implements Serializable, Writable {
     @VariableMgr.VarAttr(name = ENABLE_INSERT_STRICT, needForward = true)
     public boolean enableInsertStrict = true;
 
+    @VariableMgr.VarAttr(name = ENABLE_INSERT_VALUE_AUTO_CAST, needForward = true, description = {
+            "INSERT VALUE 语句是否自动类型转换。当前只针对长字符串自动截短。默认开。",
+            "INSERT VALUE statement whether to automatically type cast. Only use for truncate long string. "
+                    + "ON by default."
+    })
+    public boolean enableInsertValueAutoCast = true;
+
     @VariableMgr.VarAttr(name = INSERT_MAX_FILTER_RATIO, needForward = true)
     public double insertMaxFilterRatio = 1.0;
 
     @VariableMgr.VarAttr(name = ENABLE_ODBC_TRANSCATION)
     public boolean enableOdbcTransaction = false;
+
+    @VariableMgr.VarAttr(
+            name = ENABLE_BINARY_SEARCH_FILTERING_PARTITIONS,
+            fuzzy = true,
+            description = {
+                "是否允许使用二分查找算法去过滤分区。默认开。",
+                "Whether to allow use binary search algorithm to filter partitions. ON by default."
+            }
+    )
+    public boolean enableBinarySearchFilteringPartitions = true;
 
     @VariableMgr.VarAttr(name = ENABLE_SQL_CACHE, fuzzy = true)
     public boolean enableSqlCache = false;
@@ -1096,7 +1139,7 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(name = ALLOW_PARTITION_COLUMN_NULLABLE, description = {
             "是否允许 NULLABLE 列作为 PARTITION 列。开启后，RANGE PARTITION 允许 NULLABLE PARTITION 列"
-                    + "（LIST PARTITION当前不支持）。默认开。",
+                    + "（LIST PARTITION 当前不支持）。默认开。",
             "Whether to allow NULLABLE columns as PARTITION columns. When ON, RANGE PARTITION allows "
                     + "NULLABLE PARTITION columns (LIST PARTITION is not supported currently). ON by default." })
     public boolean allowPartitionColumnNullable = true;
@@ -1117,7 +1160,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableNereidsDML = true;
 
     @VariableMgr.VarAttr(name = ENABLE_NEREIDS_DML_WITH_PIPELINE,
-            varType = VariableAnnotation.REMOVED, description = { "在新优化器中，使用pipeline引擎执行DML",
+            varType = VariableAnnotation.REMOVED, description = { "在新优化器中，使用 pipeline 引擎执行 DML",
                     "execute DML with pipeline engine in Nereids" })
     public boolean enableNereidsDmlWithPipeline = true;
 
@@ -1160,13 +1203,13 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ENABLE_LOCAL_SHUFFLE, fuzzy = false, varType = VariableAnnotation.EXPERIMENTAL,
-            description = {"是否在pipelineX引擎上开启local shuffle优化",
-                    "Whether to enable local shuffle on pipelineX engine."})
+            description = {"是否在 pipelineX 引擎上开启 local shuffle 优化",
+                    "Whether to enable local shuffle on pipelineX engine."}, needForward = true)
     private boolean enableLocalShuffle = true;
 
     @VariableMgr.VarAttr(
                 name = FORCE_TO_LOCAL_SHUFFLE, fuzzy = false, varType = VariableAnnotation.EXPERIMENTAL,
-                description = {"是否在pipelineX引擎上强制开启local shuffle优化",
+                description = {"是否在 pipelineX 引擎上强制开启 local shuffle 优化",
                         "Whether to force to local shuffle on pipelineX engine."})
     private boolean forceToLocalShuffle = false;
 
@@ -1199,9 +1242,9 @@ public class SessionVariable implements Serializable, Writable {
     public int parallelPrepareThreshold = 32;
 
     @VariableMgr.VarAttr(name = READ_HIVE_JSON_IN_ONE_COLUMN,
-            description = {"在读取hive json的时候，由于存在一些不支持的json格式，我们默认会报错。为了让用户使用体验更好，"
-                    + "当该变量为true的时候，将一整行json读取到第一列中，用户可以自行选择对一整行json进行处理，例如JSON_PARSE。"
-                    + "需要表的第一列的数据类型为string.",
+            description = {"在读取 hive json 的时候，由于存在一些不支持的 json 格式，我们默认会报错。为了让用户使用体验更好，"
+                    + "当该变量为 true 的时候，将一整行 json 读取到第一列中，用户可以自行选择对一整行 json 进行处理，例如 JSON_PARSE。"
+                    + "需要表的第一列的数据类型为 string.",
                     "When reading hive json, we will report an error by default because there are some unsupported "
                     + "json formats. In order to provide users with a better experience, when this variable is true,"
                     + "a whole line of json is read into the first column. Users can choose to process a whole line"
@@ -1220,11 +1263,11 @@ public class SessionVariable implements Serializable, Writable {
     @VariableMgr.VarAttr(name = ENABLE_REWRITE_ELEMENT_AT_TO_SLOT, fuzzy = true)
     private boolean enableRewriteElementAtToSlot = true;
 
-    @VariableMgr.VarAttr(name = FORCE_SORT_ALGORITHM, needForward = true, description = { "强制指定SortNode的排序算法",
+    @VariableMgr.VarAttr(name = FORCE_SORT_ALGORITHM, needForward = true, description = { "强制指定 SortNode 的排序算法",
             "Force the sort algorithm of SortNode to be specified" })
     public String forceSortAlgorithm = "";
 
-    @VariableMgr.VarAttr(name = "ignore_runtime_filter_error", needForward = true, description = { "在rf遇到错误的时候忽略该rf",
+    @VariableMgr.VarAttr(name = "ignore_runtime_filter_error", needForward = true, description = { "在 rf 遇到错误的时候忽略该 rf",
             "Ignore the rf when it encounters an error" })
     public boolean ignoreRuntimeFilterError = false;
 
@@ -1263,7 +1306,7 @@ public class SessionVariable implements Serializable, Writable {
     private boolean enableParallelResultSink = false;
 
     @VariableMgr.VarAttr(name = "sort_phase_num", fuzzy = true, needForward = true,
-            description = {"如设置为1，则只生成1阶段sort，设置为2，则只生成2阶段sort，设置其它值，优化器根据代价选择sort类型",
+            description = {"如设置为 1，则只生成 1 阶段 sort，设置为 2，则只生成 2 阶段 sort，设置其它值，优化器根据代价选择 sort 类型",
                     "set the number of sort phases 1 or 2. if set other value, let cbo decide the sort type"})
     public int sortPhaseNum = 0;
 
@@ -1271,7 +1314,7 @@ public class SessionVariable implements Serializable, Writable {
     private String hiveTextCompression = "plain";
 
     @VariableMgr.VarAttr(name = READ_CSV_EMPTY_LINE_AS_NULL, needForward = true,
-            description = {"在读取csv文件时是否读取csv的空行为null",
+            description = {"在读取 csv 文件时是否读取 csv 的空行为 null",
                     "Determine whether to read empty rows in CSV files as NULL when reading CSV files."})
     public boolean readCsvEmptyLineAsNull = false;
 
@@ -1369,7 +1412,7 @@ public class SessionVariable implements Serializable, Writable {
     private boolean enablePartitionTopN = true;
 
     @VariableMgr.VarAttr(name = PARTITION_TOPN_MAX_PARTITIONS, needForward = true, description = {
-            "这个阈值决定了partition_topn计算时的最大分区数量，超过这个阈值后且输入总行数少于预估总量，剩余的数据将直接透传给下一个算子",
+            "这个阈值决定了 partition_topn 计算时的最大分区数量，超过这个阈值后且输入总行数少于预估总量，剩余的数据将直接透传给下一个算子",
             "This threshold determines how many partitions will be allocated for window function get topn."
                     + " if this threshold is exceeded and input rows less than the estimated total rows, the remaining"
                     + " data will be pass through to other node directly."
@@ -1377,7 +1420,7 @@ public class SessionVariable implements Serializable, Writable {
     private int partitionTopNMaxPartitions = 1024;
 
     @VariableMgr.VarAttr(name = PARTITION_TOPN_PER_PARTITION_ROWS, needForward = true, description = {
-            "这个数值用于partition_topn预估每个分区的行数，用来计算所有分区的预估数据总量，决定是否能透传下一个算子",
+            "这个数值用于 partition_topn 预估每个分区的行数，用来计算所有分区的预估数据总量，决定是否能透传下一个算子",
             "This value is used for partition_topn to estimate the number of rows in each partition, to calculate "
             + " the estimated total amount of data for all partitions, and to determine whether the next operator "
             + " can be passed transparently."
@@ -1409,7 +1452,7 @@ public class SessionVariable implements Serializable, Writable {
     private boolean checkOverflowForDecimal = true;
 
     @VariableMgr.VarAttr(name = DECIMAL_OVERFLOW_SCALE, needForward = true, description = {
-            "当decimal数值计算结果精度溢出时，计算结果最多可保留的小数位数", "When the precision of the result of"
+            "当 decimal 数值计算结果精度溢出时，计算结果最多可保留的小数位数", "When the precision of the result of"
             + " a decimal numerical calculation overflows,"
             + "the maximum number of decimal scale that the result can be retained"
     })
@@ -1428,7 +1471,7 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(name = LIMIT_ROWS_FOR_SINGLE_INSTANCE,
             description = {"当一个 ScanNode 上没有过滤条件，且 limit 值小于这个阈值时，"
-                    + "系统会将这个算子的并发度调整为1，以减少简单查询的扇出",
+                    + "系统会将这个算子的并发度调整为 1，以减少简单查询的扇出",
                     "When a ScanNode has no filter conditions and the limit value is less than this threshold, "
                             + "the system will adjust the concurrency of this operator to 1 "
                             + "to reduce the fan-out of simple queries"})
@@ -1471,8 +1514,8 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(name = ENABLE_NEREIDS_DISTRIBUTE_PLANNER, needForward = true,
             fuzzy = false, varType = VariableAnnotation.EXPERIMENTAL, description = {
-                "使用新的nereids的分布式规划器的开关，这个分布式规划器可以规划出一些更高效的查询计划，比如在某些情况下，"
-                        + "可以把左表shuffle到右表去做bucket shuffle join",
+                "使用新的 nereids 的分布式规划器的开关，这个分布式规划器可以规划出一些更高效的查询计划，比如在某些情况下，"
+                        + "可以把左表 shuffle 到右表去做 bucket shuffle join",
                 "The switch to use new DistributedPlanner of nereids, this planner can planning some "
                         + "more efficient query plans, e.g. in certain situations, shuffle left side to "
                         + "right side to do bucket shuffle join"
@@ -1513,6 +1556,9 @@ public class SessionVariable implements Serializable, Writable {
     @VariableMgr.VarAttr(name = ENABLE_RUNTIME_FILTER_PRUNE, needForward = true)
     public boolean enableRuntimeFilterPrune = true;
 
+    @VariableMgr.VarAttr(name = ENABLE_RUNTIME_FILTER_PARTITION_PRUNE, needForward = true, fuzzy = true)
+    public boolean enableRuntimeFilterPartitionPrune = true;
+
     /**
      * The client can pass some special information by setting this session variable in the format: "k1:v1;k2:v2".
      * For example, trace_id can be passed to trace the query request sent by the user.
@@ -1525,11 +1571,20 @@ public class SessionVariable implements Serializable, Writable {
             needForward = true, varType = VariableAnnotation.EXPERIMENTAL)
     public boolean enableSingleReplicaInsert = false;
 
+    @VariableMgr.VarAttr(
+            name = ENABLE_FAST_ANALYZE_INSERT_INTO_VALUES, fuzzy = true,
+            description = {
+                    "跳过大部分的优化规则，快速分析 insert into values 语句",
+                    "Skip most optimization rules and quickly analyze insert into values statements"
+            }
+    )
+    private boolean enableFastAnalyzeInsertIntoValues = true;
+
     @VariableMgr.VarAttr(name = ENABLE_FUNCTION_PUSHDOWN, fuzzy = true)
     public boolean enableFunctionPushdown = false;
 
     @VariableMgr.VarAttr(name = ENABLE_EXT_FUNC_PRED_PUSHDOWN, needForward = true,
-            description = {"启用外部表（如通过ODBC或JDBC访问的表）查询中谓词的函数下推",
+            description = {"启用外部表（如通过 ODBC 或 JDBC 访问的表）查询中谓词的函数下推",
                     "Enable function pushdown for predicates in queries to external tables "
                     + "(such as tables accessed via ODBC or JDBC)"})
     public boolean enableExtFuncPredPushdown = true;
@@ -1644,7 +1699,7 @@ public class SessionVariable implements Serializable, Writable {
             needForward = true,
             fuzzy = true,
             description = {
-                    "允许使用一阶段聚合来执行带有order的group_concat函数",
+                    "允许使用一阶段聚合来执行带有 order 的 group_concat 函数",
                     "Enable to use one stage aggregation to execute the group_concat function with order"
             }
     )
@@ -1663,12 +1718,12 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableSnapshotPointQuery = true;
 
     @VariableMgr.VarAttr(name = ENABLE_SERVER_SIDE_PREPARED_STATEMENT, needForward = true, description = {
-            "是否启用开启服务端prepared statement", "Set whether to enable server side prepared statement."})
+            "是否启用开启服务端 prepared statement", "Set whether to enable server side prepared statement."})
     public boolean enableServeSidePreparedStatement = true;
 
     @VariableMgr.VarAttr(name = MAX_PREPARED_STMT_COUNT,  flag = VariableMgr.GLOBAL,
             needForward = true, description = {
-                "服务端prepared statement最大个数", "the maximum prepared statements server holds."})
+                "服务端 prepared statement 最大个数", "the maximum prepared statements server holds."})
     public int maxPreparedStmtCount = 100000;
 
     @VariableMgr.VarAttr(name = ENABLE_GROUP_COMMIT_FULL_PREPARE)
@@ -1686,22 +1741,22 @@ public class SessionVariable implements Serializable, Writable {
 
     // Whether enable block file cache. Only take effect when BE config item enable_file_cache is true.
     @VariableMgr.VarAttr(name = ENABLE_FILE_CACHE, needForward = true, description = {
-            "是否启用file cache。该变量只有在be.conf中enable_file_cache=true时才有效，"
-                    + "如果be.conf中enable_file_cache=false，该BE节点的file cache处于禁用状态。",
+            "是否启用 file cache。该变量只有在 be.conf 中 enable_file_cache=true 时才有效，"
+                    + "如果 be.conf 中 enable_file_cache=false，该 BE 节点的 file cache 处于禁用状态。",
             "Set wether to use file cache. This variable takes effect only if the BE config enable_file_cache=true. "
                     + "The cache is not used when BE config enable_file_cache=false."})
     public boolean enableFileCache = false;
 
     // Specify base path for file cache, or chose a random path.
     @VariableMgr.VarAttr(name = FILE_CACHE_BASE_PATH, needForward = true, description = {
-            "指定block file cache在BE上的存储路径，默认 'random'，随机选择BE配置的存储路径。",
+            "指定 block file cache 在 BE 上的存储路径，默认 'random'，随机选择 BE 配置的存储路径。",
             "Specify the storage path of the block file cache on BE, default 'random', "
                     + "and randomly select the storage path configured by BE."})
     public String fileCacheBasePath = "random";
 
     // Whether enable query with inverted index.
     @VariableMgr.VarAttr(name = ENABLE_INVERTED_INDEX_QUERY, needForward = true, description = {
-            "是否启用inverted index query。", "Set whether to use inverted index query."})
+            "是否启用 inverted index query。", "Set whether to use inverted index query."})
     public boolean enableInvertedIndexQuery = true;
 
     // Whether enable query expr with inverted index.
@@ -1711,22 +1766,22 @@ public class SessionVariable implements Serializable, Writable {
 
     // Whether enable pushdown count agg to scan node when using inverted index match.
     @VariableMgr.VarAttr(name = ENABLE_PUSHDOWN_COUNT_ON_INDEX, needForward = true, description = {
-            "是否启用count_on_index pushdown。", "Set whether to pushdown count_on_index."})
+            "是否启用 count_on_index pushdown。", "Set whether to pushdown count_on_index."})
     public boolean enablePushDownCountOnIndex = true;
 
     // Whether enable no need read data opt in segment_iterator.
     @VariableMgr.VarAttr(name = ENABLE_NO_NEED_READ_DATA_OPT, needForward = true, description = {
-            "是否启用no_need_read_data opt。", "Set whether to enable no_need_read_data opt."})
+            "是否启用 no_need_read_data opt。", "Set whether to enable no_need_read_data opt."})
     public boolean enableNoNeedReadDataOpt = true;
 
     // Whether enable pushdown minmax to scan node of unique table.
     @VariableMgr.VarAttr(name = ENABLE_PUSHDOWN_MINMAX_ON_UNIQUE, needForward = true, description = {
-        "是否启用pushdown minmax on unique table。", "Set whether to pushdown minmax on unique table."})
+        "是否启用 pushdown minmax on unique table。", "Set whether to pushdown minmax on unique table."})
     public boolean enablePushDownMinMaxOnUnique = false;
 
     // Whether enable push down string type minmax to scan node.
     @VariableMgr.VarAttr(name = ENABLE_PUSHDOWN_STRING_MINMAX, needForward = true, description = {
-        "是否启用string类型min max下推。", "Set whether to enable push down string type minmax."})
+        "是否启用 string 类型 min max 下推。", "Set whether to enable push down string type minmax."})
     public boolean enablePushDownStringMinMax = false;
 
     // Whether drop table when create table as select insert data appear error.
@@ -1759,7 +1814,7 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ENABLE_PAGE_CACHE,
-            description = {"控制是否启用page cache。默认为 true。",
+            description = {"控制是否启用 page cache。默认为 true。",
                 "Controls whether to use page cache. "
                     + "The default value is true."},
             needForward = true)
@@ -1783,17 +1838,24 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = NUM_PARTITIONS_IN_BATCH_MODE,
-            description = {"如果分区数量超过阈值，BE将通过batch方式获取scan ranges",
+            description = {"如果分区数量超过阈值，BE 将通过 batch 方式获取 scan ranges",
                     "If the number of partitions exceeds the threshold, scan ranges will be got through batch mode."},
             needForward = true)
     public int numPartitionsInBatchMode = 1024;
 
     @VariableMgr.VarAttr(
+            name = NUM_FILES_IN_BATCH_MODE,
+            description = {"如果文件数量超过阈值，BE 将通过 batch 方式获取 scan ranges",
+                    "If the number of files exceeds the threshold, scan ranges will be got through batch mode."},
+            needForward = true)
+    public int numFilesInBatchMode = 1024;
+
+    @VariableMgr.VarAttr(
             name = FETCH_SPLITS_MAX_WAIT_TIME,
-            description = {"batch方式中BE获取splits的最大等待时间",
+            description = {"batch 方式中 BE 获取 splits 的最大等待时间",
                     "The max wait time of getting splits in batch mode."},
             needForward = true)
-    public long fetchSplitsMaxWaitTime = 4000;
+    public long fetchSplitsMaxWaitTime = 1000;
 
     @VariableMgr.VarAttr(
             name = ENABLE_PARQUET_LAZY_MAT,
@@ -1814,9 +1876,9 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ORC_TINY_STRIPE_THRESHOLD_BYTES,
-            description = {"在orc文件中如果一个stripe的字节大小小于`orc_tiny_stripe_threshold`,"
-                    + "我们认为该stripe为 tiny stripe。对于多个连续的tiny stripe我们会进行读取优化，即一次性读多个tiny stripe."
-                    + "如果你不想使用该优化，可以将该值设置为0。默认为 8M。",
+            description = {"在 orc 文件中如果一个 stripe 的字节大小小于`orc_tiny_stripe_threshold`,"
+                    + "我们认为该 stripe 为 tiny stripe。对于多个连续的 tiny stripe 我们会进行读取优化，即一次性读多个 tiny stripe."
+                    + "如果你不想使用该优化，可以将该值设置为 0。默认为 8M。",
                     "In an orc file, if the byte size of a stripe is less than `orc_tiny_stripe_threshold`,"
                             + "we consider the stripe to be a tiny stripe. For multiple consecutive tiny stripes,"
                             + "we will perform read optimization, that is, read multiple tiny stripes at a time."
@@ -1829,8 +1891,8 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ORC_ONCE_MAX_READ_BYTES,
-            description = {"在使用tiny stripe读取优化的时候，会对多个tiny stripe合并成一次IO，"
-                    + "该参数用来控制每次IO请求的最大字节大小。你不应该将值设置的小于`orc_tiny_stripe_threshold`。默认为 8M。",
+            description = {"在使用 tiny stripe 读取优化的时候，会对多个 tiny stripe 合并成一次 IO，"
+                    + "该参数用来控制每次 IO 请求的最大字节大小。你不应该将值设置的小于`orc_tiny_stripe_threshold`。默认为 8M。",
                     "When using tiny stripe read optimization, multiple tiny stripes will be merged into one IO."
                             + "This parameter is used to control the maximum byte size of each IO request."
                             + "You should not set the value less than `orc_tiny_stripe_threshold`."
@@ -1842,8 +1904,8 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ORC_MAX_MERGE_DISTANCE_BYTES,
-            description = {"在使用tiny stripe读取优化的时候，由于tiny stripe并不一定连续。"
-                    + "当两个tiny stripe之间距离大于该参数时，我们不会将其合并成一次IO。默认为 1M。",
+            description = {"在使用 tiny stripe 读取优化的时候，由于 tiny stripe 并不一定连续。"
+                    + "当两个 tiny stripe 之间距离大于该参数时，我们不会将其合并成一次 IO。默认为 1M。",
                     "When using tiny stripe read optimization, since tiny stripes are not necessarily continuous,"
                             + "when the distance between two tiny stripes is greater than this parameter,"
                             + "we will not merge them into one IO. The default value is 1M."},
@@ -1870,8 +1932,16 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableOrcFilterByMinMax = true;
 
     @VariableMgr.VarAttr(
+            name = CHECK_ORC_INIT_SARGS_SUCCESS,
+            description = {"是否检查 orc init sargs 是否成功。默认为 false。",
+                    "Whether to check whether orc init sargs is successful. "
+                            + "The default value is false."},
+            needForward = true)
+    public boolean checkOrcInitSargsSuccess = false;
+
+    @VariableMgr.VarAttr(
             name = EXTERNAL_TABLE_ANALYZE_PART_NUM,
-            description = {"收集外表统计信息行数时选取的采样分区数，默认-1表示全部分区",
+            description = {"收集外表统计信息行数时选取的采样分区数，默认 -1 表示全部分区",
                     "Number of sample partition for collecting external table line number, "
                             + "default -1 means all partitions"},
             needForward = false)
@@ -1890,7 +1960,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableAnalyzeComplexTypeColumn = false;
 
     @VariableMgr.VarAttr(name = ENABLE_STRONG_CONSISTENCY, description = {"用以开启强一致读。Doris 默认支持同一个会话内的"
-            + "强一致性，即同一个会话内对数据的变更操作是实时可见的。如需要会话间的强一致读，则需将此变量设置为true。",
+            + "强一致性，即同一个会话内对数据的变更操作是实时可见的。如需要会话间的强一致读，则需将此变量设置为 true。",
             "Used to enable strong consistent reading. By default, Doris supports strong consistency "
                     + "within the same session, that is, changes to data within the same session are visible in "
                     + "real time. If you want strong consistent reads between sessions, set this variable to true. "
@@ -1929,7 +1999,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enablePreparedStmtAuditLog = false;
 
     @VariableMgr.VarAttr(name = INVERTED_INDEX_CONJUNCTION_OPT_THRESHOLD,
-            description = {"在match_all中求取多个倒排索引的交集时,如果最大的倒排索引中的总数是最小倒排索引中的总数的整数倍,"
+            description = {"在 match_all 中求取多个倒排索引的交集时，如果最大的倒排索引中的总数是最小倒排索引中的总数的整数倍，"
                     + "则使用跳表来优化交集操作。",
                     "When intersecting multiple inverted indexes in match_all,"
                     + " if the maximum total count of the largest inverted index"
@@ -1951,15 +2021,20 @@ public class SessionVariable implements Serializable, Writable {
     public int invertedIndexSkipThreshold = 50;
 
     @VariableMgr.VarAttr(name = INVERTED_INDEX_COMPATIBLE_READ,
-            description = {"兼容读取倒排索引，用于在x86和arm集群之间读取旧版本索引文件。",
+            description = {"兼容读取倒排索引，用于在 x86 和 arm 集群之间读取旧版本索引文件。",
                     "Compatible read for inverted index between x86 and arm, "
                             + "used to read old version index file from x86 in arm cluster"
                             + "or read old version index file from arm in x86 cluster"})
     public boolean invertedIndexCompatibleRead = false;
 
     @VariableMgr.VarAttr(name = SQL_DIALECT, needForward = true, checker = "checkSqlDialect",
-            description = {"解析sql使用的方言", "The dialect used to parse sql."})
+            description = {"解析 sql 使用的方言", "The dialect used to parse sql."})
     public String sqlDialect = "doris";
+
+    @VariableMgr.VarAttr(name = RETRY_ORIGIN_SQL_ON_CONVERT_FAIL, needForward = true,
+            description = {"当转换后的SQL解析失败时，是否重试原始SQL",
+                    "Enable retrying original SQL when converted SQL parsing fails."})
+    public boolean retryOriginSqlOnConvertFail = false;
 
     @VariableMgr.VarAttr(name = SERDE_DIALECT, needForward = true, checker = "checkSerdeDialect",
             description = {"返回给 MySQL 客户端时各数据类型的输出格式方言",
@@ -1970,12 +2045,11 @@ public class SessionVariable implements Serializable, Writable {
     @VariableMgr.VarAttr(name = ENABLE_UNIQUE_KEY_PARTIAL_UPDATE, needForward = true)
     public boolean enableUniqueKeyPartialUpdate = false;
 
-    @VariableMgr.VarAttr(name = TEST_QUERY_CACHE_HIT, description = {
-            "用于测试查询缓存是否命中，如果未命中指定类型的缓存，则会报错",
-            "Used to test whether the query cache is hit. "
-                    + "If the specified type of cache is not hit, an error will be reported."},
-            options = {"none", "sql_cache", "partition_cache"})
-    public String testQueryCacheHit = "none";
+    @VariableMgr.VarAttr(name = PARTIAL_UPDATE_NEW_KEY_BEHAVIOR, needForward = true, description = {
+            "用于设置部分列更新中对于新插入的行的行为",
+            "Used to set the behavior for newly inserted rows in partial update."
+            }, checker = "checkPartialUpdateNewKeyBehavior", options = {"APPEND", "ERROR"})
+    public String partialUpdateNewKeyPolicy = "APPEND";
 
     @VariableMgr.VarAttr(name = ENABLE_AUTO_ANALYZE,
             description = {"该参数控制是否开启自动收集", "Set false to disable auto analyze"},
@@ -1988,12 +2062,12 @@ public class SessionVariable implements Serializable, Writable {
     public boolean forceSampleAnalyze = Config.force_sample_analyze;
 
     @VariableMgr.VarAttr(name = ENABLE_AUTO_ANALYZE_INTERNAL_CATALOG,
-            description = {"临时参数，收否自动收集所有内表", "Temp variable， enable to auto collect all OlapTable."},
+            description = {"临时参数，收否自动收集所有内表", "Temp variable, enable to auto collect all OlapTable."},
             flag = VariableMgr.GLOBAL)
     public boolean enableAutoAnalyzeInternalCatalog = true;
 
     @VariableMgr.VarAttr(name = ENABLE_PARTITION_ANALYZE,
-            description = {"临时参数，收否收集分区级别统计信息", "Temp variable， enable to collect partition level statistics."},
+            description = {"临时参数，收否收集分区级别统计信息", "Temp variable, enable to collect partition level statistics."},
             flag = VariableMgr.GLOBAL)
     public boolean enablePartitionAnalyze = false;
 
@@ -2005,31 +2079,31 @@ public class SessionVariable implements Serializable, Writable {
     public int autoAnalyzeTableWidthThreshold = 300;
 
     @VariableMgr.VarAttr(name = AUTO_ANALYZE_START_TIME, needForward = true, checker = "checkAnalyzeTimeFormat",
-            description = {"该参数定义自动ANALYZE例程的开始时间",
+            description = {"该参数定义自动 ANALYZE 例程的开始时间",
                     "This parameter defines the start time for the automatic ANALYZE routine."},
             flag = VariableMgr.GLOBAL)
     public String autoAnalyzeStartTime = "00:00:00";
 
     @VariableMgr.VarAttr(name = AUTO_ANALYZE_END_TIME, needForward = true, checker = "checkAnalyzeTimeFormat",
-            description = {"该参数定义自动ANALYZE例程的结束时间",
+            description = {"该参数定义自动 ANALYZE 例程的结束时间",
                     "This parameter defines the end time for the automatic ANALYZE routine."},
             flag = VariableMgr.GLOBAL)
     public String autoAnalyzeEndTime = "23:59:59";
 
     @VariableMgr.VarAttr(name = IGNORE_RUNTIME_FILTER_IDS,
-            description = {"在IGNORE_RUNTIME_FILTER_IDS列表中的runtime filter将不会被生成",
+            description = {"在 IGNORE_RUNTIME_FILTER_IDS 列表中的 runtime filter 将不会被生成",
                     "the runtime filter id in IGNORE_RUNTIME_FILTER_IDS list will not be generated"})
 
     public String ignoreRuntimeFilterIds = "";
 
     @VariableMgr.VarAttr(name = STATS_INSERT_MERGE_ITEM_COUNT, flag = VariableMgr.GLOBAL, description = {
-            "控制统计信息相关INSERT攒批数量", "Controls the batch size for stats INSERT merging."
+            "控制统计信息相关 INSERT 攒批数量", "Controls the batch size for stats INSERT merging."
     }
     )
     public int statsInsertMergeItemCount = 200;
 
     @VariableMgr.VarAttr(name = HUGE_TABLE_DEFAULT_SAMPLE_ROWS, flag = VariableMgr.GLOBAL, description = {
-            "定义开启开启大表自动sample后，对大表的采样比例",
+            "定义开启开启大表自动 sample 后，对大表的采样比例",
             "This defines the number of sample percent for large tables when automatic sampling for"
                     + "large tables is enabled"
 
@@ -2047,21 +2121,21 @@ public class SessionVariable implements Serializable, Writable {
     public long hugeTableLowerBoundSizeInBytes = 0;
 
     @VariableMgr.VarAttr(name = HUGE_TABLE_AUTO_ANALYZE_INTERVAL_IN_MILLIS, flag = VariableMgr.GLOBAL,
-            description = {"控制对大表的自动ANALYZE的最小时间间隔，"
-                    + "在该时间间隔内大小超过huge_table_lower_bound_size_in_bytes的表仅ANALYZE一次",
+            description = {"控制对大表的自动 ANALYZE 的最小时间间隔，"
+                    + "在该时间间隔内大小超过 huge_table_lower_bound_size_in_bytes 的表仅 ANALYZE 一次",
                     "This controls the minimum time interval for automatic ANALYZE on large tables."
                             + "Within this interval,"
                             + "tables larger than huge_table_lower_bound_size_in_bytes are analyzed only once."})
     public long hugeTableAutoAnalyzeIntervalInMillis = TimeUnit.HOURS.toMillis(0);
 
     @VariableMgr.VarAttr(name = EXTERNAL_TABLE_AUTO_ANALYZE_INTERVAL_IN_MILLIS, flag = VariableMgr.GLOBAL,
-            description = {"控制对外表的自动ANALYZE的最小时间间隔，在该时间间隔内的外表仅ANALYZE一次",
+            description = {"控制对外表的自动 ANALYZE 的最小时间间隔，在该时间间隔内的外表仅 ANALYZE 一次",
                     "This controls the minimum time interval for automatic ANALYZE on external tables."
                         + "Within this interval, external tables are analyzed only once."})
     public long externalTableAutoAnalyzeIntervalInMillis = TimeUnit.HOURS.toMillis(24);
 
     @VariableMgr.VarAttr(name = TABLE_STATS_HEALTH_THRESHOLD, flag = VariableMgr.GLOBAL,
-            description = {"取值在0-100之间，当自上次统计信息收集操作之后"
+            description = {"取值在 0-100 之间，当自上次统计信息收集操作之后"
                     + "数据更新量达到 (100 - table_stats_health_threshold)% ，认为该表的统计信息已过时",
                     "The value should be between 0 and 100. When the data update quantity "
                             + "exceeds (100 - table_stats_health_threshold)% since the last "
@@ -2081,6 +2155,10 @@ public class SessionVariable implements Serializable, Writable {
                     "The upper limit of the number of rows for sampling large partitioned tables.\n"})
     public long partitionSampleRowCount = 3_000_000_000L;
 
+    @VariableMgr.VarAttr(name = FETCH_HIVE_ROW_COUNT_SYNC,
+            description = {"同步获取 Hive 外表行数", "Fetch Hive external table row count synchronously"})
+    public boolean fetchHiveRowCountSync = true;
+
     @VariableMgr.VarAttr(name = ENABLE_MATERIALIZED_VIEW_REWRITE, needForward = true,
             description = {"是否开启基于结构信息的物化视图透明改写",
                     "Whether to enable materialized view rewriting based on struct info"})
@@ -2097,12 +2175,12 @@ public class SessionVariable implements Serializable, Writable {
                     ""})
     public boolean enableMaterializedViewRewriteWhenBaseTableUnawareness = false;
     @VariableMgr.VarAttr(name = MATERIALIZED_VIEW_REWRITE_SUCCESS_CANDIDATE_NUM, needForward = true,
-            description = {"异步物化视图透明改写成功的结果集合，允许参与到CBO候选的最大数量",
+            description = {"异步物化视图透明改写成功的结果集合，允许参与到 CBO 候选的最大数量",
                     "The max candidate num which participate in CBO when using asynchronous materialized views"})
     public int materializedViewRewriteSuccessCandidateNum = 3;
 
     @VariableMgr.VarAttr(name = ENABLE_DML_MATERIALIZED_VIEW_REWRITE, needForward = true,
-            description = {"DML 时, 是否开启基于结构信息的物化视图透明改写",
+            description = {"DML 时，是否开启基于结构信息的物化视图透明改写",
                     "Whether to enable materialized view rewriting based on struct info"})
     public boolean enableDmlMaterializedViewRewrite = true;
 
@@ -2113,7 +2191,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableDmlMaterializedViewRewriteWhenBaseTableUnawareness = false;
 
     @VariableMgr.VarAttr(name = MATERIALIZED_VIEW_RELATION_MAPPING_MAX_COUNT, needForward = true,
-            description = {"透明改写过程中，relation mapping最大允许数量，如果超过，进行截取",
+            description = {"透明改写过程中，relation mapping 最大允许数量，如果超过，进行截取",
                     "During transparent rewriting, relation mapping specifies the maximum allowed number. "
                             + "If the number exceeds the allowed number, the number is intercepted"})
     public int materializedViewRelationMappingMaxCount = 8;
@@ -2161,24 +2239,40 @@ public class SessionVariable implements Serializable, Writable {
     public boolean hiveOrcUseColumnNames = true;
 
     @VariableMgr.VarAttr(name = KEEP_CARRIAGE_RETURN,
-            description = {"在同时处理\r和\r\n作为CSV的行分隔符时，是否保留\r",
+            description = {"在同时处理\r和\r\n作为 CSV 的行分隔符时，是否保留\r",
                     "When processing both \\n and \\r\\n as CSV line separators, should \\r be retained?"})
     public boolean keepCarriageReturn = false;
 
 
     @VariableMgr.VarAttr(name = FORCE_JNI_SCANNER,
-            description = {"强制使用jni方式读取外表", "Force the use of jni mode to read external table"})
+            description = {"强制使用 jni 方式读取外表", "Force the use of jni mode to read external table"})
     private boolean forceJniScanner = false;
-
-    @VariableMgr.VarAttr(name = HUDI_JNI_SCANNER, description = { "使用那种hudi jni scanner, 'hadoop' 或 'spark'",
-            "Which hudi jni scanner to use, 'hadoop' or 'spark'" })
-    private String hudiJniScanner = "hadoop";
 
     @VariableMgr.VarAttr(name = ENABLE_COUNT_PUSH_DOWN_FOR_EXTERNAL_TABLE,
             description = {"对外表启用 count(*) 下推优化", "enable count(*) pushdown optimization for external table"})
     private boolean enableCountPushDownForExternalTable = true;
 
     public static final String IGNORE_RUNTIME_FILTER_IDS = "ignore_runtime_filter_ids";
+
+    public static final String ENABLE_EXTERNAL_TABLE_BATCH_MODE = "enable_external_table_batch_mode";
+    @VariableMgr.VarAttr(
+            name = ENABLE_EXTERNAL_TABLE_BATCH_MODE,
+            description = {"使能外表的 batch mode 功能", "Enable the batch mode function of the external table."},
+            needForward = true)
+    public boolean enableExternalTableBatchMode = true;
+
+    @VariableMgr.VarAttr(name = ENABLE_PREFER_CACHED_ROWSET, needForward = false,
+            description = {"是否启用 prefer cached rowset 功能",
+                    "Whether to enable prefer cached rowset feature"})
+    public boolean enablePreferCachedRowset = false;
+
+    @VariableMgr.VarAttr(name = QUERY_FRESHNESS_TOLERANCE_MS, needForward = false)
+    public long queryFreshnessToleranceMs = -1;
+
+    @VariableMgr.VarAttr(name = MERGE_IO_READ_SLICE_SIZE_BYTES, description = {
+            "调整 READ_SLICE_SIZE 大小，降低 Merge IO 读放大影响",
+            "Make the READ_SLICE_SIZE variable configurable to reduce the impact caused by read amplification."})
+    public int mergeReadSliceSizeBytes = 8388608;
 
     public Set<Integer> getIgnoredRuntimeFilterIds() {
         Set<Integer> ids = Sets.newLinkedHashSet();
@@ -2216,6 +2310,8 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String IGNORE_SHAPE_NODE = "ignore_shape_nodes";
 
+    public static final String ENABLE_EXPLAIN_NONE = "enable_explain_none";
+
     public static final String DETAIL_SHAPE_NODES = "detail_shape_nodes";
 
     public static final String ENABLE_SEGMENT_CACHE = "enable_segment_cache";
@@ -2229,14 +2325,20 @@ public class SessionVariable implements Serializable, Writable {
     }
 
     @VariableMgr.VarAttr(name = IGNORE_SHAPE_NODE,
-            description = {"'explain shape plan' 命令中忽略的PlanNode 类型",
+            description = {"'explain shape plan' 命令中忽略的 PlanNode 类型",
                     "the plan node type which is ignored in 'explain shape plan' command"})
     public String ignoreShapePlanNodes = "";
 
     @VariableMgr.VarAttr(name = DETAIL_SHAPE_NODES, needForward = true, setter = "setDetailShapePlanNodes",
-            description = {"'explain shape plan' 命令中显示详细信息的PlanNode 类型",
+            description = {"'explain shape plan' 命令中显示详细信息的 PlanNode 类型",
                     "the plan node type show detail in 'explain shape plan' command"})
     public String detailShapePlanNodes = "";
+
+    @VariableMgr.VarAttr(name = ENABLE_EXPLAIN_NONE, needForward = true, description = {
+            "执行 explain 命令，但不打印 explain 结果",
+            "execute explain command and return nothing"
+    })
+    public boolean enableExplainNone = false;
 
     private Set<String> detailShapePlanNodesSet = ImmutableSet.of();
 
@@ -2250,12 +2352,12 @@ public class SessionVariable implements Serializable, Writable {
         this.detailShapePlanNodes = detailShapePlanNodes;
     }
 
-    @VariableMgr.VarAttr(name = ENABLE_DECIMAL256, needForward = true, description = { "控制是否在计算过程中使用Decimal256类型",
+    @VariableMgr.VarAttr(name = ENABLE_DECIMAL256, needForward = true, description = { "控制是否在计算过程中使用 Decimal256 类型",
             "Set to true to enable Decimal256 type" })
     public boolean enableDecimal256 = false;
 
     @VariableMgr.VarAttr(name = FALLBACK_OTHER_REPLICA_WHEN_FIXED_CORRUPT, needForward = true,
-            description = { "当开启use_fix_replica时遇到故障，是否漂移到其他健康的副本",
+            description = { "当开启 use_fix_replica 时遇到故障，是否漂移到其他健康的副本",
                 "use other health replica when the use_fix_replica meet error" })
     public boolean fallbackOtherReplicaWhenFixedCorrupt = false;
 
@@ -2267,7 +2369,7 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(name = SHOW_ALL_FE_CONNECTION,
             description = {"when it's true show processlist statement list all fe's connection",
-                    "当变量为true时，show processlist命令展示所有fe的连接"})
+                    "当变量为 true 时，show processlist 命令展示所有 fe 的连接"})
     public boolean showAllFeConnection = false;
 
     @VariableMgr.VarAttr(name = MAX_MSG_SIZE_OF_RESULT_RECEIVER,
@@ -2288,7 +2390,7 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ENABLE_RESERVE_MEMORY,
-            description = {"控制是否启用分配内存前先reverve memory的功能。默认为 true。",
+            description = {"控制是否启用分配内存前先 reverve memory 的功能。默认为 true。",
                     "Controls whether to enable reserve memory before allocating memory. "
                             + "The default value is true."},
             needForward = true, fuzzy = true)
@@ -2307,7 +2409,7 @@ public class SessionVariable implements Serializable, Writable {
 
     @VariableMgr.VarAttr(
             name = ENABLE_JOIN_SPILL,
-            description = {"控制是否启用join算子落盘。默认为 false。",
+            description = {"控制是否启用 join 算子落盘。默认为 false。",
                     "Controls whether to enable spill to disk of join operation. "
                             + "The default value is false."},
             needForward = true, fuzzy = true)
@@ -2371,7 +2473,7 @@ public class SessionVariable implements Serializable, Writable {
     public int externalAggPartitionBits = 5; // means that the hash table will be partitioned into 32 blocks.
 
     @VariableMgr.VarAttr(name = USE_MAX_LENGTH_OF_VARCHAR_IN_CTAS, needForward = true, description = {
-            "在CTAS中，如果 CHAR / VARCHAR 列不来自于源表，是否是将这一列的长度设置为 MAX，即65533。默认为 true。",
+            "在 CTAS 中，如果 CHAR / VARCHAR 列不来自于源表，是否是将这一列的长度设置为 MAX，即 65533。默认为 true。",
             "In CTAS (Create Table As Select), if CHAR/VARCHAR columns do not originate from the source table,"
                     + " whether to set the length of such a column to MAX, which is 65533. The default is true."
     })
@@ -2393,7 +2495,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableESParallelScroll = true;
 
     @VariableMgr.VarAttr(name = ENABLE_MATCH_WITHOUT_INVERTED_INDEX, description = {
-        "开启无索引match查询功能，建议正式环境保持开启",
+        "开启无索引 match 查询功能，建议正式环境保持开启",
         "Enable no-index match query functionality."
                 + " it is recommended to keep this enabled in the production environment."
     })
@@ -2407,7 +2509,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableFallbackOnMissingInvertedIndex = true;
 
     @VariableMgr.VarAttr(name = REQUIRE_SEQUENCE_IN_INSERT, needForward = true, description = {
-            "该变量用于控制，使用了sequence列的unique key表，insert into操作是否要求必须提供每一行的sequence列的值",
+            "该变量用于控制，使用了 sequence 列的 unique key 表，insert into 操作是否要求必须提供每一行的 sequence 列的值",
             "This variable controls whether the INSERT INTO operation on unique key tables with a sequence"
                     + " column requires a sequence column to be provided for each row"
     })
@@ -2423,7 +2525,7 @@ public class SessionVariable implements Serializable, Writable {
     public boolean enableAutoCreateWhenOverwrite = false;
 
     @VariableMgr.VarAttr(name = ENABLE_TEXT_VALIDATE_UTF8, needForward = true, description = {
-            "对于 text 类型的文件读取，是否开启utf8编码检查。非utf8字符会显示成乱码。",
+            "对于 text 类型的文件读取，是否开启 utf8 编码检查。非 utf8 字符会显示成乱码。",
             "For text type file reading, whether to enable utf8 encoding check."
                     + "non-utf8 characters will be displayed as garbled characters."
     })
@@ -2459,6 +2561,14 @@ public class SessionVariable implements Serializable, Writable {
             | VariableMgr.READ_ONLY)
     public boolean newIsIpAddressInRange = true;
 
+    @VariableMgr.VarAttr(
+            name = DEFAULT_VARIANT_MAX_SUBCOLUMNS_COUNT,
+            needForward = true,
+            checker = "checkDefaultVariantMaxSubcolumnsCount",
+            fuzzy = true
+    )
+    public int defaultVariantMaxSubcolumnsCount = 0;
+
     @VariableMgr.VarAttr(name = ENABLE_SQL_CONVERTOR_FEATURES, needForward = true,
             checker = "checkSqlConvertorFeatures",
             description = {
@@ -2472,7 +2582,7 @@ public class SessionVariable implements Serializable, Writable {
     // for getting version is memory operation in master node,
     // but it will slightly increase the pressure on the FE master.
     @VariableMgr.VarAttr(name = ENABLE_SCHEMA_SCAN_FROM_MASTER_FE, description = {
-            "在follower节点查询时, 是否允许从master节点扫描information_schema.tables的结果",
+            "在 follower 节点查询时，是否允许从 master 节点扫描 information_schema.tables 的结果",
             "Whether to allow scanning information_schema.tables from the master node"
     })
     public boolean enableSchemaScanFromMasterFe = true;
@@ -2497,6 +2607,14 @@ public class SessionVariable implements Serializable, Writable {
                     "Whether to prefer UDF over builtin functions"
             })
     public boolean preferUdfOverBuiltin = false;
+
+
+    @VariableMgr.VarAttr(
+            name = DEFAULT_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE,
+            needForward = true,
+            fuzzy = true
+    )
+    public boolean defaultEnableTypedPathsToSparse = false;
 
     public void setEnableEsParallelScroll(boolean enableESParallelScroll) {
         this.enableESParallelScroll = enableESParallelScroll;
@@ -2526,6 +2644,26 @@ public class SessionVariable implements Serializable, Writable {
     })
     public boolean enableAddIndexForNewData = false;
 
+    @VariableMgr.VarAttr(
+            name = DEFAULT_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE,
+            needForward = true,
+            fuzzy = true
+    )
+    public int defaultVariantMaxSparseColumnStatisticsSize = 10000;
+
+    public static final String IGNORE_ICEBERG_DANGLING_DELETE = "ignore_iceberg_dangling_delete";
+    @VariableMgr.VarAttr(name = IGNORE_ICEBERG_DANGLING_DELETE,
+            description = {"是否忽略 Iceberg 表中 dangling delete 文件对 COUNT(*) 统计信息的影响。"
+                    + "默认为 true，COUNT(*) 会直接从元信息中获取行数，性能更好，但是如果有 dangling delete，结果可能是不准确的。"
+                    + "设置为 false 时，COUNT(*) 会扫描数据文件以排除 dangling delete 文件的影响。",
+                    " Whether to ignore the impact of dangling delete files in Iceberg tables on COUNT(*) statistics. "
+                            + "The default is true, COUNT(*) will directly obtain the number of rows from metadata, "
+                            + "which has better performance, but if there are dangling deletes, "
+                            + "the result may be inaccurate. "
+                            + "When set to false, COUNT(*) will scan data files "
+                            + "to exclude the impact of dangling delete files."})
+    public boolean ignoreIcebergDanglingDelete = false;
+
     // If this fe is in fuzzy mode, then will use initFuzzyModeVariables to generate some variables,
     // not the default value set in the code.
     @SuppressWarnings("checkstyle:Indentation")
@@ -2545,7 +2683,8 @@ public class SessionVariable implements Serializable, Writable {
         this.partitionedHashJoinRowsThreshold = random.nextBoolean() ? 8 : 1048576;
         this.partitionedHashAggRowsThreshold = random.nextBoolean() ? 8 : 1048576;
         this.enableShareHashTableForBroadcastJoin = random.nextBoolean();
-        // this.enableHashJoinEarlyStartProbe = random.nextBoolean();
+        this.defaultVariantMaxSubcolumnsCount = random.nextInt(10);
+        this.defaultEnableTypedPathsToSparse = random.nextBoolean();
         int randomInt = random.nextInt(4);
         if (randomInt % 2 == 0) {
             this.rewriteOrToInPredicateThreshold = 100000;
@@ -3185,6 +3324,30 @@ public class SessionVariable implements Serializable, Writable {
         }
     }
 
+    public boolean getEnablePreferCachedRowset() {
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext != null && connectContext.getEnv() != null && connectContext.getEnv().getAuth() != null) {
+            boolean userEnablePreferCachedRowset = connectContext.getEnv().getAuth()
+                    .getEnablePreferCachedRowset(connectContext.getQualifiedUser());
+            if (userEnablePreferCachedRowset) {
+                return userEnablePreferCachedRowset;
+            }
+        }
+        return enablePreferCachedRowset;
+    }
+
+    public long getQueryFreshnessToleranceMs() {
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext != null && connectContext.getEnv() != null && connectContext.getEnv().getAuth() != null) {
+            long userQueryFreshnessToleranceMs = connectContext.getEnv().getAuth()
+                    .getQueryFreshnessToleranceMs(connectContext.getQualifiedUser());
+            if (userQueryFreshnessToleranceMs > 0) {
+                return userQueryFreshnessToleranceMs;
+            }
+        }
+        return queryFreshnessToleranceMs;
+    }
+
     public int getExchangeInstanceParallel() {
         return exchangeInstanceParallel;
     }
@@ -3195,6 +3358,10 @@ public class SessionVariable implements Serializable, Writable {
 
     public void setEnableInsertStrict(boolean enableInsertStrict) {
         this.enableInsertStrict = enableInsertStrict;
+    }
+
+    public boolean getEnableInsertValueAutoCast() {
+        return enableInsertValueAutoCast;
     }
 
     public double getInsertMaxFilterRatio() {
@@ -3467,6 +3634,10 @@ public class SessionVariable implements Serializable, Writable {
         this.numPartitionsInBatchMode = numPartitionsInBatchMode;
     }
 
+    public int getNumFilesInBatchMode() {
+        return numFilesInBatchMode;
+    }
+
     public long getFetchSplitsMaxWaitTime() {
         return fetchSplitsMaxWaitTime;
     }
@@ -3507,12 +3678,24 @@ public class SessionVariable implements Serializable, Writable {
         this.enableOrcFilterByMinMax = enableOrcFilterByMinMax;
     }
 
+    public boolean isCheckOrcInitSargsSuccess() {
+        return checkOrcInitSargsSuccess;
+    }
+
+    public void setCheckOrcInitSargsSuccess(boolean checkOrcInitSargsSuccess) {
+        this.checkOrcInitSargsSuccess = checkOrcInitSargsSuccess;
+    }
+
     public String getSqlDialect() {
         return sqlDialect;
     }
 
     public int getWaitFullBlockScheduleTimes() {
         return waitFullBlockScheduleTimes;
+    }
+
+    public boolean isRetryOriginSqlOnConvertFail() {
+        return retryOriginSqlOnConvertFail;
     }
 
     public String[] getSqlConvertorFeatures() {
@@ -3799,14 +3982,20 @@ public class SessionVariable implements Serializable, Writable {
         return enableExprTrace;
     }
 
-
-
     public boolean isEnableSingleReplicaInsert() {
         return enableSingleReplicaInsert;
     }
 
     public void setEnableSingleReplicaInsert(boolean enableSingleReplicaInsert) {
         this.enableSingleReplicaInsert = enableSingleReplicaInsert;
+    }
+
+    public boolean isEnableFastAnalyzeInsertIntoValues() {
+        return enableFastAnalyzeInsertIntoValues;
+    }
+
+    public void setEnableFastAnalyzeInsertIntoValues(boolean enableFastAnalyzeInsertIntoValues) {
+        this.enableFastAnalyzeInsertIntoValues = enableFastAnalyzeInsertIntoValues;
     }
 
     public boolean isEnableMemtableOnSinkNode() {
@@ -3823,6 +4012,14 @@ public class SessionVariable implements Serializable, Writable {
 
     public void setEnableRuntimeFilterPrune(boolean enableRuntimeFilterPrune) {
         this.enableRuntimeFilterPrune = enableRuntimeFilterPrune;
+    }
+
+    public boolean isEnableRuntimeFilterPartitionPrune() {
+        return enableRuntimeFilterPartitionPrune;
+    }
+
+    public void setEnableRuntimeFilterPartitionPrune(boolean enableRuntimeFilterPartitionPrune) {
+        this.enableRuntimeFilterPartitionPrune = enableRuntimeFilterPartitionPrune;
     }
 
     public void setFragmentTransmissionCompressionCodec(String codec) {
@@ -3872,6 +4069,14 @@ public class SessionVariable implements Serializable, Writable {
                     value, MIN_EXTERNAL_AGG_PARTITION_BITS, MAX_EXTERNAL_AGG_PARTITION_BITS);
             throw new UnsupportedOperationException("min value is " + MIN_EXTERNAL_AGG_PARTITION_BITS + " max value is "
                     + MAX_EXTERNAL_AGG_PARTITION_BITS);
+        }
+    }
+
+    public void checkDefaultVariantMaxSubcolumnsCount(String variantMaxSubcolumnsCount) {
+        int value = Integer.valueOf(variantMaxSubcolumnsCount);
+        if (value < 0 || value > 10000) {
+            throw new UnsupportedOperationException(
+                    "variant max subcolumns count is: " + variantMaxSubcolumnsCount + " it must between 0 and 10000");
         }
     }
 
@@ -3985,6 +4190,10 @@ public class SessionVariable implements Serializable, Writable {
 
     public void setEnableUniqueKeyPartialUpdate(boolean enableUniqueKeyPartialUpdate) {
         this.enableUniqueKeyPartialUpdate = enableUniqueKeyPartialUpdate;
+    }
+
+    public TPartialUpdateNewRowPolicy getPartialUpdateNewRowPolicy() {
+        return parsePartialUpdateNewKeyBehavior(partialUpdateNewKeyPolicy);
     }
 
     public int getLoadStreamPerNode() {
@@ -4118,6 +4327,7 @@ public class SessionVariable implements Serializable, Writable {
         tResult.setEnableOrcLazyMat(enableOrcLazyMat);
         tResult.setEnableParquetFilterByMinMax(enableParquetFilterByMinMax);
         tResult.setEnableOrcFilterByMinMax(enableOrcFilterByMinMax);
+        tResult.setCheckOrcInitSargsSuccess(checkOrcInitSargsSuccess);
 
         tResult.setEnableDeleteSubPredicateV2(enableDeleteSubPredicateV2);
         tResult.setTruncateCharOrVarcharColumns(truncateCharOrVarcharColumns);
@@ -4142,6 +4352,10 @@ public class SessionVariable implements Serializable, Writable {
         tResult.setEnableJoinSpill(enableJoinSpill);
         tResult.setEnableSortSpill(enableSortSpill);
         tResult.setEnableAggSpill(enableAggSpill);
+
+        tResult.setEnablePreferCachedRowset(getEnablePreferCachedRowset());
+        tResult.setQueryFreshnessToleranceMs(getQueryFreshnessToleranceMs());
+
         tResult.setEnableForceSpill(enableForceSpill);
         tResult.setMinRevocableMem(minRevocableMem);
         tResult.setDataQueueMaxBlocks(dataQueueMaxBlocks);
@@ -4172,7 +4386,8 @@ public class SessionVariable implements Serializable, Writable {
         tResult.setIgnoreRuntimeFilterError(ignoreRuntimeFilterError);
 
         tResult.setNewIsIpAddressInRange(newIsIpAddressInRange);
-
+        tResult.setEnableRuntimeFilterPartitionPrune(enableRuntimeFilterPartitionPrune);
+        tResult.setMergeReadSliceSize(mergeReadSliceSizeBytes);
         return tResult;
     }
 
@@ -4375,6 +4590,7 @@ public class SessionVariable implements Serializable, Writable {
     /**
      * The sessionContext is as follows:
      * "k1:v1;k2:v2;..."
+     * eg: set session_context="trace_id:123456"
      * Here we want to get value with key named "trace_id",
      * Return empty string is not found.
      *
@@ -4539,6 +4755,29 @@ public class SessionVariable implements Serializable, Writable {
             UnsupportedOperationException exception =
                     new UnsupportedOperationException("Generate stats factor " + value + " should greater than 0");
             LOG.warn("Check generate stats factor failed", exception);
+            throw exception;
+        }
+    }
+
+    public TPartialUpdateNewRowPolicy parsePartialUpdateNewKeyBehavior(String behavior) {
+        if (behavior == null) {
+            return null;
+        } else if (behavior.equalsIgnoreCase("APPEND")) {
+            return TPartialUpdateNewRowPolicy.APPEND;
+        } else if (behavior.equalsIgnoreCase("ERROR")) {
+            return TPartialUpdateNewRowPolicy.ERROR;
+        }
+        return null;
+    }
+
+    public void checkPartialUpdateNewKeyBehavior(String partialUpdateNewKeyBehavior) {
+        TPartialUpdateNewRowPolicy policy = parsePartialUpdateNewKeyBehavior(partialUpdateNewKeyBehavior);
+        if (policy == null) {
+            UnsupportedOperationException exception =
+                    new UnsupportedOperationException(PARTIAL_UPDATE_NEW_KEY_BEHAVIOR
+                            + " should be one of {'APPEND', 'ERROR'}, but found "
+                                    + partialUpdateNewKeyBehavior);
+            LOG.warn("Check " + PARTIAL_UPDATE_NEW_KEY_BEHAVIOR + " failed", exception);
             throw exception;
         }
     }
@@ -4712,10 +4951,6 @@ public class SessionVariable implements Serializable, Writable {
         return forceJniScanner;
     }
 
-    public String getHudiJniScanner() {
-        return hudiJniScanner;
-    }
-
     public String getIgnoreSplitType() {
         return ignoreSplitType;
     }
@@ -4734,10 +4969,6 @@ public class SessionVariable implements Serializable, Writable {
 
     public void setForceJniScanner(boolean force) {
         forceJniScanner = force;
-    }
-
-    public void setHudiJniScanner(String hudiJniScanner) {
-        this.hudiJniScanner = hudiJniScanner;
     }
 
     public boolean isEnableCountPushDownForExternalTable() {
@@ -4816,12 +5047,32 @@ public class SessionVariable implements Serializable, Writable {
         }
     }
 
+    public boolean showSplitProfileInfo() {
+        return enableProfile() && getProfileLevel() > 1;
+    }
+
+    public boolean getEnableExternalTableBatchMode() {
+        return enableExternalTableBatchMode;
+    }
+
+    public int getDefaultVariantMaxSubcolumnsCount() {
+        return defaultVariantMaxSubcolumnsCount;
+    }
+
     public boolean isEnableAddIndexForNewData() {
         return enableAddIndexForNewData;
     }
 
     public void setEnableAddIndexForNewData(boolean enableAddIndexForNewData) {
         this.enableAddIndexForNewData = enableAddIndexForNewData;
+    }
+
+    public boolean getDefaultEnableTypedPathsToSparse() {
+        return defaultEnableTypedPathsToSparse;
+    }
+
+    public int getDefaultVariantMaxSparseColumnStatisticsSize() {
+        return defaultVariantMaxSparseColumnStatisticsSize;
     }
 }
 

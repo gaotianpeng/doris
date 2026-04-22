@@ -35,6 +35,7 @@
 #include "common/compiler_util.h" // IWYU pragma: keep
 #include "common/global_types.h"
 #include "common/status.h"
+#include "olap/utils.h"
 #include "runtime/define_primitive_type.h"
 #include "runtime/types.h"
 #include "vec/data_types/data_type.h"
@@ -45,6 +46,12 @@ class RepeatedField;
 } // namespace google::protobuf
 
 namespace doris {
+
+#ifdef BE_TEST
+#define MOCK_REMOVE(str)
+#else
+#define MOCK_REMOVE(str) str
+#endif
 
 class ObjectPool;
 class PTupleDescriptor;
@@ -83,6 +90,9 @@ public:
 
     bool is_auto_increment() const { return _is_auto_increment; }
 
+    bool is_skip_bitmap_col() const { return _col_name == SKIP_BITMAP_COL; }
+    bool is_sequence_col() const { return _col_name == SEQUENCE_COL; }
+
     const std::string& col_default_value() const { return _col_default_value; }
     PrimitiveType col_type() const { return _col_type; }
 
@@ -101,7 +111,7 @@ private:
     const TupleId _parent;
     const int _col_pos;
     bool _is_nullable;
-    const std::string _col_name;
+    MOCK_REMOVE(const) std::string _col_name;
     const std::string _col_name_lower_case;
 
     const int32_t _col_unique_id;

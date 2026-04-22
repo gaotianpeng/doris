@@ -39,6 +39,7 @@ suite("hive_config_test", "p0,external,hive,external_docker,external_docker_hive
     }
 
     for (String hivePrefix : ["hive2"]) {
+        sql "set enable_fallback_to_original_planner=false"
         String hdfs_port = context.config.otherConfigs.get(hivePrefix + "HdfsPort")
         String hms_port = context.config.otherConfigs.get(hivePrefix + "HmsPort")
         String externalEnvIp = context.config.otherConfigs.get("externalEnvIp")
@@ -93,6 +94,15 @@ suite("hive_config_test", "p0,external,hive,external_docker,external_docker_hive
         sql """ use `${catalog_name}`.`default` """
         order_qt_2 """ select * from hive_recursive_directories_table order by id; """
 
+        // test hive.recursive_directories_table default if true
+        sql """drop catalog if exists ${catalog_name}"""
+        sql """create catalog if not exists ${catalog_name} properties (
+            "type"="hms",
+            'hive.metastore.uris' = 'thrift://${externalEnvIp}:${hms_port}'
+        );"""
+        sql """ use `${catalog_name}`.`default` """
+        order_qt_21 """ select * from hive_recursive_directories_table order by id; """
+
         // 2. test hive.ignore_absent_partitions-table
         test_outfile("orc", "/user/doris/suites/default/hive_ignore_absent_partitions_table/country=USA/city=NewYork/exp_")
         
@@ -105,7 +115,6 @@ suite("hive_config_test", "p0,external,hive,external_docker,external_docker_hive
         );"""
         sql """use `${catalog_name}`.`default`"""
         order_qt_3 """ select * from hive_ignore_absent_partitions_table order by id;"""
-
 
         // 'hive.ignore_absent_partitions' = 'false'
         sql """drop catalog if exists ${catalog_name}"""

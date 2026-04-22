@@ -28,12 +28,14 @@ import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.common.util.Util;
+import org.apache.doris.datasource.property.fileformat.FileFormatProperties;
 import org.apache.doris.load.RoutineLoadDesc;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.load.routineload.AbstractDataSourceProperties;
 import org.apache.doris.load.routineload.RoutineLoadDataSourcePropertyFactory;
 import org.apache.doris.load.routineload.RoutineLoadJob;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
@@ -110,6 +112,7 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
     public static final String FUZZY_PARSE = "fuzzy_parse";
 
     public static final String PARTIAL_COLUMNS = "partial_columns";
+    public static final String PARTIAL_UPDATE_NEW_KEY_POLICY = "partial_update_new_key_behavior";
 
     public static final String WORKLOAD_GROUP = "workload_group";
 
@@ -140,6 +143,7 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
             .add(SEND_BATCH_PARALLELISM)
             .add(LOAD_TO_SINGLE_TABLET)
             .add(PARTIAL_COLUMNS)
+            .add(PARTIAL_UPDATE_NEW_KEY_POLICY)
             .add(WORKLOAD_GROUP)
             .add(LoadStmt.KEY_ENCLOSE)
             .add(LoadStmt.KEY_ESCAPE)
@@ -167,22 +171,8 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
     private String timezone = TimeUtils.DEFAULT_TIME_ZONE;
     private int sendBatchParallelism = 1;
     private boolean loadToSingleTablet = false;
-    /**
-     * RoutineLoad support json data.
-     * Require Params:
-     * 1) dataFormat = "json"
-     * 2) jsonPaths = "$.XXX.xxx"
-     */
-    private String format = ""; //default is csv.
-    private String jsonPaths = "";
-    private String jsonRoot = ""; // MUST be a jsonpath string
-    private boolean stripOuterArray = false;
-    private boolean numAsString = false;
-    private boolean fuzzyParse = false;
 
-    private byte enclose;
-
-    private byte escape;
+    private FileFormatProperties fileFormatProperties;
 
     private long workloadGroupId = -1;
 
@@ -191,6 +181,8 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
      */
     @Getter
     private boolean isPartialUpdate = false;
+    @Getter
+    private TPartialUpdateNewRowPolicy partialUpdateNewKeyPolicy = TPartialUpdateNewRowPolicy.APPEND;
 
     private String comment = "";
 
@@ -224,9 +216,20 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
                 .createDataSource(typeName, dataSourceProperties, this.isMultiTable);
         this.mergeType = mergeType;
         this.isPartialUpdate = this.jobProperties.getOrDefault(PARTIAL_COLUMNS, "false").equalsIgnoreCase("true");
+        if (this.isPartialUpdate && this.jobProperties.containsKey(PARTIAL_UPDATE_NEW_KEY_POLICY)) {
+            String policyStr = this.jobProperties.get(PARTIAL_UPDATE_NEW_KEY_POLICY).toUpperCase();
+            if ("APPEND".equals(policyStr)) {
+                this.partialUpdateNewKeyPolicy = TPartialUpdateNewRowPolicy.APPEND;
+            } else if ("ERROR".equals(policyStr)) {
+                this.partialUpdateNewKeyPolicy = TPartialUpdateNewRowPolicy.ERROR;
+            }
+            // validation will be done in checkJobProperties()
+        }
         if (comment != null) {
             this.comment = comment;
         }
+        String format = jobProperties.getOrDefault(FileFormatProperties.PROP_FORMAT, "csv");
+        fileFormatProperties = FileFormatProperties.createFileFormatProperties(format);
     }
 
     public String getName() {
@@ -293,40 +296,16 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
         return timezone;
     }
 
-    public String getFormat() {
-        return format;
-    }
-
-    public boolean isStripOuterArray() {
-        return stripOuterArray;
-    }
-
-    public boolean isNumAsString() {
-        return numAsString;
-    }
-
-    public boolean isFuzzyParse() {
-        return fuzzyParse;
-    }
-
-    public String getJsonPaths() {
-        return jsonPaths;
-    }
-
-    public byte getEnclose() {
-        return enclose;
-    }
-
-    public byte getEscape() {
-        return escape;
-    }
-
-    public String getJsonRoot() {
-        return jsonRoot;
+    public TPartialUpdateNewRowPolicy getPartialUpdateNewKeyPolicy() {
+        return partialUpdateNewKeyPolicy;
     }
 
     public LoadTask.MergeType getMergeType() {
         return mergeType;
+    }
+
+    public FileFormatProperties getFileFormatProperties() {
+        return fileFormatProperties;
     }
 
     public AbstractDataSourceProperties getDataSourceProperties() {
@@ -517,23 +496,6 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
                 RoutineLoadJob.DEFAULT_LOAD_TO_SINGLE_TABLET,
                 LoadStmt.LOAD_TO_SINGLE_TABLET + " should be a boolean");
 
-        String encloseStr = jobProperties.get(LoadStmt.KEY_ENCLOSE);
-        if (encloseStr != null) {
-            if (encloseStr.length() != 1) {
-                throw new AnalysisException("enclose must be single-char");
-            } else {
-                enclose = encloseStr.getBytes()[0];
-            }
-        }
-        String escapeStr = jobProperties.get(LoadStmt.KEY_ESCAPE);
-        if (escapeStr != null) {
-            if (escapeStr.length() != 1) {
-                throw new AnalysisException("enclose must be single-char");
-            } else {
-                escape = escapeStr.getBytes()[0];
-            }
-        }
-
         String inputWorkloadGroupStr = jobProperties.get(WORKLOAD_GROUP);
         if (!StringUtils.isEmpty(inputWorkloadGroupStr)) {
             this.workloadGroupId = Env.getCurrentEnv().getWorkloadGroupMgr()
@@ -545,23 +507,19 @@ public class CreateRoutineLoadStmt extends DdlStmt implements NotFallbackInParse
         }
         timezone = TimeUtils.checkTimeZoneValidAndStandardize(jobProperties.getOrDefault(LoadStmt.TIMEZONE, timezone));
 
-        format = jobProperties.get(FORMAT);
-        if (format != null) {
-            if (format.equalsIgnoreCase("csv")) {
-                format = ""; // if it's not json, then it's mean csv and set empty
-            } else if (format.equalsIgnoreCase("json")) {
-                format = "json";
-                jsonPaths = jobProperties.getOrDefault(JSONPATHS, "");
-                jsonRoot = jobProperties.getOrDefault(JSONROOT, "");
-                stripOuterArray = Boolean.parseBoolean(jobProperties.getOrDefault(STRIP_OUTER_ARRAY, "false"));
-                numAsString = Boolean.parseBoolean(jobProperties.getOrDefault(NUM_AS_STRING, "false"));
-                fuzzyParse = Boolean.parseBoolean(jobProperties.getOrDefault(FUZZY_PARSE, "false"));
-            } else {
-                throw new UserException("Format type is invalid. format=`" + format + "`");
+        // check partial_update_new_key_behavior
+        if (jobProperties.containsKey(PARTIAL_UPDATE_NEW_KEY_POLICY)) {
+            if (!isPartialUpdate) {
+                throw new AnalysisException(
+                    PARTIAL_UPDATE_NEW_KEY_POLICY + " can only be set when partial_columns is true");
             }
-        } else {
-            format = "csv"; // default csv
+            String policy = jobProperties.get(PARTIAL_UPDATE_NEW_KEY_POLICY).toUpperCase();
+            if (!"APPEND".equals(policy) && !"ERROR".equals(policy)) {
+                throw new AnalysisException(
+                    PARTIAL_UPDATE_NEW_KEY_POLICY + " should be one of {'APPEND', 'ERROR'}, but found " + policy);
+            }
         }
+        fileFormatProperties.analyzeFileFormatProperties(jobProperties, false);
     }
 
     private void checkDataSourceProperties() throws UserException {

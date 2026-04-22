@@ -21,10 +21,7 @@ import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.cloud.proto.Cloud.ObjectStoreInfoPB;
 import org.apache.doris.cloud.security.SecurityChecker;
-import org.apache.doris.cloud.storage.RemoteBase;
-import org.apache.doris.cloud.storage.RemoteBase.ObjectInfo;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
@@ -32,18 +29,18 @@ import org.apache.doris.common.InternalErrorCode;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.common.util.TimeUtils;
-import org.apache.doris.datasource.property.constants.AzureProperties;
-import org.apache.doris.datasource.property.constants.S3Properties;
+import org.apache.doris.datasource.property.storage.ObjectStorageProperties;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.thrift.TFileType;
+import org.apache.doris.thrift.TPartialUpdateNewRowPolicy;
 
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -108,10 +105,6 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
     public static final String BOS_ACCESSKEY = "bos_accesskey";
     public static final String BOS_SECRET_ACCESSKEY = "bos_secret_accesskey";
 
-    // for S3 load check
-    public static final List<String> PROVIDERS =
-            new ArrayList<>(Arrays.asList("cos", "oss", "s3", "obs", "bos", "azure"));
-
     // mini load params
     public static final String KEY_IN_PARAM_COLUMNS = "columns";
     public static final String KEY_IN_PARAM_SET = "set";
@@ -142,6 +135,7 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
     public static final String KEY_SKIP_LINES = "skip_lines";
     public static final String KEY_TRIM_DOUBLE_QUOTES = "trim_double_quotes";
     public static final String PARTIAL_COLUMNS = "partial_columns";
+    public static final String PARTIAL_UPDATE_NEW_KEY_POLICY = "partial_update_new_key_behavior";
 
     public static final String KEY_COMMENT = "comment";
 
@@ -193,6 +187,12 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
                 @Override
                 public @Nullable Boolean apply(@Nullable String s) {
                     return Boolean.valueOf(s);
+                }
+            })
+            .put(PARTIAL_UPDATE_NEW_KEY_POLICY, new Function<String, TPartialUpdateNewRowPolicy>() {
+                @Override
+                public @Nullable TPartialUpdateNewRowPolicy apply(@Nullable String s) {
+                    return TPartialUpdateNewRowPolicy.valueOf(s.toUpperCase());
                 }
             })
             .put(TIMEZONE, new Function<String, String>() {
@@ -388,6 +388,16 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
             }
         }
 
+        // partial update new key policy
+        final String partialUpdateNewKeyPolicyProperty = properties.get(PARTIAL_UPDATE_NEW_KEY_POLICY);
+        if (partialUpdateNewKeyPolicyProperty != null) {
+            if (!partialUpdateNewKeyPolicyProperty.equalsIgnoreCase("append")
+                    && !partialUpdateNewKeyPolicyProperty.equalsIgnoreCase("error")) {
+                throw new DdlException(PARTIAL_UPDATE_NEW_KEY_POLICY + " should be one of [append, error], but found "
+                        + partialUpdateNewKeyPolicyProperty);
+            }
+        }
+
         // time zone
         final String timezone = properties.get(TIMEZONE);
         if (timezone != null) {
@@ -455,8 +465,6 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
                 for (int i = 0; i < dataDescription.getFilePaths().size(); i++) {
                     String location = brokerDesc.getFileLocation(dataDescription.getFilePaths().get(i));
                     dataDescription.getFilePaths().set(i, location);
-                    StorageBackend.checkPath(dataDescription.getFilePaths().get(i),
-                            brokerDesc.getStorageType(), "DATA INFILE must be specified.");
                     dataDescription.getFilePaths().set(i, dataDescription.getFilePaths().get(i));
                 }
             }
@@ -509,9 +517,7 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
         } else if (isMysqlLoad) {
             etlJobType = EtlJobType.LOCAL_FILE;
         } else {
-            // if cluster is null, use default hadoop cluster
-            // if cluster is not null, use this hadoop cluster
-            etlJobType = EtlJobType.HADOOP;
+            etlJobType = EtlJobType.UNKNOWN;
         }
 
         try {
@@ -521,31 +527,6 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
         }
 
         user = ConnectContext.get().getQualifiedUser();
-    }
-
-    private String getProviderFromEndpoint() {
-        Map<String, String> properties = brokerDesc.getProperties();
-        for (Map.Entry<String, String> entry : properties.entrySet()) {
-            if (entry.getKey().equalsIgnoreCase(S3Properties.PROVIDER)) {
-                // S3 Provider properties should be case insensitive.
-                return entry.getValue().toUpperCase();
-            }
-        }
-        return S3Properties.S3_PROVIDER;
-    }
-
-    private Pair<String, String> getBucketAndObjectFromPath(String filePath) throws UserException {
-        String[] parts = filePath.split("\\/\\/");
-        if (parts.length < 2) {
-            throw new UserException("Invalid file path format: " + filePath);
-        }
-
-        String[] bucketAndObject = parts[1].split("\\/", 2);
-        if (bucketAndObject.length < 2) {
-            throw new UserException("Cannot extract bucket and object from path: " + filePath);
-        }
-
-        return Pair.of(bucketAndObject[0], bucketAndObject[1]);
     }
 
     public String getComment() {
@@ -606,8 +587,13 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
     private void checkEndpoint(String endpoint) throws UserException {
         HttpURLConnection connection = null;
         try {
-            SecurityChecker.getInstance().startSSRFChecking(endpoint);
-            URL url = new URL(endpoint);
+            String urlStr = endpoint;
+            // Add default protocol if not specified
+            if (!endpoint.startsWith("http://") && !endpoint.startsWith("https://")) {
+                urlStr = "http://" + endpoint;
+            }
+            SecurityChecker.getInstance().startSSRFChecking(urlStr);
+            URL url = new URL(urlStr);
             connection = (HttpURLConnection) url.openConnection();
             connection.setConnectTimeout(10000);
             connection.connect();
@@ -617,7 +603,13 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
             if (e instanceof UserException) {
                 msg = ((UserException) e).getDetailMessage();
             } else {
-                msg = e.getMessage();
+                msg = String.format("%s: %s", e.getClass().getSimpleName(),
+                        e.getMessage() != null ? e.getMessage() : "Unknown error");
+                if (e.getCause() != null) {
+                    msg += String.format(" (Caused by: %s: %s)",
+                            e.getCause().getClass().getSimpleName(),
+                            e.getCause().getMessage() != null ? e.getCause().getMessage() : "Unknown cause");
+                }
             }
             throw new UserException(InternalErrorCode.GET_REMOTE_DATA_ERROR,
                     "Failed to access object storage, message=" + msg, e);
@@ -634,23 +626,24 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
     }
 
     public void checkS3Param() throws UserException {
-        Map<String, String> brokerDescProperties = brokerDesc.getProperties();
-        if (brokerDescProperties.containsKey(S3Properties.Env.ENDPOINT)
-                && brokerDescProperties.containsKey(S3Properties.Env.ACCESS_KEY)
-                && brokerDescProperties.containsKey(S3Properties.Env.SECRET_KEY)
-                && brokerDescProperties.containsKey(S3Properties.Env.REGION)) {
-            String endpoint = brokerDescProperties.get(S3Properties.Env.ENDPOINT);
-            checkWhiteList(endpoint);
-            // Add default protocol if not specified
-            if (!endpoint.startsWith("http://") && !endpoint.startsWith("https://")) {
-                endpoint = "http://" + endpoint;
-            }
-            brokerDescProperties.put(S3Properties.Env.ENDPOINT, endpoint);
-            if (AzureProperties.checkAzureProviderPropertyExist(brokerDescProperties)) {
-                return;
-            }
+        if (brokerDesc.getFileType() != null && brokerDesc.getFileType().equals(TFileType.FILE_S3)
+                && brokerDesc.getStorageProperties() instanceof ObjectStorageProperties) {
+            ObjectStorageProperties storageProperties = (ObjectStorageProperties) brokerDesc.getStorageProperties();
+            String endpoint = storageProperties.getEndpoint();
             checkEndpoint(endpoint);
-            checkAkSk();
+            checkWhiteList(endpoint);
+            List<String> filePaths = new ArrayList<>();
+            if (dataDescriptions != null && !dataDescriptions.isEmpty()) {
+                for (DataDescription dataDescription : dataDescriptions) {
+                    if (dataDescription.getFilePaths() != null) {
+                        for (String filePath : dataDescription.getFilePaths()) {
+                            if (filePath != null && !filePath.isEmpty()) {
+                                filePaths.add(filePath);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -663,51 +656,6 @@ public class LoadStmt extends DdlStmt implements NotFallbackInParser {
             throw new UserException("endpoint: " + endpoint
                     + " is not in s3 load endpoint white list: " + String.join(",", whiteList));
         }
-    }
-
-    private void checkAkSk() throws UserException {
-        RemoteBase remote = null;
-        ObjectInfo objectInfo = null;
-        String curFile = null;
-        try {
-            Map<String, String> brokerDescProperties = brokerDesc.getProperties();
-            String provider = getProviderFromEndpoint();
-            for (DataDescription dataDescription : dataDescriptions) {
-                for (String filePath : dataDescription.getFilePaths()) {
-                    curFile = filePath;
-                    Pair<String, String> pair = getBucketAndObjectFromPath(filePath);
-                    String bucket = pair.getLeft();
-                    String object = pair.getRight();
-                    objectInfo = new ObjectInfo(ObjectStoreInfoPB.Provider.valueOf(provider.toUpperCase()),
-                            brokerDescProperties.get(S3Properties.Env.ACCESS_KEY),
-                            brokerDescProperties.get(S3Properties.Env.SECRET_KEY),
-                            bucket, brokerDescProperties.get(S3Properties.Env.ENDPOINT),
-                            brokerDescProperties.get(S3Properties.Env.REGION), "");
-                    remote = RemoteBase.newInstance(objectInfo);
-                    // Verify read permissions by calling headObject() on the S3 object.
-                    // RemoteBase#headObject does not throw exception if key does not exist.
-                    remote.headObject(object);
-                    // Verify list permissions by calling listObjects() on the S3 bucket.
-                    remote.listObjects(null);
-                    remote.close();
-                }
-            }
-        } catch (Exception e) {
-            LOG.warn("Failed to access object storage, file={}, proto={}, err={}", curFile, objectInfo, e.toString());
-            String msg;
-            if (e instanceof UserException) {
-                msg = ((UserException) e).getDetailMessage();
-            } else {
-                msg = e.getMessage();
-            }
-            throw new UserException(InternalErrorCode.GET_REMOTE_DATA_ERROR,
-                    "Failed to access object storage, message=" + msg, e);
-        } finally {
-            if (remote != null) {
-                remote.close();
-            }
-        }
-
     }
 
     @Override

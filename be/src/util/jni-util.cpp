@@ -33,8 +33,8 @@
 #include <string>
 #include <vector>
 
+#include "absl/strings/substitute.h"
 #include "common/config.h"
-#include "gutil/strings/substitute.h"
 #include "util/doris_metrics.h"
 #include "util/jni_native_method.h"
 // #include "util/libjvm_loader.h"
@@ -101,6 +101,8 @@ const std::string GetKerb5ConfPath() {
     std::string libhdfs_opts = getenv("LIBHDFS_OPTS") ? getenv("LIBHDFS_OPTS") : "";
     CHECK(libhdfs_opts != "") << "LIBHDFS_OPTS is not set";
     libhdfs_opts += fmt::format(" {} ", GetKerb5ConfPath());
+    libhdfs_opts += fmt::format(" -Djdk.lang.processReaperUseDefaultStackSize={}",
+                                config::jdk_process_reaper_use_default_stack_size);
     setenv("LIBHDFS_OPTS", libhdfs_opts.c_str(), 1);
     LOG(INFO) << "set final LIBHDFS_OPTS: " << libhdfs_opts;
 }
@@ -118,6 +120,8 @@ const std::string GetKerb5ConfPath() {
                     GetDorisJNIClasspathOption(), fmt::format("-Xmx{}", "1g"),
                     fmt::format("-DlogPath={}/log/jni.log", getenv("DORIS_HOME")),
                     fmt::format("-Dsun.java.command={}", "DorisBE"), "-XX:-CriticalJNINatives",
+                    fmt::format("-Djdk.lang.processReaperUseDefaultStackSize={}",
+                                config::jdk_process_reaper_use_default_stack_size),
 #ifdef __APPLE__
                     // On macOS, we should disable MaxFDLimit, otherwise the RLIMIT_NOFILE
                     // will be assigned the minimum of OPEN_MAX (10240) and rlim_cur (See src/hotspot/os/bsd/os_bsd.cpp)
@@ -287,7 +291,7 @@ Status JniUtil::GetJniExceptionMsg(JNIEnv* env, bool log_stack, const string& pr
             env->CallStaticObjectMethod(jni_util_class(), throwable_to_string_id(), exc));
     if (env->ExceptionOccurred()) {
         env->ExceptionClear();
-        string oom_msg = strings::Substitute(oom_msg_template, "throwableToString");
+        string oom_msg = absl::Substitute(oom_msg_template, "throwableToString");
         LOG(WARNING) << oom_msg;
         return Status::InternalError(oom_msg);
     }
@@ -298,7 +302,7 @@ Status JniUtil::GetJniExceptionMsg(JNIEnv* env, bool log_stack, const string& pr
                 env->CallStaticObjectMethod(jni_util_class(), throwable_to_stack_trace_id(), exc));
         if (env->ExceptionOccurred()) {
             env->ExceptionClear();
-            string oom_msg = strings::Substitute(oom_msg_template, "throwableToStackTrace");
+            string oom_msg = absl::Substitute(oom_msg_template, "throwableToStackTrace");
             LOG(WARNING) << oom_msg;
             return Status::RuntimeError(oom_msg);
         }
@@ -332,6 +336,7 @@ Status JniUtil::convert_to_java_map(JNIEnv* env, const std::map<std::string, std
     }
     env->DeleteLocalRef(hashmap_class);
     RETURN_IF_ERROR(LocalToGlobalRef(env, hashmap_local_object, hashmap_object));
+    env->DeleteLocalRef(hashmap_local_object);
     return Status::OK();
 }
 

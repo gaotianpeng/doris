@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 #include "common/status.h"
@@ -95,6 +96,11 @@ protected:
     // Update the counters before closing this scanner
     virtual void _collect_profile_before_close();
 
+    // Check if scanner is already closed, if not, mark it as closed.
+    // Returns true if the scanner was successfully marked as closed (first time).
+    // Returns false if the scanner was already closed.
+    bool _try_close();
+
     // Filter the output block finally.
     Status _filter_output_block(Block* block);
 
@@ -127,6 +133,10 @@ public:
     int64_t get_scanner_wait_worker_timer() const { return _scanner_wait_worker_timer; }
 
     void update_scan_cpu_timer();
+
+    // Some counters need to be updated realtime, for example, workload group policy need
+    // scan bytes to cancel the query exceed limit.
+    virtual void update_realtime_counters() {}
 
     RuntimeState* runtime_state() { return _state; }
 
@@ -183,7 +193,7 @@ protected:
     Block _input_block;
 
     bool _is_open = false;
-    bool _is_closed = false;
+    std::atomic<bool> _is_closed {false};
     bool _need_to_close = false;
     Status _status;
 

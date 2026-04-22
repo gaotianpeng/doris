@@ -24,7 +24,6 @@ suite("test_database_management_auth","p0,auth_call") {
     String pwd = 'C123_567p'
     String dbName = 'test_database_management_auth_db'
 
-
     try_sql("DROP USER ${user}")
     try_sql """drop database if exists ${dbName}"""
 

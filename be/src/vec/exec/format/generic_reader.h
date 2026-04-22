@@ -19,13 +19,15 @@
 
 #include <gen_cpp/PlanNodes_types.h>
 
-#include "common/factory_creator.h"
 #include "common/status.h"
+#include "io/fs/file_meta_cache.h"
+#include "runtime/descriptors.h"
 #include "runtime/types.h"
 #include "util/profile_collector.h"
-#include "vec/exprs/vexpr_context.h"
+#include "vec/exprs/vexpr_fwd.h"
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
 
 class Block;
 // This a reader interface for all file readers.
@@ -45,11 +47,17 @@ public:
         return Status::NotSupported("get_columns is not implemented");
     }
 
+    // This method is responsible for initializing the resource for parsing schema.
+    // It will be called before `get_parsed_schema`.
+    virtual Status init_schema_reader() {
+        return Status::NotSupported("init_schema_reader is not implemented for this reader.");
+    }
+    // `col_types` is always nullable to process illegal values.
     virtual Status get_parsed_schema(std::vector<std::string>* col_names,
                                      std::vector<TypeDescriptor>* col_types) {
         return Status::NotSupported("get_parsed_schema is not implemented for this reader.");
     }
-    virtual ~GenericReader() = default;
+    ~GenericReader() override = default;
 
     /// If the underlying FileReader has filled the partition&missing columns,
     /// The FileScanner does not need to fill
@@ -67,12 +75,22 @@ public:
 
     virtual Status close() { return Status::OK(); }
 
+    /// The reader is responsible for counting the number of rows read,
+    /// because some readers, such as parquet/orc,
+    /// can skip some pages/rowgroups through indexes.
+    virtual bool count_read_rows() { return false; }
+
 protected:
     const size_t _MIN_BATCH_SIZE = 4064; // 4094 - 32(padding)
 
     /// Whether the underlying FileReader has filled the partition&missing columns
     bool _fill_all_columns = false;
-    TPushAggOp::type _push_down_agg_type;
+    TPushAggOp::type _push_down_agg_type {};
+
+    // Cache to save some common part such as file footer.
+    // Maybe null if not used
+    FileMetaCache* _meta_cache = nullptr;
 };
 
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

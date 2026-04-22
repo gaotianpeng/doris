@@ -20,6 +20,7 @@ suite("test_cte_subquery_many") {
         drop database if exists test_cte_subquery_many_db;
         create database test_cte_subquery_many_db;
         use test_cte_subquery_many_db;
+
         CREATE TABLE IF NOT EXISTS tbl_1 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -33,6 +34,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_2 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -46,6 +49,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_3 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -59,6 +64,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_4 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -72,6 +79,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_5 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -85,6 +94,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_6 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -98,6 +109,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_7 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -111,6 +124,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_8 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -124,6 +139,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_9 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -137,6 +154,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_10 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -150,6 +169,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_11 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -163,6 +184,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_12 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -176,6 +199,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_13 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -189,6 +214,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_14 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -202,6 +229,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_15 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -215,6 +244,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_16 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -228,6 +259,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_17 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -241,6 +274,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_18 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -254,6 +289,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_19 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -267,6 +304,8 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         CREATE TABLE IF NOT EXISTS tbl_20 (
             id BIGINT,
             col1 VARCHAR(255),
@@ -280,25 +319,46 @@ suite("test_cte_subquery_many") {
         DUPLICATE KEY(id)
         DISTRIBUTED BY HASH(id) BUCKETS 10
         PROPERTIES ("replication_num" = "1");
+
+
         INSERT INTO tbl_1 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_2 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_3 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_4 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_5 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_6 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_7 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_8 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_9 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_10 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_11 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_12 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_13 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_14 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_15 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_16 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_17 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_18 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_19 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
+
         INSERT INTO tbl_20 VALUES (1, 'data1-1', 10, 15.0, '2023-01-01', TRUE, 1, 'key1');
     """
     qt_sql """

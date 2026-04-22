@@ -374,8 +374,8 @@ void Transaction::atomic_set_ver_key(std::string_view key_prefix, std::string_vi
     ++num_put_keys_;
 
     kv_->put_bytes_ += k.size() + val.size();
-    put_bytes_ += key_prefix.size() + val.size();
-    approximate_bytes_ += key_prefix.size() + val.size();
+    put_bytes_ += k.size() + val.size();
+    approximate_bytes_ += k.size() + val.size();
 }
 
 void Transaction::atomic_set_ver_value(std::string_view key, std::string_view value) {
@@ -397,10 +397,10 @@ void Transaction::atomic_add(std::string_view key, int64_t to_add) {
     std::string v(sizeof(to_add), '\0');
     memcpy(v.data(), &to_add, sizeof(to_add));
     std::lock_guard<std::mutex> l(lock_);
+    kv_->put_count_++;
     op_list_.emplace_back(ModifyOpType::ATOMIC_ADD, std::move(k), std::move(v));
 
     ++num_put_keys_;
-    kv_->put_count_++;
     put_bytes_ += key.size() + 8;
     kv_->put_bytes_ += key.size() + 8;
     approximate_bytes_ += key.size() + 8;
@@ -417,6 +417,7 @@ bool Transaction::decode_atomic_int(std::string_view data, int64_t* val) {
 
 void Transaction::remove(std::string_view key) {
     std::lock_guard<std::mutex> l(lock_);
+    kv_->del_count_++;
     std::string k(key.data(), key.size());
     writes_.erase(k);
     std::string end_key = k;
@@ -424,7 +425,6 @@ void Transaction::remove(std::string_view key) {
     remove_ranges_.emplace_back(k, end_key);
     op_list_.emplace_back(ModifyOpType::REMOVE, k, "");
 
-    kv_->del_count_++;
     ++num_del_keys_;
     kv_->del_bytes_ += key.size();
     delete_bytes_ += key.size();

@@ -16,6 +16,8 @@
 // under the License.
 suite("eliminate_group_by_key_by_uniform") {
     sql "set enable_nereids_rules = 'ELIMINATE_GROUP_BY_KEY_BY_UNIFORM'"
+    sql "set runtime_filter_mode=OFF"
+    sql "SET ignore_shape_nodes='PhysicalDistribute,PhysicalProject'"
     sql "drop table if exists eli_gbk_by_uniform_t"
     sql """create table eli_gbk_by_uniform_t(a int null, b int not null, c varchar(10) null, d date, dt datetime)
     distributed by hash(a) properties("replication_num"="1");
@@ -221,4 +223,110 @@ suite("eliminate_group_by_key_by_uniform") {
 
     //grouping
     qt_grouping "select k, k3 from (select 1 as k, a k3, sum(b) as sum_k1 from  test1  group by cube(k,a)) t group by k,k3 order by 1,2"
+
+    // test agg to limit
+    qt_to_limit_project_uniform "select 1 as c1 from eli_gbk_by_uniform_t group by c1"
+    qt_to_limit_predicate_uniform "select a from eli_gbk_by_uniform_t where a=1 group by a"
+    qt_to_limit_project_uniform_has_upper_ref "select c1+1 from (select 1 as c1 from eli_gbk_by_uniform_t group by c1) t"
+    qt_to_limit_predicate_uniform_has_upper_ref "select a+1 from (select a from eli_gbk_by_uniform_t where a=1 group by a) t"
+    qt_to_limit_join_predicate "select t2.b from test1 t1 inner join (select * from test2 where b=105)  t2 on t1.a=t2.a group by t2.b order by 1;"
+    qt_to_limit_join_project "select 1 as c1 from test1 t1 inner join (select * from test2 where b=105)  t2 on t1.a=t2.a group by c1 order by 1;"
+    qt_to_limit_multi_group_by "select 1 as c1,a from eli_gbk_by_uniform_t where a=1 group by c1,a"
+    qt_to_limit_multi_group_by_one_col_in_project "select 2 as c1 from eli_gbk_by_uniform_t where a=1 group by c1,a"
+
+    qt_to_limit_join_project_shape "explain shape plan select 1 as c1 from test1 t1 inner join (select * from test2 where b=105)  t2 on t1.a=t2.a group by c1;"
+    qt_to_limit_project_uniform_shape "explain shape plan select 1 as c1 from eli_gbk_by_uniform_t group by c1"
+    qt_to_limit_multi_group_by_shape "explain shape plan select 2 as c1 from eli_gbk_by_uniform_t where a=1 group by c1,a"
+
+    // test when has repeat above agg
+
+    sql """drop table if exists test_event"""
+    sql """
+    CREATE TABLE `test_event` (
+    `@dt` DATETIME NOT NULL COMMENT '',
+    `@event_name` VARCHAR(255) NOT NULL COMMENT '',
+    `@user_id` VARCHAR(100) NOT NULL COMMENT '',
+    `@event_time` DATETIME NOT NULL COMMENT '',
+    `@event_property_1` VARCHAR(255) NULL
+     )
+     ENGINE=OLAP
+     DUPLICATE KEY(`@dt`, `@event_name`, `@user_id`)
+     COMMENT ''
+     PARTITION BY RANGE(`@dt`)
+     (
+         PARTITION p202509 VALUES [('2025-09-01 00:00:00'), ('2025-10-05 00:00:00'))
+     )
+     DISTRIBUTED BY HASH(`@user_id`) BUCKETS 10
+     PROPERTIES (
+         "replication_num" = "1",
+         "dynamic_partition.enable" = "true",
+         "dynamic_partition.time_unit" = "MONTH",
+         "dynamic_partition.start" = "-2147483648",
+         "dynamic_partition.end" = "3",
+         "dynamic_partition.prefix" = "p",
+         "dynamic_partition.buckets" = "10"
+     );
+    """
+
+    sql """
+    INSERT INTO `test_event` (`@dt`, `@event_name`, `@user_id`, `@event_time`, `@event_property_1`)
+    VALUES
+    ('2025-09-03 10:00:00', 'shop_buy', 'user_A', '2025-09-03 10:00:00', 'prop_A1'),
+    ('2025-09-03 10:01:00', 'shop_buy', 'user_A', '2025-09-03 10:01:00', 'prop_A2'),
+    ('2025-09-04 15:30:00', 'shop_buy', 'user_A', '2025-09-04 15:30:00', 'prop_A3'),
+    ('2025-09-05 08:00:00', 'shop_buy', 'user_B', '2025-09-05 08:00:00', 'prop_B1'),
+    ('2025-09-05 08:05:00', 'shop_buy', 'user_B', '2025-09-05 08:05:00', 'prop_B2'),
+    ('2025-09-09 23:59:59', 'shop_buy', 'user_C', '2025-09-09 23:59:59', 'prop_C1'),
+    ('2025-10-01 00:00:00', 'shop_buy', 'user_D', '2025-10-01 00:00:00', 'prop_D1');
+    """
+
+    sql """
+    SELECT
+  CASE WHEN GROUPING(event_date) = 1 THEN '(TOTAL)' ELSE CAST(event_date AS VARCHAR) END AS event_date,
+  user_id,
+  MAX(conversion_level) AS conversion_level,
+  CASE WHEN GROUPING(event_name_group) = 1 THEN '(TOTAL)' ELSE event_name_group END AS event_name_group
+FROM
+  (
+    SELECT
+      src.event_date,
+      src.user_id,
+      WINDOW_FUNNEL(
+        3600 * 24 * 1,
+        'default',
+        src.event_time,
+        src.event_name = 'shop_buy',
+        src.event_name = 'shop_buy'
+      ) AS conversion_level,
+      src.event_name_group
+    FROM
+      (
+        SELECT
+          CAST(etb.`@dt` AS DATE) AS event_date,
+          etb.`@event_name` AS event_name,
+          etb.`@event_time` AS event_time,
+          etb.`@event_name` AS event_name_group,
+          etb.`@user_id` AS user_id
+        FROM
+          `test_event` AS etb
+        WHERE
+          etb.`@dt` between '2025-09-03 02:00:00' AND '2025-09-10 01:59:59'
+          AND etb.`@event_name` = 'shop_buy'
+          AND etb.`@user_id` IS NOT NULL
+          AND etb.`@user_id` > '0'
+      ) AS src
+    GROUP BY
+      src.event_date,
+      src.user_id,
+      src.event_name_group
+  ) AS fwt
+GROUP BY
+  GROUPING SETS (
+    (user_id),
+    (user_id, event_date),
+    (user_id, event_name_group),
+    (user_id, event_date, event_name_group)
+  );
+
+    """
 }

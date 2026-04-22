@@ -27,13 +27,17 @@ import org.apache.doris.nereids.exceptions.ParseException;
 import org.apache.doris.nereids.glue.LogicalPlanAdapter;
 import org.apache.doris.nereids.trees.expressions.Cast;
 import org.apache.doris.nereids.trees.expressions.literal.DecimalLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.StringLikeLiteral;
 import org.apache.doris.nereids.trees.plans.DistributeType;
 import org.apache.doris.nereids.trees.plans.JoinType;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PlanType;
+import org.apache.doris.nereids.trees.plans.commands.CreateTableCommand;
+import org.apache.doris.nereids.trees.plans.commands.CreateViewCommand;
 import org.apache.doris.nereids.trees.plans.commands.ExplainCommand;
 import org.apache.doris.nereids.trees.plans.commands.ExplainCommand.ExplainLevel;
 import org.apache.doris.nereids.trees.plans.commands.ReplayCommand;
+import org.apache.doris.nereids.trees.plans.commands.UnsupportedCommand;
 import org.apache.doris.nereids.trees.plans.logical.LogicalAggregate;
 import org.apache.doris.nereids.trees.plans.logical.LogicalCTE;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
@@ -46,10 +50,13 @@ import org.apache.doris.nereids.types.DateType;
 import org.apache.doris.nereids.types.DecimalV2Type;
 import org.apache.doris.nereids.types.DecimalV3Type;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.SqlModeHelper;
 import org.apache.doris.qe.StmtExecutor;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Optional;
@@ -501,6 +508,12 @@ public class NereidsParserTest extends ParserTestBase {
         sql = "set session a = default";
         nereidsParser.parseSingle(sql);
 
+        sql = "set a = on";
+        nereidsParser.parseSingle(sql);
+
+        sql = "set a = all";
+        nereidsParser.parseSingle(sql);
+
         sql = "set @@a = 10";
         nereidsParser.parseSingle(sql);
 
@@ -700,38 +713,59 @@ public class NereidsParserTest extends ParserTestBase {
     }
 
     @Test
-    public void testLambdaSelect() {
-        parsePlan("SELECT  x -> x + 1")
-                .assertThrowsExactly(ParseException.class)
-                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+    public void testNoBackSlashEscapes() {
+        testNoBackSlashEscapes("''", "", "");
+        testNoBackSlashEscapes("\"\"", "", "");
+
+        testNoBackSlashEscapes("''''", "'", "'");
+        testNoBackSlashEscapes("\"\"\"\"", "\"", "\"");
+
+        testNoBackSlashEscapes("\"\\\\n\"", "\\\\n", "\\n");
+        testNoBackSlashEscapes("\"\\t\"", "\\t", "\t");
+
+        testNoBackSlashEscapes("'\\'''", "\\'", null);
+        testNoBackSlashEscapes("'\\''", null, "'");
+        testNoBackSlashEscapes("'\\\\''", null, null);
+
+        testNoBackSlashEscapes("'\\\"\"'", "\\\"\"", "\"\"");
+        testNoBackSlashEscapes("'\\\"'", "\\\"", "\"");
+        testNoBackSlashEscapes("'\\\\\"'", "\\\\\"", "\\\"");
+
+        testNoBackSlashEscapes("\"\\''\"", "\\''", "''");
+        testNoBackSlashEscapes("\"\\'\"", "\\'", "'");
+        testNoBackSlashEscapes("\"\\\\'\"", "\\\\'", "\\'");
+
+        testNoBackSlashEscapes("\"\\\"\"\"", "\\\"", null);
+        testNoBackSlashEscapes("\"\\\"\"", null, "\"");
+        testNoBackSlashEscapes("\"\\\\\"\"", null, null);
     }
 
-    @Test
-    public void testLambdaGroupBy() {
-        parsePlan("SELECT 1 from ( select 2 ) t group by x -> x + 1")
-                .assertThrowsExactly(ParseException.class)
-                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
-    }
+    private void testNoBackSlashEscapes(String sql, String onResult, String offResult) {
+        NereidsParser nereidsParser = new NereidsParser();
 
-    @Test
-    public void testLambdaSort() {
-        parsePlan("SELECT 1 from ( select 2 ) t order by x -> x + 1")
-                .assertThrowsExactly(ParseException.class)
-                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
-    }
+        // test on
+        try (MockedStatic<SqlModeHelper> helperMockedStatic = Mockito.mockStatic(SqlModeHelper.class)) {
+            helperMockedStatic.when(SqlModeHelper::hasNoBackSlashEscapes).thenReturn(true);
+            if (onResult == null) {
+                Assertions.assertThrowsExactly(ParseException.class, () -> nereidsParser.parseExpression(sql),
+                        "should failed when NO_BACKSLASH_ESCAPES = 1: " + sql);
+            } else {
+                Assertions.assertEquals(onResult,
+                        ((StringLikeLiteral) nereidsParser.parseExpression(sql)).getStringValue());
+            }
+        }
 
-    @Test
-    public void testLambdaHaving() {
-        parsePlan("SELECT 1 from ( select 2 ) t having x -> x + 1")
-                .assertThrowsExactly(ParseException.class)
-                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
-    }
-
-    @Test
-    public void testLambdaJoin() {
-        parsePlan("SELECT 1 from ( select 2 as a1 ) t1 join ( select 2 as a2 ) as t2 on x -> x + 1 = t1.a1")
-                .assertThrowsExactly(ParseException.class)
-                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+        // test off
+        try (MockedStatic<SqlModeHelper> helperMockedStatic = Mockito.mockStatic(SqlModeHelper.class)) {
+            helperMockedStatic.when(SqlModeHelper::hasNoBackSlashEscapes).thenReturn(false);
+            if (offResult == null) {
+                Assertions.assertThrowsExactly(ParseException.class, () -> nereidsParser.parseExpression(sql),
+                        "should failed when NO_BACKSLASH_ESCAPES = 0: " + sql);
+            } else {
+                Assertions.assertEquals(offResult,
+                        ((StringLikeLiteral) nereidsParser.parseExpression(sql)).getStringValue());
+            }
+        }
     }
 
     private void checkQueryTopPlanClass(String sql, NereidsParser parser, Class<?> clazz) {
@@ -743,7 +777,6 @@ public class NereidsParserTest extends ParserTestBase {
         }
     }
 
-    @Test
     public void testExpressionWithOrder() {
         NereidsParser nereidsParser = new NereidsParser();
         checkQueryTopPlanClass("SELECT a, b, sum(c) from test group by a, b DESC",
@@ -784,5 +817,83 @@ public class NereidsParserTest extends ParserTestBase {
                 nereidsParser, LogicalAggregate.class);
         checkQueryTopPlanClass("SELECT a, b, sum(c) from test group by a, b WITH ROLLUP",
                 nereidsParser, LogicalRepeat.class);
+    }
+
+    @Test
+    public void testLambdaSelect() {
+        parsePlan("SELECT  x -> x + 1")
+                .assertThrowsExactly(ParseException.class)
+                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+    }
+
+    @Test
+    public void testLambdaGroupBy() {
+        parsePlan("SELECT 1 from ( select 2 ) t group by x -> x + 1")
+                .assertThrowsExactly(ParseException.class)
+                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+    }
+
+    @Test
+    public void testLambdaSort() {
+        parsePlan("SELECT 1 from ( select 2 ) t order by x -> x + 1")
+                .assertThrowsExactly(ParseException.class)
+                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+    }
+
+    @Test
+    public void testLambdaHaving() {
+        parsePlan("SELECT 1 from ( select 2 ) t having x -> x + 1")
+                .assertThrowsExactly(ParseException.class)
+                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+    }
+
+    @Test
+    public void testLambdaJoin() {
+        parsePlan("SELECT 1 from ( select 2 as a1 ) t1 join ( select 2 as a2 ) as t2 on x -> x + 1 = t1.a1")
+                .assertThrowsExactly(ParseException.class)
+                .assertMessageContains("mismatched input '->' expecting {<EOF>, ';'}");
+    }
+
+    @Test
+    public void testCtasWithoutAs() {
+        NereidsParser parser = new NereidsParser();
+        String sql = "CREATE TABLE t1 SELECT * FROM t2";
+        LogicalPlan logicalPlan = parser.parseSingle(sql);
+        Assertions.assertInstanceOf(CreateTableCommand.class, logicalPlan);
+        CreateTableCommand createTableCommand = (CreateTableCommand) logicalPlan;
+        Assertions.assertTrue(createTableCommand.getCtasQuery().isPresent());
+    }
+
+    @Test
+    public void testCreateViewWithoutAs() {
+        NereidsParser parser = new NereidsParser();
+        String sql = "CREATE VIEW t1 SELECT * FROM t2";
+        LogicalPlan logicalPlan = parser.parseSingle(sql);
+        Assertions.assertInstanceOf(CreateViewCommand.class, logicalPlan);
+    }
+
+    @Test
+    public void testCreateMvWithoutAs() {
+        NereidsParser parser = new NereidsParser();
+        String sql = "CREATE MATERIALIZED VIEW t1 SELECT * FROM t2";
+        LogicalPlan logicalPlan = parser.parseSingle(sql);
+        Assertions.assertInstanceOf(UnsupportedCommand.class, logicalPlan);
+    }
+
+    @Test
+    public void testAdminRotateTdeRootKey() {
+        NereidsParser nereidsParser = new NereidsParser();
+        String sql = "admin rotate tde root key";
+        nereidsParser.parseSingle(sql);
+
+        sql = "admin rotate tde root key properties(\"k\" = \"v\")";
+        nereidsParser.parseSingle(sql);
+
+        sql = "admin rotate tde root key properties(\"k0\" = \"v0\", \"k1\" = \"v1\")";
+        nereidsParser.parseSingle(sql);
+
+        parsePlan("admin rotate tde root key properties()")
+                .assertThrowsExactly(ParseException.class)
+                .assertMessageContains("mismatched input ')' expecting");
     }
 }

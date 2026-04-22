@@ -273,8 +273,8 @@ public class DateLiteral extends Literal {
     }
 
     /** parseDateLiteral */
-    public static Result<DateLiteral, AnalysisException> parseDateLiteral(String s) {
-        Result<TemporalAccessor, AnalysisException> parseResult = parseDateTime(s);
+    public static Result<DateLiteral, AnalysisException> parseDateLiteral(String s, boolean isV2) {
+        Result<TemporalAccessor, ? extends Exception> parseResult = parseDateTime(s);
         if (parseResult.isError()) {
             return parseResult.cast();
         }
@@ -286,18 +286,29 @@ public class DateLiteral extends Literal {
         if (checkDatetime(dateTime) || checkRange(year, month, day) || checkDate(year, month, day)) {
             return Result.err(() -> new AnalysisException("date/datetime literal [" + s + "] is out of range"));
         }
-        return Result.ok(new DateLiteral(year, month, day));
+        if (isV2) {
+            return Result.ok(new DateV2Literal(year, month, day));
+        } else {
+            return Result.ok(new DateLiteral(year, month, day));
+        }
     }
 
     /** parseDateTime */
-    public static Result<TemporalAccessor, AnalysisException> parseDateTime(String s) {
+    public static Result<TemporalAccessor, ? extends Exception> parseDateTime(String s) {
         String originalString = s;
         try {
             // fast parse '2022-01-01'
-            if (s.length() == 10 && s.charAt(4) == '-' && s.charAt(7) == '-') {
-                TemporalAccessor date = fastParseDate(s);
-                if (date != null) {
-                    return Result.ok(date);
+            if ((s.length() == 10 || s.length() == 19) && s.charAt(4) == '-' && s.charAt(7) == '-') {
+                if (s.length() == 10) {
+                    TemporalAccessor date = fastParseDate(s);
+                    if (date != null) {
+                        return Result.ok(date);
+                    }
+                } else if (s.charAt(10) == ' ' && s.charAt(13) == ':' && s.charAt(16) == ':') {
+                    TemporalAccessor date = fastParseDateTime(s);
+                    if (date != null) {
+                        return Result.ok(date);
+                    }
                 }
             }
 
@@ -565,6 +576,21 @@ public class DateLiteral extends Literal {
         Integer day = readNextInt(date, 8, 2);
         if (year != null && month != null && day != null) {
             return LocalDate.of(year, month, day);
+        } else {
+            return null;
+        }
+    }
+
+    private static TemporalAccessor fastParseDateTime(String date) {
+        Integer year = readNextInt(date, 0, 4);
+        Integer month = readNextInt(date, 5, 2);
+        Integer day = readNextInt(date, 8, 2);
+        Integer hour = readNextInt(date, 11, 2);
+        Integer minute = readNextInt(date, 14, 2);
+        Integer second = readNextInt(date, 17, 2);
+
+        if (year != null && month != null && day != null && hour != null && minute != null && second != null) {
+            return LocalDateTime.of(year, month, day, hour, minute, second);
         } else {
             return null;
         }

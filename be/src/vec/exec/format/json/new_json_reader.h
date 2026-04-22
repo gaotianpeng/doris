@@ -23,11 +23,10 @@
 #include <rapidjson/rapidjson.h>
 #include <simdjson/common_defs.h>
 #include <simdjson/simdjson.h> // IWYU pragma: keep
-#include <stddef.h>
-#include <stdint.h>
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -43,19 +42,13 @@
 #include "vec/common/string_ref.h"
 #include "vec/core/types.h"
 #include "vec/exec/format/generic_reader.h"
-#include "vec/json/json_parser.h"
-#include "vec/json/simd_json_parser.h"
 
-namespace simdjson {
-namespace fallback {
-namespace ondemand {
+namespace simdjson::fallback::ondemand {
 class object;
-} // namespace ondemand
-} // namespace fallback
-} // namespace simdjson
+} // namespace simdjson::fallback::ondemand
 
 namespace doris {
-
+#include "common/compile_check_begin.h"
 class SlotDescriptor;
 class RuntimeState;
 class TFileRangeDesc;
@@ -93,6 +86,7 @@ public:
     Status get_next_block(Block* block, size_t* read_rows, bool* eof) override;
     Status get_columns(std::unordered_map<std::string, TypeDescriptor>* name_to_type,
                        std::unordered_set<std::string>* missing_cols) override;
+    Status init_schema_reader() override;
     Status get_parsed_schema(std::vector<std::string>* col_names,
                              std::vector<TypeDescriptor>* col_types) override;
 
@@ -183,6 +177,7 @@ private:
     Status _simdjson_set_column_value(simdjson::ondemand::object* value, Block& block,
                                       const std::vector<SlotDescriptor*>& slot_descs, bool* valid);
 
+    template <bool use_string_cache>
     Status _simdjson_write_data_to_column(simdjson::ondemand::value& value,
                                           const TypeDescriptor& type_desc,
                                           vectorized::IColumn* column_ptr,
@@ -208,6 +203,14 @@ private:
     Status _fill_missing_column(SlotDescriptor* slot_desc, DataTypeSerDeSPtr serde,
                                 vectorized::IColumn* column_ptr, bool* valid);
 
+    // fe will add skip_bitmap_col to _file_slot_descs iff the target olap table has skip_bitmap_col
+    // and the current load is a flexible partial update
+    // flexible partial update can not be used when user specify jsonpaths, so we just fill the skip bitmap
+    // in `_simdjson_handle_simple_json` and `_vhandle_simple_json` (which will be used when jsonpaths is not specified)
+    bool _should_process_skip_bitmap_col() const { return skip_bitmap_col_idx != -1; }
+    void _append_empty_skip_bitmap_value(Block& block, size_t cur_row_count);
+    void _set_skip_bitmap_mark(SlotDescriptor* slot_desc, IColumn* column_ptr, Block& block,
+                               size_t cur_row_count, bool* valid);
     RuntimeState* _state = nullptr;
     RuntimeProfile* _profile = nullptr;
     ScannerCounter* _counter = nullptr;
@@ -227,10 +230,10 @@ private:
     bool _skip_first_line;
 
     std::string _line_delimiter;
-    int _line_delimiter_length;
+    size_t _line_delimiter_length;
 
-    int _next_row;
-    int _total_rows;
+    uint32_t _next_row;
+    size_t _total_rows;
 
     std::string _jsonpaths;
     std::string _json_root;
@@ -260,9 +263,7 @@ private:
 
     io::IOContext* _io_ctx = nullptr;
 
-    RuntimeProfile::Counter* _bytes_read_counter = nullptr;
     RuntimeProfile::Counter* _read_timer = nullptr;
-    RuntimeProfile::Counter* _file_read_timer = nullptr;
 
     // ======SIMD JSON======
     // name mapping
@@ -292,6 +293,26 @@ private:
     // column to default value string map
     std::unordered_map<std::string, std::string> _col_default_value_map;
 
+    // From document of simdjson:
+    // ```
+    //   Important: a value should be consumed once. Calling get_string() twice on the same value is an error.
+    // ```
+    // We should cache the string_views to avoid multiple get_string() calls.
+    struct StringViewHash {
+        size_t operator()(const std::string_view& str) const {
+            return std::hash<int64_t>()(reinterpret_cast<int64_t>(str.data()));
+        }
+    };
+    struct StringViewEqual {
+        bool operator()(const std::string_view& lhs, const std::string_view& rhs) const {
+            return lhs.data() == rhs.data() && lhs.size() == rhs.size();
+        }
+    };
+    std::unordered_map<std::string_view, std::string_view, StringViewHash, StringViewEqual>
+            _cached_string_values;
+
+    int32_t skip_bitmap_col_idx {-1};
+
     //Used to indicate whether it is a stream load. When loading, only data will be inserted into columnString.
     //If an illegal value is encountered during the load process, `_append_error_msg` should be called
     //instead of directly returning `Status::DataQualityError`
@@ -314,4 +335,5 @@ private:
 };
 
 } // namespace vectorized
+#include "common/compile_check_end.h"
 } // namespace doris

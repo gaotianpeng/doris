@@ -22,6 +22,11 @@ include "Types.thrift"
 include "Exprs.thrift"
 include "Partitions.thrift"
 
+enum TPatternType {
+  MATCH_NAME = 1,
+  MATCH_NAME_GLOB = 2
+}
+
 struct TColumn {
     1: required string column_name
     2: required Types.TColumnType column_type
@@ -43,6 +48,10 @@ struct TColumn {
     18: optional bool is_auto_increment = false;
     19: optional i32 cluster_key_id = -1
     20: optional i32 be_exec_version = -1
+    21: optional TPatternType pattern_type
+    22: optional bool variant_enable_typed_paths_to_sparse = false;
+    23: optional bool is_on_update_current_timestamp = false
+    24: optional i32 variant_max_sparse_column_statistics_size = 10000
 }
 
 struct TSlotDescriptor {
@@ -138,11 +147,12 @@ enum TSchemaTableType {
     SCH_WORKLOAD_GROUP_RESOURCE_USAGE = 49,
     SCH_TABLE_PROPERTIES = 50,
     SCH_FILE_CACHE_STATISTICS = 51,
-    SCH_CATALOG_META_CACHE_STATISTICS = 52;
-    // consistent with the master
+    SCH_CATALOG_META_CACHE_STATISTICS = 52,
+    SCH_BACKEND_KERBEROS_TICKET_CACHE = 53,
     SCH_ROUTINE_LOAD_JOBS = 54,
     SCH_BACKEND_CONFIGURATION=55,
-    SCH_BACKEND_TABLETS = 56;
+    SCH_BACKEND_TABLETS = 56,
+    SCH_ENCRYPTION_KEYS = 58;
 }
 
 enum THdfsCompression {
@@ -160,6 +170,11 @@ enum TIndexType {
   INVERTED = 1,
   BLOOMFILTER = 2,
   NGRAM_BF = 3
+}
+
+enum TPartialUpdateNewRowPolicy {
+    APPEND = 0,
+    ERROR = 1
 }
 
 // Mapping from names defined by Avro to the enum.
@@ -198,6 +213,8 @@ struct TOlapTablePartition {
     10: optional bool is_default_partition;
     // only used in random distribution scenario to make data distributed even 
     11: optional i64 load_tablet_idx
+    12: optional i32 total_replica_num
+    13: optional i32 load_required_replica_num
 }
 
 struct TOlapTablePartitionParam {
@@ -254,12 +271,15 @@ struct TOlapTableSchemaParam {
     5: required TTupleDescriptor tuple_desc
     6: required list<TOlapTableIndexSchema> indexes
     7: optional bool is_dynamic_schema // deprecated
-    8: optional bool is_partial_update
+    8: optional bool is_partial_update // deprecated, use unique_key_update_mode
     9: optional list<string> partial_update_input_columns
     10: optional bool is_strict_mode = false
     11: optional string auto_increment_column
     12: optional i32 auto_increment_column_unique_id = -1
     13: optional Types.TInvertedIndexFileStorageFormat inverted_index_file_storage_format = Types.TInvertedIndexFileStorageFormat.V1
+    14: optional Types.TUniqueKeyUpdateMode unique_key_update_mode = Types.TUniqueKeyUpdateMode.UPSERT
+    15: optional i32 sequence_map_col_unique_id = -1
+    16: optional TPartialUpdateNewRowPolicy partial_update_new_key_policy
 }
 
 struct TTabletLocation {

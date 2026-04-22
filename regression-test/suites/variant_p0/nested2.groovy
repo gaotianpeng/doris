@@ -68,6 +68,7 @@ suite("variant_nested_type_conflict", "p0"){
                 """
             exception "Nesting of array in Nested array within variant subcolumns is currently not supported."
         }
+
         // insert batch different structure in same path
         test {
             sql """
@@ -86,7 +87,7 @@ suite("variant_nested_type_conflict", "p0"){
             select * from ${table_name} order by k limit 1;
             """
         qt_sql_desc_1 """
-            desc ${table_name};
+            select variant_type(v) from ${table_name} order by k 
             """
         // now select for a, b, c
         sql_select_batch()
@@ -100,7 +101,7 @@ suite("variant_nested_type_conflict", "p0"){
             select * from ${table_name} order by k limit 1;
             """
         qt_sql_desc_2 """
-            desc ${table_name};
+            select variant_type(v) from ${table_name} order by k 
             """
         // now select for a, b, c
         sql_select_batch()
@@ -125,7 +126,7 @@ suite("variant_nested_type_conflict", "p0"){
             select * from ${table_name} order by k limit 1;
             """
         qt_sql_desc_4 """
-            desc ${table_name};
+		        select variant_type(v) from ${table_name} order by k 
             """
         // now select for a, b, c
         sql_select_batch()
@@ -140,7 +141,7 @@ suite("variant_nested_type_conflict", "p0"){
             select * from ${table_name} order by k limit 1;
             """
         qt_sql_desc_5 """
-            desc ${table_name};
+            select variant_type(v) from ${table_name} order by k 
             """
         // now select for a, b, c
         sql_select_batch()

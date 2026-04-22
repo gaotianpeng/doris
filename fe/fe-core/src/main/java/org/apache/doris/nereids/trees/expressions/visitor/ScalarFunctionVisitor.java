@@ -42,6 +42,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayExcept;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayExists;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFilter;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFirstIndex;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayFlatten;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayIntersect;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayJoin;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ArrayLastIndex;
@@ -136,7 +137,9 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.Cosh;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CosineDistance;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Cot;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CountEqual;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.CountSubstring;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Crc32;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.Crc32Internal;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CreateMap;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CreateNamedStruct;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.CreateStruct;
@@ -201,6 +204,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonBigInt
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonDouble;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonInt;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.GetJsonString;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.GetVariantType;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Greatest;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Hex;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.HllCardinality;
@@ -329,6 +333,7 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.MurmurHash364
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Negative;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.NextDay;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.NgramSearch;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.NonNullable;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.NormalCdf;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.NotNullOrEmpty;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.Now;
@@ -679,6 +684,10 @@ public interface ScalarFunctionVisitor<R, C> {
         return visitScalarFunction(arrayShuffle, context);
     }
 
+    default R visitArrayFlatten(ArrayFlatten arrayFlatten, C context) {
+        return visitScalarFunction(arrayFlatten, context);
+    }
+
     default R visitArrayMap(ArrayMap arraySort, C context) {
         return visitScalarFunction(arraySort, context);
     }
@@ -962,6 +971,10 @@ public interface ScalarFunctionVisitor<R, C> {
 
     default R visitCountEqual(CountEqual countequal, C context) {
         return visitScalarFunction(countequal, context);
+    }
+
+    default R visitCountSubstring(CountSubstring countSubstring, C context) {
+        return visitScalarFunction(countSubstring, context);
     }
 
     default R visitCurrentCatalog(CurrentCatalog currentCatalog, C context) {
@@ -1542,6 +1555,10 @@ public interface ScalarFunctionVisitor<R, C> {
 
     default R visitCrc32(Crc32 crc32, C context) {
         return visitScalarFunction(crc32, context);
+    }
+
+    default R visitCrc32Internal(Crc32Internal crc32Internal, C context) {
+        return visitScalarFunction(crc32Internal, context);
     }
 
     default R visitLike(Like like, C context) {
@@ -2362,5 +2379,13 @@ public interface ScalarFunctionVisitor<R, C> {
 
     default R visitLastQueryId(LastQueryId queryId, C context) {
         return visitScalarFunction(queryId, context);
+    }
+
+    default R visitGetVariantType(GetVariantType getVariantType, C context) {
+        return visitScalarFunction(getVariantType, context);
+    }
+
+    default R visitNonNullable(NonNullable nonNullable, C context) {
+        return visitScalarFunction(nonNullable, context);
     }
 }

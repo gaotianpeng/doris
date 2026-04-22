@@ -44,6 +44,7 @@ import org.apache.doris.task.StreamLoadTask;
 import org.apache.doris.thrift.TPipelineFragmentParams;
 import org.apache.doris.thrift.TStreamLoadPutRequest;
 import org.apache.doris.thrift.TStreamLoadPutResult;
+import org.apache.doris.thrift.TUniqueKeyUpdateMode;
 import org.apache.doris.transaction.TransactionState;
 
 import com.google.common.base.Preconditions;
@@ -91,7 +92,7 @@ public class StreamLoadHandler {
     public static Backend selectBackend(String clusterName) throws LoadException {
         List<Backend> backends = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
                 .getBackendsByClusterName(clusterName)
-                .stream().filter(Backend::isAlive)
+                .stream().filter(Backend::isLoadAvailable)
                 .collect(Collectors.toList());
 
         if (backends.isEmpty()) {
@@ -191,6 +192,9 @@ public class StreamLoadHandler {
                     throw new AnalysisException(msg);
                 }
             }
+            if (table.isTemporary()) {
+                throw new UserException("Do not support load for temporary table " + tableName);
+            }
             tables.add((OlapTable) table);
         }
 
@@ -257,7 +261,9 @@ public class StreamLoadHandler {
                     throw new UserException("txn does not exist: " + request.getTxnId());
                 }
                 txnState.addTableIndexes(table);
-                if (request.isPartialUpdate()) {
+                TUniqueKeyUpdateMode uniqueKeyUpdateMode = request.getUniqueKeyUpdateMode();
+                if (uniqueKeyUpdateMode == TUniqueKeyUpdateMode.UPDATE_FIXED_COLUMNS
+                        || uniqueKeyUpdateMode == TUniqueKeyUpdateMode.UPDATE_FLEXIBLE_COLUMNS) {
                     txnState.setSchemaForPartialUpdate(table);
                 }
             }

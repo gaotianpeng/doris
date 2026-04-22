@@ -19,6 +19,7 @@ package org.apache.doris.mysql.privilege;
 
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.persist.gson.GsonPostProcessable;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.resource.Tag;
@@ -66,8 +67,17 @@ public class CommonUserProperties implements Writable, GsonPostProcessable {
     @SerializedName(value = "it", alternate = {"insertTimeout"})
     private int insertTimeout = -1;
 
+    @SerializedName(value = "ic")
+    private String initCatalog = InternalCatalog.INTERNAL_CATALOG_NAME;
+
     @SerializedName(value = "wg", alternate = {"workloadGroup"})
     private String workloadGroup = WorkloadGroupMgr.DEFAULT_GROUP_NAME;
+
+    @SerializedName(value = "epcr", alternate = {"enablePreferCachedRowset"})
+    private boolean enablePreferCachedRowset = false;
+
+    @SerializedName(value = "qft", alternate = {"queryFreshnessTolerance"})
+    private long queryFreshnessToleranceMs = -1;
 
     private String[] sqlBlockRulesSplit = {};
 
@@ -142,9 +152,6 @@ public class CommonUserProperties implements Writable, GsonPostProcessable {
     }
 
     public void setQueryTimeout(int timeout) {
-        if (timeout <= 0) {
-            LOG.warn("Setting 0 query timeout", new RuntimeException(""));
-        }
         this.queryTimeout = timeout;
     }
 
@@ -154,6 +161,14 @@ public class CommonUserProperties implements Writable, GsonPostProcessable {
 
     public void setInsertTimeout(int insertTimeout) {
         this.insertTimeout = insertTimeout;
+    }
+
+    public String getInitCatalog() {
+        return initCatalog;
+    }
+
+    public void setInitCatalog(String initCatalog) {
+        this.initCatalog = initCatalog;
     }
 
     public String getWorkloadGroup() {
@@ -175,6 +190,22 @@ public class CommonUserProperties implements Writable, GsonPostProcessable {
     public void write(DataOutput out) throws IOException {
         String json = GsonUtils.GSON.toJson(this);
         Text.writeString(out, json);
+    }
+
+    public long getQueryFreshnessToleranceMs() {
+        return queryFreshnessToleranceMs;
+    }
+
+    public void setQueryFreshnessToleranceMs(long queryFreshnessToleranceMs) {
+        this.queryFreshnessToleranceMs = queryFreshnessToleranceMs;
+    }
+
+    public boolean getEnablePreferCachedRowset() {
+        return enablePreferCachedRowset;
+    }
+
+    public void setEnablePreferCachedRowset(boolean enablePreferCachedRowset) {
+        this.enablePreferCachedRowset = enablePreferCachedRowset;
     }
 
     @Override

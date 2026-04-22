@@ -125,8 +125,8 @@ public class LogicalPlanDeepCopier extends DefaultPlanRewriter<DeepCopierContext
     public Plan visitLogicalApply(LogicalApply<? extends Plan, ? extends Plan> apply, DeepCopierContext context) {
         Plan left = apply.left().accept(this, context);
         Plan right = apply.right().accept(this, context);
-        List<Expression> correlationSlot = apply.getCorrelationSlot().stream()
-                .map(s -> ExpressionDeepCopier.INSTANCE.deepCopy(s, context))
+        List<Slot> correlationSlot = apply.getCorrelationSlot().stream()
+                .map(s -> (Slot) ExpressionDeepCopier.INSTANCE.deepCopy(s, context))
                 .collect(ImmutableList.toImmutableList());
         Optional<Expression> compareExpr = apply.getCompareExpr()
                 .map(f -> ExpressionDeepCopier.INSTANCE.deepCopy(f, context));
@@ -138,7 +138,7 @@ public class LogicalPlanDeepCopier extends DefaultPlanRewriter<DeepCopierContext
                 .map(m -> (MarkJoinSlotReference) ExpressionDeepCopier.INSTANCE.deepCopy(m, context));
         return new LogicalApply<>(correlationSlot, apply.getSubqueryType(), apply.isNot(),
                 compareExpr, typeCoercionExpr, correlationFilter,
-                markJoinSlotReference, apply.isNeedAddSubOutputToProjects(), apply.isInProject(),
+                markJoinSlotReference, apply.isNeedAddSubOutputToProjects(),
                 apply.isMarkJoinSlotNotNull(), left, right);
     }
 
@@ -151,7 +151,13 @@ public class LogicalPlanDeepCopier extends DefaultPlanRewriter<DeepCopierContext
         List<NamedExpression> outputExpressions = aggregate.getOutputExpressions().stream()
                 .map(o -> (NamedExpression) ExpressionDeepCopier.INSTANCE.deepCopy(o, context))
                 .collect(ImmutableList.toImmutableList());
-        return aggregate.withChildGroupByAndOutput(groupByExpressions, outputExpressions, child);
+        LogicalAggregate<Plan> copiedAggregate = aggregate.withChildGroupByAndOutput(groupByExpressions,
+                outputExpressions, child);
+        Optional<LogicalRepeat<?>> childRepeat =
+                copiedAggregate.collectFirst(LogicalRepeat.class::isInstance);
+        return childRepeat.isPresent() ? aggregate.withChildGroupByAndOutputAndSourceRepeat(
+                groupByExpressions, outputExpressions, child, childRepeat)
+                : aggregate.withChildGroupByAndOutput(groupByExpressions, outputExpressions, child);
     }
 
     @Override

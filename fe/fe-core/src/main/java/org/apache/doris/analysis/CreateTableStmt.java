@@ -17,7 +17,6 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.analysis.IndexDef.IndexType;
 import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.DistributionInfo;
@@ -27,6 +26,8 @@ import org.apache.doris.catalog.Index;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
+import org.apache.doris.catalog.VariantField;
+import org.apache.doris.catalog.VariantType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
@@ -54,7 +55,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -69,7 +70,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.stream.Collectors;
 
 @Deprecated
 public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
@@ -81,6 +81,7 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
 
     protected boolean ifNotExists;
     private boolean isExternal;
+    private boolean isTemp;
     protected TableName tableName;
     protected List<ColumnDef> columnDefs;
     private List<IndexDef> indexDefs;
@@ -98,6 +99,9 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
     // set in analyze
     private List<Column> columns = Lists.newArrayList();
     private List<Index> indexes = Lists.newArrayList();
+
+    // set in analyze
+    private Map<Column, List<IndexDef>> columnToIndexes = Maps.newHashMap();
 
     static {
         engineNames = Sets.newHashSet();
@@ -188,12 +192,14 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
     }
 
     // for Nereids
-    public CreateTableStmt(boolean ifNotExists, boolean isExternal, TableName tableName, List<Column> columns,
-            List<Index> indexes, String engineName, KeysDesc keysDesc, PartitionDesc partitionDesc,
-            DistributionDesc distributionDesc, Map<String, String> properties, Map<String, String> extProperties,
-            String comment, List<AlterClause> rollupAlterClauseList, Void unused) {
+    public CreateTableStmt(boolean ifNotExists, boolean isExternal, boolean isTemp, TableName tableName,
+            List<Column> columns, List<Index> indexes, String engineName, KeysDesc keysDesc,
+            PartitionDesc partitionDesc, DistributionDesc distributionDesc, Map<String, String> properties,
+            Map<String, String> extProperties, String comment,
+            List<AlterClause> rollupAlterClauseList, Void unused) {
         this.ifNotExists = ifNotExists;
         this.isExternal = isExternal;
+        this.isTemp = isTemp;
         this.tableName = tableName;
         this.columns = columns;
         this.indexes = indexes;
@@ -223,6 +229,14 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
 
     public boolean isExternal() {
         return isExternal;
+    }
+
+    public boolean isTemp() {
+        return isTemp;
+    }
+
+    public void setTemp(boolean temp) {
+        isTemp = temp;
     }
 
     public TableName getDbTbl() {
@@ -297,6 +311,9 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
         if (Strings.isNullOrEmpty(engineName) || engineName.equalsIgnoreCase(DEFAULT_ENGINE_NAME)) {
             this.properties = maybeRewriteByAutoBucket(distributionDesc, properties);
         }
+        if (isTemp && !engineName.equalsIgnoreCase(DEFAULT_ENGINE_NAME)) {
+            throw new AnalysisException("Temporary table should be OLAP table");
+        }
 
         super.analyze(analyzer);
         tableName.analyze(analyzer);
@@ -340,6 +357,7 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
         }
 
         boolean enableUniqueKeyMergeOnWrite = false;
+        boolean enableSkipBitmapColumn = false;
         // analyze key desc
         if (engineName.equalsIgnoreCase(DEFAULT_ENGINE_NAME)) {
             // olap table
@@ -416,6 +434,24 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
                 }
             }
 
+            if (properties != null) {
+                if (properties.containsKey(PropertyAnalyzer.ENABLE_UNIQUE_KEY_SKIP_BITMAP_COLUMN)
+                        && !(keysDesc.getKeysType() == KeysType.UNIQUE_KEYS && enableUniqueKeyMergeOnWrite)) {
+                    throw new AnalysisException("tablet property enable_unique_key_skip_bitmap_column can"
+                            + "only be set in merge-on-write unique table.");
+                }
+                // the merge-on-write table must have enable_unique_key_skip_bitmap_column table property
+                // and its value should be consistent with whether the table's full schema contains
+                // the skip bitmap hidden column
+                if (keysDesc.getKeysType() == KeysType.UNIQUE_KEYS && enableUniqueKeyMergeOnWrite) {
+                    properties = PropertyAnalyzer.addEnableUniqueKeySkipBitmapPropertyIfNotExists(properties);
+                    // `analyzeXXX` would modify `properties`, which will be used later,
+                    // so we just clone a properties map here.
+                    enableSkipBitmapColumn = PropertyAnalyzer.analyzeUniqueKeySkipBitmapColumn(
+                                new HashMap<>(properties));
+                }
+            }
+
             keysDesc.analyze(columnDefs);
             if (!CollectionUtils.isEmpty(keysDesc.getClusterKeysColumnNames())) {
                 if (!enableUniqueKeyMergeOnWrite) {
@@ -483,6 +519,13 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
             } else {
                 columnDefs.add(ColumnDef.newVersionColumnDef(AggregateType.REPLACE));
             }
+        }
+        if (enableSkipBitmapColumn && keysDesc != null
+                && keysDesc.getKeysType() == KeysType.UNIQUE_KEYS) {
+            if (enableUniqueKeyMergeOnWrite) {
+                columnDefs.add(ColumnDef.newSkipBitmapColumnDef(AggregateType.NONE));
+            }
+            // TODO(bobhan1): add support for mor table
         }
 
         Set<String> columnSet = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
@@ -568,7 +611,6 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
 
         if (CollectionUtils.isNotEmpty(indexDefs)) {
             Set<String> distinct = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-            Set<Pair<IndexType, List<String>>> distinctCol = new HashSet<>();
             TInvertedIndexFileStorageFormat invertedIndexFileStorageFormat = PropertyAnalyzer
                     .analyzeInvertedIndexFileStorageFormat(new HashMap<>(properties));
 
@@ -586,6 +628,7 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
                                     enableUniqueKeyMergeOnWrite,
                                     invertedIndexFileStorageFormat);
                             found = true;
+                            columnToIndexes.computeIfAbsent(column, k -> new ArrayList<>()).add(indexDef);
                             break;
                         }
                     }
@@ -596,16 +639,12 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
                 indexes.add(new Index(Env.getCurrentEnv().getNextId(), indexDef.getIndexName(), indexDef.getColumns(),
                         indexDef.getIndexType(), indexDef.getProperties(), indexDef.getComment()));
                 distinct.add(indexDef.getIndexName());
-                distinctCol.add(Pair.of(indexDef.getIndexType(),
-                        indexDef.getColumns().stream().map(String::toUpperCase).collect(Collectors.toList())));
             }
             if (distinct.size() != indexes.size()) {
                 throw new AnalysisException("index name must be unique.");
             }
-            if (distinctCol.size() != indexes.size()) {
-                throw new AnalysisException("same index columns have multiple same type index is not allowed.");
-            }
         }
+        columnToIndexesCheck();
         generatedColumnCheck(analyzer);
     }
 
@@ -654,6 +693,9 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
         StringBuilder sb = new StringBuilder();
 
         sb.append("CREATE ");
+        if (isTemp) {
+            sb.append("TEMPORARY ");
+        }
         if (isExternal) {
             sb.append("EXTERNAL ");
         }
@@ -734,6 +776,62 @@ public class CreateTableStmt extends DdlStmt implements NotFallbackInParser {
     @Override
     public boolean needAuditEncryption() {
         return !engineName.equals("olap");
+    }
+
+    // 1. if the column is variant type, check it's field pattern is valid
+    // 2. if the column is not variant type, check it's index def is valid
+    private void columnToIndexesCheck() throws AnalysisException {
+        for (Map.Entry<Column, List<IndexDef>> entry : columnToIndexes.entrySet()) {
+            Column column = entry.getKey();
+            List<IndexDef> indexDefs = entry.getValue();
+            if (column.getType().isVariantType()) {
+                int variantIndex = 0;
+                for (IndexDef indexDef : indexDefs) {
+                    if (indexDef.getIndexType() != IndexDef.IndexType.INVERTED) {
+                        throw new AnalysisException("column:" + column.getName() + " can only have inverted index.");
+                    }
+                    String fieldPattern = InvertedIndexUtil.getInvertedIndexFieldPattern(indexDef.getProperties());
+                    if (fieldPattern.isEmpty()) {
+                        ++variantIndex;
+                        continue;
+                    }
+                    boolean findFieldPattern = false;
+                    boolean fieldSupportedIndex = false;
+                    VariantType variantType = (VariantType) column.getType();
+                    for (VariantField field : variantType.getPredefinedFields()) {
+                        if (field.getPattern().equals(fieldPattern)) {
+                            findFieldPattern = true;
+                            fieldSupportedIndex = IndexDef.isSupportIdxType(field.getType());
+                            break;
+                        }
+                    }
+                    if (!findFieldPattern) {
+                        throw new AnalysisException("can not find field pattern: "
+                                                + fieldPattern + " in variant column: " + column.getName());
+                    }
+                    if (!fieldSupportedIndex) {
+                        throw new AnalysisException("field pattern: "
+                                + fieldPattern + " is not supported for inverted index"
+                                + " of column: " + column.getName());
+                    }
+                }
+                if (variantIndex > 1) {
+                    throw new AnalysisException("variant column: " + column.getName()
+                                                + " can only have one inverted index without field pattern.");
+                }
+            } else {
+                if (indexes == null || indexDefs.isEmpty()) {
+                    return;
+                }
+                if (indexDefs.size() > 1) {
+                    throw new AnalysisException("column: " + column.getName() + " can only have one index.");
+                }
+                IndexDef indexDef = indexDefs.get(0);
+                if (!InvertedIndexUtil.getInvertedIndexFieldPattern(indexDef.getProperties()).isEmpty()) {
+                    throw new AnalysisException("column: " + column.getName() + " can not have field pattern.");
+                }
+            }
+        }
     }
 
     private void generatedColumnCheck(Analyzer analyzer) throws AnalysisException {

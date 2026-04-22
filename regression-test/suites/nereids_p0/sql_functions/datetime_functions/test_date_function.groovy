@@ -347,7 +347,6 @@ suite("test_date_function") {
     qt_sql """ SELECT MONTH_CEIL(CAST('2020-02-02 13:09:20' AS DATETIME), 3, CAST('1970-01-09 00:00:00' AS DATETIME)) """
 
     // TIMEDIFF
-    qt_sql """ SELECT TIMEDIFF(now(),utc_timestamp()) """
     qt_sql """ SELECT TIMEDIFF('2019-07-11 16:59:30','2019-07-11 16:59:21') """
     qt_sql """ SELECT TIMEDIFF('2019-01-01 00:00:00', NULL) """
 
@@ -387,8 +386,13 @@ suite("test_date_function") {
     qt_sql_ustamp7 """ select unix_timestamp(cast('2007-11-30 10:30:19.123456' as datetimev2(4))) """
     qt_sql_ustamp8 """ SELECT UNIX_TIMESTAMP('9999-12-30 23:59:59.999'); """
     qt_sql_ustamp9 """ SELECT UNIX_TIMESTAMP('9999-12-30 23:59:59'); """
-    testFoldConst("SELECT UNIX_TIMESTAMP('9999-12-30 23:59:59.999');")
-    testFoldConst("SELECT UNIX_TIMESTAMP('9999-12-30 23:59:59');")
+    qt_sql_ustamp10 """ select UNIX_TIMESTAMP('2015-11-13 10:20:19.000010'); """
+    qt_sql_ustamp11 """ select UNIX_TIMESTAMP(cast('2015-11-13 10:20:19.012' as datetime(6))); """
+    check_fold_consistency(" UNIX_TIMESTAMP('9999-12-30 23:59:59.999')")
+    check_fold_consistency(" UNIX_TIMESTAMP('9999-12-30 23:59:59')")
+    check_fold_consistency(" UNIX_TIMESTAMP('2015-11-13 10:20:19.000010')")
+    // check_fold_consistency(" UNIX_TIMESTAMP(cast('2015-11-13 10:20:19.000' as datetime(6)))")
+    check_fold_consistency(" UNIX_TIMESTAMP(cast('2015-11-13 10:20:19.012' as datetime(6)))")
 
     // UTC_TIMESTAMP
     def utc_timestamp_str = sql """ select utc_timestamp(),utc_timestamp() + 1 """

@@ -58,6 +58,7 @@ import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.proto.OlapCommon;
 import org.apache.doris.proto.OlapFile;
+import org.apache.doris.proto.OlapFile.EncryptionAlgorithmPB;
 import org.apache.doris.proto.Types;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.rpc.RpcException;
@@ -177,7 +178,8 @@ public class CloudInternalCatalog extends InternalCatalog {
                         tbl.getInvertedIndexFileStorageFormat(),
                         tbl.rowStorePageSize(),
                         tbl.variantEnableFlattenNested(),
-                        tbl.storagePageSize());
+                        tbl.storagePageSize(), tbl.getTDEAlgorithmPB(),
+                        tbl.storageDictPageSize(), true);
                 requestBuilder.addTabletMetas(builder);
             }
             requestBuilder.setDbId(dbId);
@@ -209,7 +211,8 @@ public class CloudInternalCatalog extends InternalCatalog {
             Long timeSeriesCompactionLevelThreshold, boolean disableAutoCompaction,
             List<Integer> rowStoreColumnUniqueIds, boolean enableMowLightDelete,
             TInvertedIndexFileStorageFormat invertedIndexFileStorageFormat, long pageSize,
-            boolean variantEnableFlattenNested, long storagePageSize) throws DdlException {
+            boolean variantEnableFlattenNested, long storagePageSize, EncryptionAlgorithmPB encryptionAlgorithm,
+            long storageDictPageSize, boolean createInitialRowset) throws DdlException {
         OlapFile.TabletMetaCloudPB.Builder builder = OlapFile.TabletMetaCloudPB.newBuilder();
         builder.setTableId(tableId);
         builder.setIndexId(indexId);
@@ -335,26 +338,36 @@ public class CloudInternalCatalog extends InternalCatalog {
         if (invertedIndexFileStorageFormat != null) {
             if (invertedIndexFileStorageFormat == TInvertedIndexFileStorageFormat.V1) {
                 schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V1);
+            } else if (invertedIndexFileStorageFormat == TInvertedIndexFileStorageFormat.V2) {
+                schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V2);
+            } else if (invertedIndexFileStorageFormat == TInvertedIndexFileStorageFormat.V3) {
+                schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V3);
             } else if (invertedIndexFileStorageFormat == TInvertedIndexFileStorageFormat.DEFAULT) {
                 if (Config.inverted_index_storage_format.equalsIgnoreCase("V1")) {
                     schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V1);
+                } else if (Config.inverted_index_storage_format.equalsIgnoreCase("V3")) {
+                    schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V3);
                 } else {
                     schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V2);
                 }
             } else {
-                schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V2);
+                throw new DdlException("invalid inverted index storage format");
             }
         }
         schemaBuilder.setRowStorePageSize(pageSize);
         schemaBuilder.setStoragePageSize(storagePageSize);
+        schemaBuilder.setStorageDictPageSize(storageDictPageSize);
         schemaBuilder.setEnableVariantFlattenNested(variantEnableFlattenNested);
 
         OlapFile.TabletSchemaCloudPB schema = schemaBuilder.build();
         builder.setSchema(schema);
-        // rowset
-        OlapFile.RowsetMetaCloudPB.Builder rowsetBuilder = createInitialRowset(tablet, partitionId,
-                schemaHash, schema);
-        builder.addRsMetas(rowsetBuilder);
+        if (createInitialRowset) {
+            // rowset
+            OlapFile.RowsetMetaCloudPB.Builder rowsetBuilder = createInitialRowset(tablet, partitionId,
+                    schemaHash, schema);
+            builder.addRsMetas(rowsetBuilder);
+            builder.setEncryptionAlgorithm(encryptionAlgorithm);
+        }
         return builder;
     }
 
@@ -412,7 +425,7 @@ public class CloudInternalCatalog extends InternalCatalog {
         if (partitionIds == null) {
             prepareMaterializedIndex(tableId, indexIds, 0);
         } else {
-            preparePartition(dbId, tableId, partitionIds, indexIds);
+            preparePartition(dbId, tableId, partitionIds, indexIds, null);
         }
     }
 
@@ -440,7 +453,8 @@ public class CloudInternalCatalog extends InternalCatalog {
         }
     }
 
-    private void preparePartition(long dbId, long tableId, List<Long> partitionIds, List<Long> indexIds)
+    public void preparePartition(long dbId, long tableId, List<Long> partitionIds, List<Long> indexIds,
+                                 List<Long> partitionVersions)
             throws DdlException {
         if (Config.enable_check_compatibility_mode) {
             LOG.info("skip prepare partition in checking compatibility mode");
@@ -453,6 +467,10 @@ public class CloudInternalCatalog extends InternalCatalog {
         partitionRequestBuilder.addAllPartitionIds(partitionIds);
         partitionRequestBuilder.addAllIndexIds(indexIds);
         partitionRequestBuilder.setExpiration(0);
+        if (partitionVersions != null) {
+            Preconditions.checkState(partitionIds.size() == partitionVersions.size());
+            partitionRequestBuilder.addAllPartitionVersions(partitionVersions);
+        }
         if (dbId > 0) {
             partitionRequestBuilder.setDbId(dbId);
         }
@@ -481,7 +499,7 @@ public class CloudInternalCatalog extends InternalCatalog {
         }
     }
 
-    private void commitPartition(long dbId, long tableId, List<Long> partitionIds, List<Long> indexIds)
+    public void commitPartition(long dbId, long tableId, List<Long> partitionIds, List<Long> indexIds)
             throws DdlException {
         if (Config.enable_check_compatibility_mode) {
             LOG.info("skip committing partitions in check compatibility mode");
@@ -802,7 +820,7 @@ public class CloudInternalCatalog extends InternalCatalog {
         }
     }
 
-    private void dropCloudPartition(long dbId, long tableId, List<Long> partitionIds, List<Long> indexIds,
+    public void dropCloudPartition(long dbId, long tableId, List<Long> partitionIds, List<Long> indexIds,
                                     boolean needUpdateTableVersion) throws DdlException {
         if (Config.enable_check_compatibility_mode) {
             LOG.info("skip dropping cloud partitions in checking compatibility mode");
@@ -1002,25 +1020,27 @@ public class CloudInternalCatalog extends InternalCatalog {
             LOG.warn("replay update cloud replica, unknown table {}", info.toString());
             return;
         }
+        LOG.debug("replay update a cloud replica {}", info);
 
-        olapTable.writeLock();
         try {
             unprotectUpdateCloudReplica(olapTable, info);
         } catch (Exception e) {
             LOG.warn("unexpected exception", e);
-        } finally {
-            olapTable.writeUnlock();
         }
     }
 
     private void unprotectUpdateCloudReplica(OlapTable olapTable, UpdateCloudReplicaInfo info) {
-        LOG.debug("replay update a cloud replica {}", info);
         Partition partition = olapTable.getPartition(info.getPartitionId());
         if (partition == null) {
             LOG.warn("replay update cloud replica, unknown partition {}, may be dropped", info.toString());
             return;
         }
+
         MaterializedIndex materializedIndex = partition.getIndex(info.getIndexId());
+        if (materializedIndex == null) {
+            LOG.warn("replay update cloud replica, unknown index {}, may be dropped", info.toString());
+            return;
+        }
 
         try {
             if (info.getTabletId() != -1) {

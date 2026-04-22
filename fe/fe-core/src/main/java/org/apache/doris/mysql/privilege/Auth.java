@@ -76,7 +76,7 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -1064,6 +1064,10 @@ public class Auth implements Writable {
         dropRoleInternal(stmt.getRole(), stmt.isSetIfExists(), false);
     }
 
+    public void dropRole(String role, boolean ignoreIfNonExists) throws DdlException {
+        dropRoleInternal(role, ignoreIfNonExists, false);
+    }
+
     public void replayDropRole(PrivInfo info) {
         try {
             dropRoleInternal(info.getRole(), false, true);
@@ -1217,6 +1221,15 @@ public class Auth implements Writable {
         }
     }
 
+    public String getInitCatalog(String qualifiedUser) {
+        readLock();
+        try {
+            return propertyMgr.getInitCatalog(qualifiedUser);
+        } finally {
+            readUnlock();
+        }
+    }
+
     public String getWorkloadGroup(String qualifiedUser) {
         readLock();
         try {
@@ -1230,6 +1243,24 @@ public class Auth implements Writable {
         readLock();
         try {
             return propertyMgr.isWorkloadGroupInUse(groupName);
+        } finally {
+            readUnlock();
+        }
+    }
+
+    public boolean getEnablePreferCachedRowset(String qualifiedUser) {
+        readLock();
+        try {
+            return propertyMgr.getEnablePreferCachedRowset(qualifiedUser);
+        } finally {
+            readUnlock();
+        }
+    }
+
+    public long getQueryFreshnessToleranceMs(String qualifiedUser) {
+        readLock();
+        try {
+            return propertyMgr.getQueryFreshnessToleranceMs(qualifiedUser);
         } finally {
             readUnlock();
         }

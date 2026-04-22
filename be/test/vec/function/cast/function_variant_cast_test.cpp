@@ -340,7 +340,7 @@ TEST(FunctionVariantCast, CastFromVariantWithEmptyRoot) {
         dynamic_subcolumns.add(
                 vectorized::PathInData(ColumnObject::COLUMN_NAME_DUMMY),
                 vectorized::ColumnObject::Subcolumn {root->get_ptr(), int32_type, true, true});
-        auto variant_col = ColumnObject::create(std::move(dynamic_subcolumns), true);
+        auto variant_col = ColumnObject::create(0, std::move(dynamic_subcolumns));
 
         variant_col->finalize();
         ColumnsWithTypeAndName arguments {{variant_col->get_ptr(), variant_type, "variant_col"},
