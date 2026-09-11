@@ -127,6 +127,19 @@ function copy_common_files() {
     cp -r -p "${DORIS_HOME}/dist/licenses" "$1/"
 }
 
+# Copy a file/directory to the destination only when it does not already
+# exist there, so user-modified config files survive rebuilds.
+# NOTE: callers must pass dst_dir with a trailing slash.
+function copy_if_absent() {
+    local src=$1
+    local dst_dir=$2
+    local fname
+    fname="$(basename "${src}")"
+    if [[ ! -e "${dst_dir}${fname}" ]]; then
+        cp -r -p "${src}" "${dst_dir}"
+    fi
+}
+
 if ! OPTS="$(getopt \
     -n "$0" \
     -o '' \
@@ -781,9 +794,10 @@ if [[ "${BUILD_FE}" -eq 1 ]]; then
         "${DORIS_OUTPUT}/fe/webroot" "${DORIS_OUTPUT}/fe/lib"
 
     cp -r -p "${DORIS_HOME}/bin"/*_fe.sh "${DORIS_OUTPUT}/fe/bin"/
-    cp -r -p "${DORIS_HOME}/conf/fe.conf" "${DORIS_OUTPUT}/fe/conf"/
-    cp -r -p "${DORIS_HOME}/conf/ldap.conf" "${DORIS_OUTPUT}/fe/conf"/
-    cp -r -p "${DORIS_HOME}/conf/mysql_ssl_default_certificate" "${DORIS_OUTPUT}/fe/"/
+    # Config files: never overwrite user-modified ones on rebuild.
+    copy_if_absent "${DORIS_HOME}/conf/fe.conf" "${DORIS_OUTPUT}/fe/conf"/
+    copy_if_absent "${DORIS_HOME}/conf/ldap.conf" "${DORIS_OUTPUT}/fe/conf"/
+    copy_if_absent "${DORIS_HOME}/conf/mysql_ssl_default_certificate" "${DORIS_OUTPUT}/fe/"/
     rm -rf "${DORIS_OUTPUT}/fe/lib"/*
     install -d "${DORIS_OUTPUT}/fe/lib/jindofs"
     cp -r -p "${DORIS_HOME}/fe/fe-core/target/lib"/* "${DORIS_OUTPUT}/fe/lib"/
@@ -838,7 +852,10 @@ if [[ "${OUTPUT_BE_BINARY}" -eq 1 ]]; then
         "${DORIS_OUTPUT}/be/tools/FlameGraph"
 
     cp -r -p "${DORIS_HOME}/bin"/*_be.sh "${DORIS_OUTPUT}/be/bin"/
-    cp -r -p "${DORIS_HOME}/be/output/conf"/* "${DORIS_OUTPUT}/be/conf"/
+    # Config files: never overwrite user-modified ones on rebuild.
+    for f in "${DORIS_HOME}"/be/output/conf/*; do
+        copy_if_absent "${f}" "${DORIS_OUTPUT}/be/conf"/
+    done
     cp -r -p "${DORIS_HOME}/be/output/dict" "${DORIS_OUTPUT}/be/"
 
     if [[ -d "${DORIS_THIRDPARTY}/installed/lib/hadoop_hdfs/" ]]; then

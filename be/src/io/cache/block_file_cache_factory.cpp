@@ -31,7 +31,9 @@
 #endif
 
 #include <algorithm>
+#if defined(__cpp_lib_parallel_algorithm)
 #include <execution>
+#endif
 #include <ostream>
 #include <utility>
 
@@ -207,11 +209,21 @@ FileCacheFactory::get_query_context_holders(const TUniqueId& query_id) {
 std::string FileCacheFactory::clear_file_caches(bool sync) {
     std::vector<std::string> results(_caches.size());
 
+#if defined(__cpp_lib_parallel_algorithm)
     std::for_each(std::execution::par, _caches.begin(), _caches.end(), [&](const auto& cache) {
         size_t index = &cache - &_caches[0];
         results[index] =
                 sync ? cache->clear_file_cache_directly() : cache->clear_file_cache_async();
     });
+#else
+    // libc++ (macOS) does not implement parallel algorithms (no
+    // std::execution::par); a serial loop is semantically equivalent here,
+    // the number of caches is small.
+    for (size_t i = 0; i < _caches.size(); ++i) {
+        results[i] = sync ? _caches[i]->clear_file_cache_directly()
+                          : _caches[i]->clear_file_cache_async();
+    }
+#endif
 
     std::stringstream ss;
     for (const auto& result : results) {

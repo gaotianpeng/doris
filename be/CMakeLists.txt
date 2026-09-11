@@ -324,6 +324,36 @@ if (COMPILER_CLANG)
         add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
         add_definitions(-DUSE_LIBCPP)
     endif()
+
+    # Newer Apple clang/libc++ (Xcode 26+) marks std type traits as
+    # non-specializable, but Doris specializes std::is_signed/std::make_unsigned
+    # etc. for UInt128/Int256 (vec/common/uint128.h, vec/core/extended_types.h).
+    # Newer clang also errors on virtual methods declared in final classes.
+    # Suppress both diagnostics on compilers that support them.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-Wno-invalid-specialization" CC_HAS_WNO_INVALID_SPECIALIZATION)
+    if (CC_HAS_WNO_INVALID_SPECIALIZATION)
+        add_compile_options(-Wno-invalid-specialization)
+    endif()
+    check_cxx_compiler_flag("-Wno-unnecessary-virtual-specifier" CC_HAS_WNO_UNNECESSARY_VIRTUAL_SPECIFIER)
+    if (CC_HAS_WNO_UNNECESSARY_VIRTUAL_SPECIFIER)
+        add_compile_options(-Wno-unnecessary-virtual-specifier)
+    endif()
+    # clang 21 flags memset()/memcpy() on classes that declare constructors
+    # (non-trivially-copyable), e.g. gutil/strings/charset.cc and
+    # vec/runtime/vdatetime_value.h. These are plain data layouts without
+    # virtual members, so the calls are safe in practice.
+    check_cxx_compiler_flag("-Wno-nontrivial-memcall" CC_HAS_WNO_NONTRIVIAL_MEMCALL)
+    if (CC_HAS_WNO_NONTRIVIAL_MEMCALL)
+        add_compile_options(-Wno-nontrivial-memcall)
+    endif()
+    # clang 21 requires an explicit template argument list after the
+    # "template" keyword (e.g. sorter->template sort_column(...) in
+    # vec/columns/*.cpp, .template contains(...) in exchange_sink_buffer.cpp).
+    check_cxx_compiler_flag("-Wno-missing-template-arg-list-after-template-kw" CC_HAS_WNO_MISSING_TEMPLATE_ARG_LIST)
+    if (CC_HAS_WNO_MISSING_TEMPLATE_ARG_LIST)
+        add_compile_options(-Wno-missing-template-arg-list-after-template-kw)
+    endif()
 endif ()
 
 add_definitions(-D__STDC_FORMAT_MACROS
